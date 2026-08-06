@@ -43,6 +43,57 @@ impl Files {
         self.root.join(id).join(version.to_string())
     }
 
+    /// Write a version's files, once.
+    ///
+    /// Into a temporary sibling and then renamed, so a reader never sees a
+    /// half-written version and a failure part-way leaves no partial one —
+    /// the same rule the home store follows, and it matters more here because
+    /// the thing that might read it mid-write is the internet.
+    ///
+    /// An existing version directory is an error rather than an overwrite. It
+    /// cannot happen through the API (the ledger's primary key refuses it
+    /// first), and if it ever did it would mean a published version was about
+    /// to change underneath a URL that promised it could not.
+    pub fn install(&self, id: &str, version: u32, files: &[(String, Vec<u8>)]) -> Result<PathBuf> {
+        let target = self.version_dir(id, version);
+        if target.exists() {
+            anyhow::bail!(
+                "{} already exists; a version is written once and never rewritten",
+                target.display()
+            );
+        }
+        let staging = self.root.join(id).join(format!(".staging-{version}"));
+        let _ = std::fs::remove_dir_all(&staging);
+        for (relative, bytes) in files {
+            // Containment again, because a path that survived the unpacker is
+            // still a path this process is about to write — the one check
+            // between "we validated it" and "we wrote it".
+            //
+            // Built from components rather than checked with `starts_with`,
+            // which is **lexical**: `<staging>/../escape.html` starts with
+            // `<staging>` by that test and lands one directory up. A test
+            // caught exactly that here, which is the argument for the test.
+            let mut path = staging.clone();
+            for part in std::path::Path::new(relative).components() {
+                match part {
+                    std::path::Component::Normal(name) => path.push(name),
+                    std::path::Component::CurDir => {}
+                    _ => {
+                        let _ = std::fs::remove_dir_all(&staging);
+                        anyhow::bail!("`{relative}` would be written outside the bundle");
+                    }
+                }
+            }
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, bytes)?;
+        }
+        std::fs::rename(&staging, &target)
+            .with_context(|| format!("installing version {version} of {id}"))?;
+        Ok(target)
+    }
+
     /// The file a request names inside one version, or nothing.
     ///
     /// `path` is the remainder after `/b/<id>/v/<n>/`, already percent-decoded
@@ -131,6 +182,37 @@ mod tests {
         }
         // Not vacuous: the file it was reaching for is really there.
         assert!(dir.path().join("secret.txt").is_file());
+    }
+
+    #[test]
+    fn a_version_is_installed_once_and_never_rewritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Files::new(dir.path().join("bundles")).unwrap();
+        let content = vec![
+            ("index.html".to_string(), b"<h1>Monday</h1>".to_vec()),
+            ("assets/app.js".to_string(), b"console.log(1)".to_vec()),
+        ];
+        files.install("brief", 1, &content).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(files.resolve("brief", 1, "").unwrap()).unwrap(),
+            "<h1>Monday</h1>"
+        );
+
+        let err = files.install("brief", 1, &content).unwrap_err().to_string();
+        assert!(err.contains("never rewritten"), "{err}");
+    }
+
+    /// A failure part-way must leave no partial version, because the thing that
+    /// might read one mid-write is the internet.
+    #[test]
+    fn a_staging_directory_is_never_visible_as_a_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Files::new(dir.path().join("bundles")).unwrap();
+        // A path that survived validation but would still write outside.
+        let content = vec![("../escape.html".to_string(), b"x".to_vec())];
+        assert!(files.install("brief", 1, &content).is_err());
+        assert!(!files.version_dir("brief", 1).exists());
+        assert!(!files.root().join("brief/.staging-1").exists());
     }
 
     /// A symlink planted inside a published bundle would otherwise serve bytes

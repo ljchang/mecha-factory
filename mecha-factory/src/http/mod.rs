@@ -25,7 +25,7 @@ use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use mecha_manifest::ContentClass;
 use std::net::SocketAddr;
@@ -73,6 +73,21 @@ pub fn router(app: Shared) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/v1/health", get(v1::health))
+        .route("/v1/types", get(v1::list_types))
+        .route("/v1/types/{id}", get(v1::get_type).put(v1::put_type))
+        .route(
+            "/v1/bundles",
+            // The body limit is the configured bundle cap rather than axum's
+            // default 2 MB, which a vendored Pyodide tree passes on the way out
+            // the door. It is set on this route alone: every other endpoint
+            // takes a small JSON body and has no reason to accept more.
+            post(v1::publish).layer(axum::extract::DefaultBodyLimit::max(
+                app.config.limits.max_bundle_bytes as usize,
+            )),
+        )
+        .route("/v1/bundles/{id}/alias", post(v1::alias))
+        .route("/v1/queue", get(v1::drain))
+        .route("/v1/queue/ack", post(v1::ack))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))

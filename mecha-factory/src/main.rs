@@ -48,9 +48,41 @@ enum Command {
         #[arg(long, default_value_t = 8400)]
         port: u16,
     },
+    /// The queue of typed requests, from the box's side.
+    Queue {
+        #[command(subcommand)]
+        action: QueueAction,
+    },
     /// Parse the configuration, report what it would serve, and exit. What a
     /// deploy runs before restarting anything.
     Check,
+}
+
+#[derive(Subcommand)]
+enum QueueAction {
+    /// What is waiting, and what state it is in.
+    List,
+    /// Put a record in by hand.
+    ///
+    /// The inbound form and its verification are step 7; until they exist this
+    /// is the only writer, and it is how the drain path at home is exercised
+    /// end to end before there is a stranger to exercise it. It is not a back
+    /// door: it runs on the box, as whoever already owns the box, and it
+    /// **validates against the uploaded type** exactly as the form endpoint
+    /// will — a queue that could hold a record no schema accepts would break
+    /// the one property that makes draining safe.
+    Add {
+        /// The request type id, which must already be uploaded.
+        #[arg(long = "type")]
+        type_id: String,
+        /// A JSON object of field values. `-` reads stdin.
+        #[arg(long)]
+        payload: PathBuf,
+        /// `queued` is drainable; `submitted` is what an unverified request
+        /// looks like and is never drained.
+        #[arg(long, default_value = "queued")]
+        state: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -84,6 +116,7 @@ fn main() -> Result<()> {
     match &cli.command {
         Command::Key { action } => key(&cli, action),
         Command::Serve { dev, port } => serve(&cli, *dev, *port),
+        Command::Queue { action } => queue(&cli, action),
         Command::Check => check(&cli),
     }
 }
@@ -161,6 +194,63 @@ fn key(cli: &Cli, action: &KeyAction) -> Result<()> {
             } else {
                 println!("{id} is not a live key");
             }
+            Ok(())
+        }
+    }
+}
+
+fn queue(cli: &Cli, action: &QueueAction) -> Result<()> {
+    let db = open_db(cli)?;
+    match action {
+        QueueAction::List => {
+            for row in db.drain(0, 1000)? {
+                println!(
+                    "{:>5}  {:<12}  {}  {}",
+                    row.seq, row.type_id, row.created_at, row.payload
+                );
+            }
+            Ok(())
+        }
+        QueueAction::Add {
+            type_id,
+            payload,
+            state,
+        } => {
+            let text = if payload.as_os_str() == "-" {
+                std::io::read_to_string(std::io::stdin())?
+            } else {
+                std::fs::read_to_string(payload)
+                    .with_context(|| format!("reading {}", payload.display()))?
+            };
+            let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)
+                .context("the payload must be a JSON object of field values")?;
+
+            let Some(stored) = db.type_get(type_id)? else {
+                bail!(
+                    "no type `{type_id}` is uploaded. The queue only ever holds \
+                     records that validate against a schema mecha itself uploaded, \
+                     which is what makes draining safe."
+                );
+            };
+            let request_type = mecha_manifest::RequestType::from_toml(&stored.manifest)?;
+            let submission = request_type.validate(&raw).map_err(|errors| {
+                anyhow::anyhow!(
+                    "the payload does not validate:\n{}",
+                    errors
+                        .iter()
+                        .map(|e| format!("  {}: {}", e.field, e.message))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                )
+            })?;
+
+            let seq = db.queue_add(
+                type_id,
+                state,
+                &serde_json::to_string(&submission.values)?,
+                &db::now(),
+            )?;
+            println!("queued {seq} ({type_id}, {state})");
             Ok(())
         }
     }
