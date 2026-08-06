@@ -79,6 +79,10 @@ enum Command {
         #[arg(long)]
         vendor_runtime: Option<String>,
     },
+    /// Speak MCP on stdin/stdout. This is how mecha reaches the factory:
+    /// wire it as an `[[mcp]]` server and name the publishing tools in
+    /// `[outbox] publish_tools`.
+    Mcp,
     /// Serve a rendered bundle locally with the real headers for its class.
     ///
     /// Loopback only. A bundle checked without its Content-Security-Policy is
@@ -263,6 +267,8 @@ fn main() -> Result<()> {
                 bundle.rendered.dir.join("index.html").display()
             );
         }
+
+        Command::Mcp => mecha_factory_publish::mcp::serve(cli.store.clone())?,
 
         Command::Serve {
             bundle,

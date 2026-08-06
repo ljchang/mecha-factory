@@ -17,6 +17,7 @@
 //! Nothing in this crate depends on `mecha-core`, and nothing may. The shared
 //! contract is `mecha-manifest`, which is data.
 
+pub mod mcp;
 pub mod notebook;
 pub mod pyodide;
 pub mod render;

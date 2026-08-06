@@ -127,6 +127,29 @@ the short version:
   one enforcement the artifact security model rests on, and a warning is how it
   silently stops holding.
 
+## Wiring it into mecha
+
+```toml
+# mecha.toml
+[[mcp]]
+name = "factory"
+command = "factory-publish"
+args = ["mcp"]
+
+[outbox]
+tools        = ["factory__bundle_publish", "factory__bundle_alias", "factory__bundle_unpublish"]
+publish_tools = ["factory__bundle_publish", "factory__bundle_alias", "factory__bundle_unpublish"]
+```
+
+That is the whole integration. mecha's outbox routes by tool **name** in the
+dispatch path, so naming the three publishing tools stages them for review with
+no change to mecha at all — an agent drafts a page, a human releases it, and the
+agent loop never learns a public surface exists.
+
+`bundle_render` is deliberately not routed: rendering is cheap and local, and
+making every iteration cost a human review is how a review queue stops being
+read.
+
 ## Notebooks
 
 ```sh
