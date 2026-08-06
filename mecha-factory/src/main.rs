@@ -38,6 +38,16 @@ enum Command {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// Serve the three origins.
+    Serve {
+        /// Three loopback ports instead of three names, plain HTTP, and the
+        /// same router. Everything but TLS.
+        #[arg(long)]
+        dev: bool,
+        /// Dev only: the gate's port. Artifacts and compute take the next two.
+        #[arg(long, default_value_t = 8400)]
+        port: u16,
+    },
     /// Parse the configuration, report what it would serve, and exit. What a
     /// deploy runs before restarting anything.
     Check,
@@ -73,6 +83,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.command {
         Command::Key { action } => key(&cli, action),
+        Command::Serve { dev, port } => serve(&cli, *dev, *port),
         Command::Check => check(&cli),
     }
 }
@@ -153,6 +164,27 @@ fn key(cli: &Cli, action: &KeyAction) -> Result<()> {
             Ok(())
         }
     }
+}
+
+/// A runtime is built here rather than by an attribute on `main`, so that
+/// `key` and `check` — which are ordinary file operations — never start one.
+fn serve(cli: &Cli, dev: bool, port: u16) -> Result<()> {
+    let config = if dev {
+        let data_dir = cli
+            .data_dir
+            .clone()
+            .or_else(|| cli.config.as_ref().map(|_| PathBuf::new()))
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| PathBuf::from("factory-dev"));
+        Config::dev(data_dir, port)
+    } else {
+        load_config(cli)?
+    };
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting the runtime")?
+        .block_on(mecha_factory::serve::run(config, dev))
 }
 
 fn check(cli: &Cli) -> Result<()> {

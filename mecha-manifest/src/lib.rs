@@ -60,6 +60,7 @@ mod condition;
 mod csp;
 mod digest;
 mod form;
+mod media;
 mod request;
 mod schema;
 mod validate;
@@ -69,6 +70,7 @@ pub use condition::{Condition, Operator};
 pub use csp::Header;
 pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::FormOptions;
+pub use media::content_type;
 pub use request::{valid_id, Acknowledgment, Field, FieldKind, RequestType, Step};
 pub use validate::{Submission, ValidationError};
 

@@ -105,7 +105,10 @@ impl Preview {
                 let body = std::fs::read(&path)?;
                 let mut head = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
-                    content_type(&path),
+                    // The same table the public server reads. A preview served
+                    // with a different media type is a preview of a different
+                    // page — `.wasm` alone decides whether a notebook boots.
+                    mecha_manifest::content_type(&path.to_string_lossy()),
                     body.len()
                 );
                 if !self.without_policy {
@@ -176,26 +179,6 @@ fn percent_decode(text: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
-}
-
-fn content_type(path: &Path) -> &'static str {
-    match path.extension().and_then(|e| e.to_str()) {
-        Some("html") | Some("htm") => "text/html; charset=utf-8",
-        Some("css") => "text/css; charset=utf-8",
-        Some("js") | Some("mjs") => "text/javascript; charset=utf-8",
-        Some("json") => "application/json",
-        Some("wasm") => "application/wasm",
-        Some("svg") => "image/svg+xml",
-        Some("png") => "image/png",
-        Some("jpg") | Some("jpeg") => "image/jpeg",
-        Some("ico") => "image/x-icon",
-        Some("woff2") => "font/woff2",
-        Some("zip") => "application/zip",
-        Some("md") => "text/markdown; charset=utf-8",
-        // `nosniff` is set on every response, so an unknown type is served as
-        // bytes rather than guessed at.
-        _ => "application/octet-stream",
-    }
 }
 
 #[cfg(test)]

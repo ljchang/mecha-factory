@@ -31,6 +31,10 @@
 //! 3. **Published versions are immutable, and only an acknowledged queue row is
 //!    ever deleted.** The alias is the single moving part.
 
+pub mod bundles;
 pub mod config;
 pub mod db;
+pub mod http;
 pub mod keys;
+pub mod ratelimit;
+pub mod serve;

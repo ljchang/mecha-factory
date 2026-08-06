@@ -170,6 +170,20 @@ pub fn authenticate(
     Ok(row)
 }
 
+/// Authenticate a token for an endpoint that any live key may reach.
+///
+/// Exactly one thing uses this — `GET /v1/health`, which answers publicly with
+/// a bare "up" and adds counts for a caller that holds a key. Written as its
+/// own function rather than as an `Option<Scope>` parameter so that no
+/// scope-checked endpoint can reach it by passing `None`.
+pub fn authenticate_any(db: &Db, header: Option<&str>) -> std::result::Result<KeyRow, AuthError> {
+    let row = authenticate(db, header, Scope::Publish);
+    match row {
+        Err(AuthError::WrongScope { has, .. }) => authenticate(db, header, has),
+        other => other,
+    }
+}
+
 fn random<const N: usize>() -> Result<[u8; N]> {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes)
@@ -299,6 +313,18 @@ mod tests {
                 "{header:?} authenticated"
             );
         }
+    }
+
+    #[test]
+    fn health_takes_either_key_and_still_takes_nothing_else() {
+        let db = db();
+        for scope in [Scope::Publish, Scope::Drain] {
+            let minted = mint(&db, scope, "k").unwrap();
+            let header = format!("Bearer {}", minted.token);
+            assert_eq!(authenticate_any(&db, Some(&header)).unwrap().scope, scope);
+        }
+        assert!(authenticate_any(&db, None).is_err());
+        assert!(authenticate_any(&db, Some("Bearer mk_pub_aa.bb")).is_err());
     }
 
     /// Two mints are two different keys — the obvious property, and the one a
