@@ -127,6 +127,26 @@ the short version:
   one enforcement the artifact security model rests on, and a warning is how it
   silently stops holding.
 
+## Confinement — a gap, stated rather than implied
+
+The `notebook` template is the one renderer that **executes code we did not
+write**: `marimo export html-wasm` runs the notebook to capture its state. That
+is the whole reason rendering and publishing are separate verbs — a process
+running arbitrary Python must not also hold the publish key or reach the
+network.
+
+**That confinement is not implemented yet.** Today the export runs as you, with
+your environment, exactly as `shell` does under mecha's default
+`[sandbox] kind = "none"`. mecha confines the MCP server it launches, but the
+render subprocess lives *inside* this crate, so mecha's sandbox cannot see it —
+enforcing it is this crate's job.
+
+It is written down rather than left implicit because the design is equally clear
+on both halves: a renderer that executes notebook code must be confined, **and**
+an unenforced claim of confinement is decoration. Do not wire this to anything
+unattended until the subprocess is confined and preflighted — the rule that a
+configured sandbox which does not work must stop the run transfers here intact.
+
 ## Licence
 
 MIT.

@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use mecha_factory_publish::{render, store::BundleStore, vendor};
+use mecha_factory_publish::{notebook, render, store::BundleStore, vendor};
 use mecha_manifest::Visibility;
 use std::path::PathBuf;
 
@@ -56,6 +56,19 @@ enum Command {
         /// Publish the version without moving the share URL to it.
         #[arg(long)]
         no_alias: bool,
+    },
+    /// Render a marimo notebook as a `compute`-class bundle. Executes the
+    /// notebook, so it is bounded by a timeout.
+    Notebook {
+        /// The notebook `.py`.
+        source: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        title: Option<String>,
+        /// Seconds the export may take. It runs the notebook.
+        #[arg(long, default_value_t = 300)]
+        timeout: u64,
     },
     /// Run the external-reference gate over a rendered directory without
     /// publishing. The same check `publish` runs, so a bundle that passes here
@@ -173,6 +186,38 @@ fn main() -> Result<()> {
                 println!("  alias  → v{}", published.version);
             }
             reach(&store, &id)?;
+        }
+
+        Command::Notebook {
+            source,
+            out,
+            title,
+            timeout,
+        } => {
+            let options = notebook::NotebookOptions {
+                title,
+                timeout: std::time::Duration::from_secs(timeout),
+                ..notebook::NotebookOptions::default()
+            };
+            let bundle = notebook::notebook(&source, &out, &options)?;
+            println!(
+                "{} → {}",
+                bundle.rendered.template,
+                bundle.rendered.dir.display()
+            );
+            println!("  title  {}", bundle.rendered.title);
+            println!("  class  {}", bundle.rendered.class.as_str());
+            for (name, why) in &bundle.removed {
+                println!("  pruned {name} — {why}");
+            }
+            for tree in &bundle.vendored {
+                println!("  pinned {}  {}", tree.path.display(), tree.digest);
+            }
+            vendor::gate_with(&bundle.rendered.dir, &bundle.vendored)?;
+            println!(
+                "  open   {}",
+                bundle.rendered.dir.join("index.html").display()
+            );
         }
 
         Command::Check { bundle, vendored } => {

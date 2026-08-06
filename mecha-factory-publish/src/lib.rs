@@ -17,10 +17,12 @@
 //! Nothing in this crate depends on `mecha-core`, and nothing may. The shared
 //! contract is `mecha-manifest`, which is data.
 
+pub mod notebook;
 pub mod render;
 pub mod store;
 pub mod vendor;
 
+pub use notebook::{notebook, NotebookOptions};
 pub use render::{report, Rendered};
 pub use store::{Alias, BundleStore, Published};
 pub use vendor::{gate, scan, Finding};
