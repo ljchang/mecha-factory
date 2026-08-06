@@ -60,7 +60,20 @@ enum Command {
     /// Run the external-reference gate over a rendered directory without
     /// publishing. The same check `publish` runs, so a bundle that passes here
     /// is one that will publish.
-    Check { bundle: PathBuf },
+    Check {
+        bundle: PathBuf,
+        /// A third-party subtree reviewed as a unit, as `path=sha256:…`.
+        /// Repeatable. Its contents are not scanned line by line; its digest
+        /// is checked instead, so a tree that changed since it was reviewed is
+        /// a finding rather than a pass.
+        ///
+        /// With no `=digest`, the tree is still scanned strictly and the digest
+        /// it *would* pin at is printed — reviewing it is what turns that into
+        /// a declaration, and having the number to hand is not the same as
+        /// having reviewed it.
+        #[arg(long = "vendored")]
+        vendored: Vec<String>,
+    },
     /// Point the share URL at a specific version.
     Alias { id: String, version: u32 },
     /// Point the share URL at nothing. Destroys no version.
@@ -162,10 +175,46 @@ fn main() -> Result<()> {
             reach(&store, &id)?;
         }
 
-        Command::Check { bundle } => {
-            let findings = vendor::scan(&bundle)?;
+        Command::Check { bundle, vendored } => {
+            let mut pinned = Vec::new();
+            for spec in &vendored {
+                match spec.split_once('=') {
+                    Some((path, digest)) => pinned.push(vendor::Vendored {
+                        path: PathBuf::from(path),
+                        digest: digest.to_string(),
+                        description: path.to_string(),
+                    }),
+                    None => {
+                        let dir = bundle.join(spec);
+                        anyhow::ensure!(dir.is_dir(), "{} is not a directory", dir.display());
+                        println!(
+                            "--vendored {spec}={}    ← after reviewing it",
+                            mecha_factory_publish::store::digest_tree(&dir)?
+                        );
+                    }
+                }
+            }
+            let findings = vendor::scan_with(&bundle, &pinned)?;
             if findings.is_empty() {
-                println!("{} is self-contained", bundle.display());
+                // "Self-contained" is a conclusion; a pin is a *claim* somebody
+                // made. Absorbing the second into the first is how a bundle
+                // that cannot boot under the CSP comes to be described as
+                // clean — so the claim stays on screen next to the conclusion.
+                if pinned.is_empty() {
+                    println!("{} is self-contained", bundle.display());
+                } else {
+                    println!(
+                        "{} is self-contained outside its pinned tree(s)",
+                        bundle.display()
+                    );
+                    for tree in &pinned {
+                        println!(
+                            "  pinned as reviewed, not scanned: {}  {}",
+                            tree.path.display(),
+                            tree.digest
+                        );
+                    }
+                }
                 return Ok(());
             }
             // Printed *and* returned as a failure: the exit code is what a

@@ -335,6 +335,16 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// A digest over a directory, by the same rule a bundle version uses.
+///
+/// Exposed because the vendoring gate needs it: a vendored third-party tree is
+/// reviewed once at a pinned version and identified by its digest thereafter,
+/// and it has to be the *same* digest the store would compute or the two would
+/// disagree about whether anything changed.
+pub fn digest_tree(dir: &Path) -> Result<String> {
+    Ok(digest_of(&collect(dir)?))
+}
+
 /// Every file under `dir`, as (path relative to `dir`, bytes), sorted by path.
 ///
 /// Sorted because the digest is taken over this list and directory iteration

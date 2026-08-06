@@ -51,6 +51,54 @@ use anyhow::Result;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+/// URLs that are **identifiers, not addresses**.
+///
+/// `xmlns="http://www.w3.org/2000/svg"` is how an SVG element declares what it
+/// is; no browser ever fetches it. A real marimo bundle contains 234 of these,
+/// and reporting them was simply a bug — it buried the ~30 references that are
+/// genuinely fetchable at runtime under a pile nobody would read to the end of.
+///
+/// Matched exactly rather than by host prefix, deliberately: `w3.org` also
+/// serves real scripts, and a prefix rule would wave those through.
+const NAMESPACE_URIS: [&str; 6] = [
+    "http://www.w3.org/2000/svg",
+    "http://www.w3.org/1999/xhtml",
+    "http://www.w3.org/1999/xlink",
+    "http://www.w3.org/XML/1998/namespace",
+    "http://www.w3.org/2000/xmlns/",
+    "http://www.w3.org/1998/Math/MathML",
+];
+
+/// A third-party tree that is reviewed as a unit rather than line by line.
+///
+/// **Why a whole mode exists for this.** A real `marimo export html-wasm` is 710
+/// files and 27 MB of minified vendor JavaScript containing 224 distinct URLs —
+/// namespace identifiers, documentation links, attribution strings, and a
+/// genuine handful of runtime CDN loaders. Per-line review of that is a
+/// workflow nobody performs, and a check nobody performs is a check that is not
+/// there.
+///
+/// So the unit of review becomes the tree: you review it once at the version
+/// you pin, record its digest, and the **CSP is the runtime enforcement** — a
+/// `connect-src 'self'` origin means a map-tile fetch buried in a charting
+/// library simply fails. That is what §7.1 was always for; the gate just was
+/// not scoped to match it.
+///
+/// **Fail-closed in both directions.** A subtree that is not declared is
+/// scanned strictly, so nothing becomes vendored by being forgotten. And a
+/// declared subtree whose digest no longer matches is a finding, not a pass —
+/// otherwise "reviewed once" would silently mean "reviewed once, then never
+/// again".
+#[derive(Debug, Clone)]
+pub struct Vendored {
+    /// Relative to the bundle root.
+    pub path: PathBuf,
+    /// The digest recorded when this tree was reviewed.
+    pub digest: String,
+    /// What it is and at which version, for whoever reads the manifest later.
+    pub description: String,
+}
+
 /// What made a reference a *resource* rather than a link.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
@@ -68,6 +116,10 @@ pub enum Reason {
     /// A `data:` URL in a script position. See the module docs — §7.3 of the
     /// design.
     DataUrlScript,
+    /// A tree declared as reviewed-and-pinned no longer digests to what was
+    /// recorded. Reported rather than rescanned: what changed is the question,
+    /// and answering it with a pile of per-line findings would hide it.
+    VendoredTreeChanged { expected: String, actual: String },
 }
 
 impl fmt::Display for Reason {
@@ -78,6 +130,11 @@ impl fmt::Display for Reason {
             Reason::CssImport => write!(f, "@import in CSS"),
             Reason::InScript => write!(f, "a URL inside a script"),
             Reason::DataUrlScript => write!(f, "a data: URL in a script position"),
+            Reason::VendoredTreeChanged { expected, actual } => write!(
+                f,
+                "a pinned third-party tree changed since it was reviewed \
+                 (recorded {expected}, found {actual})"
+            ),
         }
     }
 }
@@ -111,8 +168,43 @@ impl fmt::Display for Finding {
 ///
 /// Empty means the bundle is self-contained.
 pub fn scan(bundle: &Path) -> Result<Vec<Finding>> {
+    scan_with(bundle, &[])
+}
+
+/// Scan, treating the declared trees as reviewed-and-pinned units.
+pub fn scan_with(bundle: &Path, vendored: &[Vendored]) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
-    scan_dir(bundle, bundle, &mut findings)?;
+    for tree in vendored {
+        let dir = bundle.join(&tree.path);
+        if !dir.is_dir() {
+            // A declaration pointing at nothing is a manifest that has drifted
+            // from the bundle. Silently ignoring it would mean a later rename
+            // quietly turns strict scanning back on — or off.
+            findings.push(Finding {
+                file: tree.path.clone(),
+                line: 1,
+                reference: tree.description.clone(),
+                reason: Reason::VendoredTreeChanged {
+                    expected: tree.digest.clone(),
+                    actual: "the directory does not exist".into(),
+                },
+            });
+            continue;
+        }
+        let actual = crate::store::digest_tree(&dir)?;
+        if actual != tree.digest {
+            findings.push(Finding {
+                file: tree.path.clone(),
+                line: 1,
+                reference: tree.description.clone(),
+                reason: Reason::VendoredTreeChanged {
+                    expected: tree.digest.clone(),
+                    actual,
+                },
+            });
+        }
+    }
+    scan_dir(bundle, bundle, vendored, &mut findings)?;
     findings.sort_by(|a, b| {
         a.file
             .cmp(&b.file)
@@ -127,7 +219,12 @@ pub fn scan(bundle: &Path) -> Result<Vec<Finding>> {
 /// The error lists every finding, because a caller who fixes one and republishes
 /// to be told about the next is a caller who stops using the gate.
 pub fn gate(bundle: &Path) -> Result<()> {
-    let findings = scan(bundle)?;
+    gate_with(bundle, &[])
+}
+
+/// The gate, with declared third-party trees reviewed as pinned units.
+pub fn gate_with(bundle: &Path, vendored: &[Vendored]) -> Result<()> {
+    let findings = scan_with(bundle, vendored)?;
     if findings.is_empty() {
         return Ok(());
     }
@@ -189,15 +286,21 @@ fn locate(text: &str, needle: &str) -> Option<usize> {
         .map(|i| i + 1)
 }
 
-fn scan_dir(root: &Path, dir: &Path, out: &mut Vec<Finding>) -> Result<()> {
+fn scan_dir(root: &Path, dir: &Path, vendored: &[Vendored], out: &mut Vec<Finding>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
-            scan_dir(root, &path, out)?;
+        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        // A pinned tree was reviewed as a unit; its digest is checked above and
+        // its contents are not walked. Everything not declared is scanned
+        // strictly, so nothing becomes vendored by being forgotten.
+        if vendored.iter().any(|v| relative.starts_with(&v.path)) {
             continue;
         }
-        let relative = path.strip_prefix(root).unwrap_or(&path).to_path_buf();
+        if entry.file_type()?.is_dir() {
+            scan_dir(root, &path, vendored, out)?;
+            continue;
+        }
         // Binary files cannot be scanned and do not need to be: an image is
         // bytes, not a reference. A file that is not valid UTF-8 is treated as
         // binary rather than as an error.
@@ -335,8 +438,15 @@ fn scan_script(file: &Path, text: &str, out: &mut Vec<Finding>) {
     }
 }
 
-/// Absolute URLs in a fragment of text.
+/// Absolute URLs in a fragment of text, minus the ones that are identifiers.
 fn urls_in(text: &str) -> Vec<String> {
+    urls_in_raw(text)
+        .into_iter()
+        .filter(|url| !NAMESPACE_URIS.contains(&url.as_str()))
+        .collect()
+}
+
+fn urls_in_raw(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut rest = text;
     while let Some(at) = rest.find("://") {
@@ -761,6 +871,87 @@ mod tests {
             err.contains("not in the source: https://cdn.example/t.css"),
             "{err}"
         );
+    }
+
+    /// 234 of a real marimo bundle's 541 findings were these. Reporting them
+    /// buried the ~30 that are genuinely fetchable under a pile nobody would
+    /// read to the end of.
+    #[test]
+    fn an_xml_namespace_is_an_identifier_and_not_a_finding() {
+        let s = Scratch::new("ns");
+        s.write(
+            "app.js",
+            "const SVG=\"http://www.w3.org/2000/svg\";\n\
+             const X=\"http://www.w3.org/1999/xlink\";\n\
+             load(\"https://cdn.example/real.js\");\n",
+        );
+        let findings = s.scan();
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].reference, "https://cdn.example/real.js");
+    }
+
+    /// A prefix rule on the host would wave through a real script served from
+    /// w3.org, so the match is exact.
+    #[test]
+    fn a_real_script_on_a_namespace_host_is_still_a_finding() {
+        let s = Scratch::new("nshost");
+        s.write("app.js", "load(\"http://www.w3.org/scripts/thing.js\");");
+        assert_eq!(s.scan().len(), 1);
+    }
+
+    /// The unit of review for 710 minified files is the tree, not the line.
+    #[test]
+    fn a_declared_tree_is_reviewed_as_a_unit_and_an_undeclared_one_is_not() {
+        let s = Scratch::new("vendored");
+        s.write("index.html", "<p>ok</p>");
+        s.write("assets/runtime.js", "fetch(\"https://cdn.example/tiles\");");
+        s.write("other/thing.js", "fetch(\"https://cdn.example/other\");");
+
+        // Undeclared: both are scanned.
+        assert_eq!(scan(&s.0).unwrap().len(), 2);
+
+        let digest = crate::store::digest_tree(&s.0.join("assets")).unwrap();
+        let vendored = [Vendored {
+            path: PathBuf::from("assets"),
+            digest: digest.clone(),
+            description: "marimo 0.23.16".into(),
+        }];
+        // Declared: the tree is skipped, and everything outside it still is not.
+        let findings = scan_with(&s.0, &vendored).unwrap();
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].file, PathBuf::from("other/thing.js"));
+    }
+
+    /// Or "reviewed once" would silently mean "reviewed once, then never
+    /// again".
+    #[test]
+    fn a_pinned_tree_that_changed_is_a_finding_rather_than_a_pass() {
+        let s = Scratch::new("drift");
+        s.write("assets/runtime.js", "// v1");
+        let digest = crate::store::digest_tree(&s.0.join("assets")).unwrap();
+        let vendored = [Vendored {
+            path: PathBuf::from("assets"),
+            digest,
+            description: "marimo 0.23.16".into(),
+        }];
+        assert!(scan_with(&s.0, &vendored).unwrap().is_empty());
+
+        s.write("assets/runtime.js", "// v2, quietly different");
+        let findings = scan_with(&s.0, &vendored).unwrap();
+        assert_eq!(findings.len(), 1);
+        assert!(matches!(
+            findings[0].reason,
+            Reason::VendoredTreeChanged { .. }
+        ));
+
+        // And a declaration pointing at nothing is drift too — a rename must
+        // not quietly turn strict scanning on or off.
+        let missing = [Vendored {
+            path: PathBuf::from("nowhere"),
+            digest: "sha256:x".into(),
+            description: "gone".into(),
+        }];
+        assert_eq!(scan_with(&s.0, &missing).unwrap().len(), 1);
     }
 
     #[test]

@@ -63,7 +63,17 @@ it alone:
 cargo run --bin factory-publish -- check /tmp/brief
 ```
 
-**A publish fails on a surviving external reference — it does not warn.** A page
+**A publish fails on a surviving external reference — it does not warn.**
+There are two modes, split by kind of object rather than kind of URL: files we
+emit are scanned strictly, and a **vendored third-party tree** is reviewed as a
+unit — declared with a digest, pinned at the version reviewed, and not walked
+line by line, with the CSP as the runtime enforcement. Measured against a real
+`marimo export html-wasm`: 710 files and 224 distinct URLs, of which 234
+occurrences are XML namespace identifiers no browser ever fetches. A check that
+reports 541 things nobody reads is not a check. Fail-closed both ways — an
+undeclared subtree is scanned strictly, and a pinned tree that changed is a
+finding, not a pass.
+ A page
 that loads something off-origin breaks under the CSP, tells a third party who
 read it and when, and stops being permanent the moment somebody else's bucket
 changes. A *link* is not a resource: `<a href="https://…">` is fine and is never
