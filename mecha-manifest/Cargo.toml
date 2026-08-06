@@ -1,0 +1,17 @@
+[package]
+name = "mecha-manifest"
+description = "The versioned data contract between mecha and mecha-factory: request types, bundles, their JSON Schema, their HTML form, and the one validator both ends run."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Deliberately small, and deliberately *not* including mecha-core. The contract
+# is data — TOML in, JSON Schema and HTML out — so each side can parse it in its
+# own language and neither has to trust the other's types.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true

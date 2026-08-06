@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to a PR should cancel the run it supersedes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail the build on warnings so lint debt cannot accumulate silently.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    name: test (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Keep this arm in step with `rust-version` in the workspace manifest.
+        rust: [stable, "1.88"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.rust }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.rust }}
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --all-features
+
+  # The example is the "renders to a file you can open" check. A form generator
+  # whose output has never been produced end to end is a form generator with a
+  # bug in it, so CI produces it — and asserts the one property the publish gate
+  # will later enforce: no external references in anything we emit.
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Render every starter
+        run: |
+          set -euo pipefail
+          for manifest in mecha-manifest/types/*.toml; do
+            name=$(basename "$manifest" .toml)
+            cargo run -q --example render -- "$manifest" "out/$name"
+          done
+      - name: Refuse an external reference
+        run: |
+          set -euo pipefail
+          # The one absolute URL allowed anywhere is a link a human clicks in an
+          # acknowledgment; a *loaded* resource off-origin is what fails.
+          if grep -rEn '(src|href)="https?://' out/ | grep -v 'rel="noopener'; then
+            echo "an emitted file loads something off-origin" >&2
+            exit 1
+          fi

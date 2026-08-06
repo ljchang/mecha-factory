@@ -1,0 +1,117 @@
+# A starter. See meeting.toml for what these are and are not.
+#
+# This one is multi-step, because it is the type where asking everything on one
+# page reads as an interrogation. Multi-step is server-side — one page per step,
+# a POST between them — so it works with JavaScript off and survives a closed
+# tab.
+
+id = "letter"
+version = 1
+title = "Request a letter of recommendation"
+description = "Everything I need to write a good one, in one place."
+retain_days = 730
+
+[[fields]]
+name = "requester_name"
+label = "Your name"
+kind = "text"
+max_length = 120
+required = true
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "relationship"
+label = "How we know each other"
+kind = "select"
+required = true
+options = [
+  { value = "course", label = "You took a course with me" },
+  { value = "research", label = "You worked in the lab" },
+  { value = "advising", label = "I advised you" },
+  { value = "other", label = "Some other way" },
+]
+
+[[fields]]
+name = "relationship_detail"
+label = "Remind me of the details"
+help = "Which course or project, roughly when."
+kind = "long_text"
+max_length = 800
+required = true
+
+[[fields]]
+name = "deadline"
+label = "The earliest deadline"
+help = "The one that comes first, not the last one."
+kind = "date"
+required = true
+
+[[fields]]
+name = "programs"
+label = "What you're applying for"
+kind = "multi_select"
+required = true
+max_choices = 12
+options = [
+  { value = "phd", label = "A PhD programme" },
+  { value = "masters", label = "A master's programme" },
+  { value = "job", label = "A job" },
+  { value = "fellowship", label = "A fellowship or grant" },
+  { value = "award", label = "An award" },
+]
+
+[[fields]]
+name = "submission_method"
+label = "How the letter is submitted"
+kind = "select"
+required = true
+options = [
+  { value = "portal", label = "An online portal emails me a link" },
+  { value = "email", label = "I email it somewhere" },
+  { value = "upload", label = "I upload one file you send on" },
+]
+
+[[fields]]
+name = "portal_note"
+label = "Anything I should know about the portal"
+help = "Some of them expire the link, which is worth warning me about."
+kind = "long_text"
+max_length = 600
+show_when = { field = "submission_method", op = "eq", value = "portal" }
+
+[[fields]]
+name = "materials_url"
+label = "A link to your CV and statement"
+help = "A link is easier than an attachment. Anything I can open without an account."
+kind = "url"
+
+[[fields]]
+name = "what_to_emphasise"
+label = "What you'd like me to emphasise"
+kind = "long_text"
+max_length = 1500
+
+[[steps]]
+id = "who"
+title = "Who you are"
+fields = ["requester_name", "requester_email", "relationship", "relationship_detail"]
+
+[[steps]]
+id = "what"
+title = "What you're applying for"
+fields = ["programs", "deadline", "submission_method", "portal_note"]
+
+[[steps]]
+id = "materials"
+title = "What I'll write from"
+description = "The part that makes the difference between a generic letter and a good one."
+fields = ["materials_url", "what_to_emphasise"]
+
+[[acknowledgments]]
+id = "deadline_is_real"
+label = "The deadline above is the real one, and I'll tell you if it moves."

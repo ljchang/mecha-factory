@@ -1,0 +1,21 @@
+[workspace]
+members = ["mecha-manifest"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/ljchang/mecha-factory"
+
+[workspace.dependencies]
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
