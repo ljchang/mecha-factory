@@ -1,0 +1,64 @@
+[Unit]
+# The public surface. One binary, three origins, a box we assume is lost —
+# which is the reason for every hardening line below: they do not protect the
+# service from the internet, they limit what the internet gets when it wins.
+Description=mecha factory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=factory
+Group=factory
+ExecStart=/usr/local/bin/factory --config /etc/mecha-factory/factory.toml serve
+# `check` parses the configuration and prints what it would serve. A restart
+# that was going to fail on a typo fails here instead, before the running
+# server is stopped.
+ExecStartPre=/usr/local/bin/factory --config /etc/mecha-factory/factory.toml check
+Restart=always
+RestartSec=2
+
+# 443 and 80 without running as root. The capability is granted to the
+# process, not to the user, and nothing else on the box gets it.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+
+# The data directory is the only writable path: the ledger, the published
+# bytes, and the certificate cache. Everything else on the filesystem is
+# read-only to this process, so a bug that writes a path it should not have
+# fails rather than persisting.
+StateDirectory=mecha-factory
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mecha-factory
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+# It listens and it answers. It never dials out — the direction of every
+# connection is the security model, and this is that written down where the
+# kernel enforces it rather than where a reader has to take it on trust.
+# (ACME is the one exception, and it needs outbound TCP; there is no narrower
+# way to express "only Let's Encrypt" here than a firewall rule.)
+RestrictAddressFamilies=AF_INET AF_INET6
+
+# Logs go to the journal.
+StandardOutput=journal
+StandardError=journal
+Environment=FACTORY_LOG=info
+
+[Install]
+WantedBy=multi-user.target

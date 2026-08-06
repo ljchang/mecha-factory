@@ -37,17 +37,7 @@ pub async fn run(config: Config, dev: bool) -> Result<()> {
         vec![config.listen.https]
     };
 
-    if config.tls.is_some() {
-        // Fail closed rather than quietly serving plain HTTP under a
-        // configuration that says TLS. A public origin answering in the clear
-        // is worse than one that did not start.
-        anyhow::bail!(
-            "[tls] is configured, but this build serves plain HTTP only. \
-             Remove the block to serve on loopback, or use a build with the \
-             ACME acceptor."
-        );
-    }
-
+    let tls = config.tls.is_some();
     let app = Arc::new(App::new(config, db)?);
     for role in [
         crate::config::Role::Gate,
@@ -55,6 +45,13 @@ pub async fn run(config: Config, dev: bool) -> Result<()> {
         crate::config::Role::Compute,
     ] {
         tracing::info!(role = role.as_str(), url = %app.config.base_url(role), "serving");
+    }
+
+    if tls {
+        // One listener, three names, told apart by `Host` — which is what a
+        // certificate for three names is for.
+        let config = app.config.clone();
+        return crate::tls::serve(app, &config).await;
     }
 
     let mut listeners = Vec::new();

@@ -288,14 +288,7 @@ fn check(cli: &Cli) -> Result<()> {
     ] {
         println!("{:<9} {}", role.as_str(), config.base_url(role));
     }
-    println!(
-        "tls       {}",
-        match &config.tls {
-            Some(tls) if tls.staging => "acme (staging directory — certificates nobody trusts)",
-            Some(_) => "acme",
-            None => "none (loopback only)",
-        }
-    );
+    println!("tls       {}", mecha_factory::tls::describe(&config));
     println!(
         "ledger    {} bundles, {} queued, {} keys",
         db.bundle_count()?,

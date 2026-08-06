@@ -1,0 +1,43 @@
+# The public box, as it is told what to be.
+#
+# Nothing here is a secret, and that is deliberate: the keys mecha
+# authenticates with are minted by `factory key create` and stored as Argon2id
+# hashes in the ledger, so there is no field in this file where a credential
+# could be put. That is the credential-isolation claim, checkable by reading
+# the deployed configuration.
+
+data_dir = "/var/lib/mecha-factory"
+
+# Three registrable names, one per content class. They must be three distinct
+# names: sharing one would put a notebook and a report under one policy, which
+# is the whole reason there are three. The certificate covers exactly these.
+[origins]
+gate      = "gate.example.org"       # the API, and later the forms
+artifacts = "artifacts.example.org"  # reports — nothing executes
+compute   = "compute.example.org"    # notebooks — `wasm-unsafe-eval` lives here
+
+[listen]
+https = "0.0.0.0:443"
+# Serves one redirect and nothing else. TLS-ALPN-01 does its challenge on 443,
+# so port 80 is never part of issuance — this exists because people type bare
+# hostnames.
+http = "0.0.0.0:80"
+
+# Remove this block to serve plain HTTP on loopback (which is all it will let
+# you do: a public address without TLS is refused at startup).
+[tls]
+contact = "mailto:you@example.org"
+# Start here. These certificates are trusted by nobody and rate-limited by
+# almost nothing, which is how you find out the ACME path works without
+# spending a week's issuance budget discovering that it does not.
+staging = true
+
+[limits]
+# Generous, because a vendored Pyodide tree is tens of megabytes — but a
+# number, because this endpoint is the one place a held key can fill the disk.
+max_bundle_bytes = 268435456
+max_bundle_files = 20000
+# Unauthenticated requests per minute per address. Static reads get ten times
+# this, since one notebook page is fifty files.
+rate_per_minute = 120
+drain_batch = 100

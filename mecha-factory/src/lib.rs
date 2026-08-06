@@ -38,4 +38,5 @@ pub mod http;
 pub mod keys;
 pub mod ratelimit;
 pub mod serve;
+pub mod tls;
 pub mod upload;
