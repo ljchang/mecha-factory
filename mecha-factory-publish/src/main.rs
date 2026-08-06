@@ -70,6 +70,24 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
+    /// Serve a rendered bundle locally with the real headers for its class.
+    ///
+    /// Loopback only. A bundle checked without its Content-Security-Policy is
+    /// checked against something the world never sees.
+    Serve {
+        bundle: PathBuf,
+        /// `static` | `interactive` | `compute`.
+        #[arg(long, default_value = "static")]
+        class: String,
+        /// 0 asks the OS for a free port.
+        #[arg(long, default_value_t = 8347)]
+        port: u16,
+        /// Serve without the policy. A diagnostic for finding out what a
+        /// bundle needs — never a verification, since a bundle that works this
+        /// way has been told nothing.
+        #[arg(long)]
+        no_csp: bool,
+    },
     /// Run the external-reference gate over a rendered directory without
     /// publishing. The same check `publish` runs, so a bundle that passes here
     /// is one that will publish.
@@ -218,6 +236,32 @@ fn main() -> Result<()> {
                 "  open   {}",
                 bundle.rendered.dir.join("index.html").display()
             );
+        }
+
+        Command::Serve {
+            bundle,
+            class,
+            port,
+            no_csp,
+        } => {
+            let class = match class.as_str() {
+                "static" => mecha_manifest::ContentClass::Static,
+                "interactive" => mecha_manifest::ContentClass::Interactive,
+                "compute" => mecha_manifest::ContentClass::Compute,
+                other => bail!("unknown class `{other}` (static | interactive | compute)"),
+            };
+            let mut preview = mecha_factory_publish::serve::Preview::bind(&bundle, class, port)?;
+            preview.without_policy = no_csp;
+            println!("{}  ({})", preview.url()?, class.as_str());
+            if no_csp {
+                println!("  ⚠ NO POLICY — a diagnostic. Nothing served this way is verified.");
+            }
+            // Printed, because the whole point of this server is that the
+            // policy is real — and a policy nobody read is one nobody checked.
+            for (name, value) in class.headers() {
+                println!("  {name}: {value}");
+            }
+            preview.serve_forever()?;
         }
 
         Command::Check { bundle, vendored } => {

@@ -57,6 +57,7 @@
 
 mod bundle;
 mod condition;
+mod csp;
 mod form;
 mod request;
 mod schema;
@@ -64,6 +65,7 @@ mod validate;
 
 pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};
+pub use csp::Header;
 pub use form::FormOptions;
 pub use request::{Acknowledgment, Field, FieldKind, RequestType, Step};
 pub use validate::{Submission, ValidationError};

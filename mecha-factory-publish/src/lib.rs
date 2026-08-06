@@ -19,10 +19,12 @@
 
 pub mod notebook;
 pub mod render;
+pub mod serve;
 pub mod store;
 pub mod vendor;
 
 pub use notebook::{notebook, NotebookOptions};
 pub use render::{report, Rendered};
+pub use serve::Preview;
 pub use store::{Alias, BundleStore, Published};
 pub use vendor::{gate, scan, Finding};
