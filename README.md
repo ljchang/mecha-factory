@@ -6,9 +6,14 @@ what an agent makes to live, and a typed way for the outside world to get in.
 A factory is where machines are built and shipped from — and it is deliberately
 *not* the machine. Orders come in, product goes out.
 
-> **Early.** Only `mecha-manifest` exists so far. The design is in mecha's
-> `docs/PUBLIC-SURFACE-DESIGN.md`; §12 is the build order and this repository is
-> at step 1.
+> **Where this is.** The design is in mecha's
+> `docs/PUBLIC-SURFACE-DESIGN.md`; §12 is the build order. Steps 1–6 are built:
+> the manifest, the bundle store, the vendoring gate, the notebook path, the MCP
+> surface, and **the server** — three origins, two scoped keys, SQLite, ACME.
+> What is not built is the inbound half: the public form, the magic-link
+> verification, and the state machine that carries a stranger's request from
+> `submitted` to `answered`. Until that exists the box has **no unauthenticated
+> write endpoint at all**.
 
 ## Two purposes, matching the two directions of one boundary
 
@@ -26,13 +31,11 @@ A factory is where machines are built and shipped from — and it is deliberatel
 | Crate | What it is |
 |---|---|
 | `mecha-manifest` | The versioned data contract. Request types and bundles, their JSON Schema, their HTML form, and the one validator both ends run. Pure, no I/O, no network. |
-| `mecha-factory-publish` | The home side. Renders bundles, versions them immutably, moves the one alias a share URL resolves through. Later it also holds the publish key and serves the MCP surface. |
+| `mecha-factory-publish` | The home side. Renders bundles, versions them immutably, moves the one alias a share URL resolves through, holds the publish key, and serves the MCP surface mecha wires. |
+| `mecha-factory` | The box. One binary serving three origins under three policies, an authenticated write API, and a queue home drains. Holds no credential that reaches home. |
 
-Planned, in order: the `notebook` template on `marimo export html-wasm`, and
-with it the fetching half of vendoring (from a pinned allowlist — marimo's six
-CDN references are known and version-pinned); the MCP surface; and
-`mecha-factory` itself — the server on the public box, which is the first thing
-here that creates a machine to patch forever.
+Next, in order: the inbound form and its verification (§12 step 7), then the
+booking page (step 8).
 
 ## Try it
 
@@ -86,13 +89,44 @@ rather than minting a new one, which makes "did anything actually change?" a
 comparison rather than a guess. `alias` moves the share URL; `unpublish` points
 it at nothing and destroys no version.
 
-Until there is a server, `~/.mecha/bundles` is the whole of it — point
-`tailscale serve` at that directory and the share URLs work over the tailnet. No
-VPS, no domains, no origin decisions, and nothing yet to patch forever.
+With no server configured, `~/.mecha/bundles` is the whole of it — point
+`tailscale serve` at that directory and the share URLs work over the tailnet.
+Publishing is a local act that works on a laptop with no box anywhere.
 
-**`visibility` is recorded and not yet enforced**, and every command says so:
-the tailnet is the boundary at this stage. A flag that read as enforcement and
-was not would be the silently-degrading-sandbox shape.
+## The box
+
+```sh
+# On the public machine.
+factory --config /etc/mecha-factory/factory.toml check     # what it would serve
+factory --config /etc/mecha-factory/factory.toml key create --scope publish
+systemctl enable --now mecha-factory
+
+# At home.
+echo 'gate = "https://gate.example.org"' > ~/.mecha/factory/config.toml
+install -m 600 /dev/stdin ~/.mecha/factory/publish.key      # paste the token
+factory-publish remote                                      # is it up
+```
+
+`factory-publish serve --dev` has a local twin: `factory serve --dev` binds
+three loopback ports to the three roles and takes the identical path through
+`Host` resolution, routing and headers. Everything but TLS is exercised without
+a domain existing.
+
+Deployment, the Cloudflare decision, and what to watch: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+**Three origins, because one of them has to permit WebAssembly.** A bundle's
+content class decides which origin may serve it: `static` and `interactive` go
+to the artifact origin, `compute` to its own, and a notebook asked for on the
+wrong one is redirected rather than served under the wrong policy. Granting
+`wasm-unsafe-eval` on the origin that carries every report would be the
+silently-degrading-sandbox shape, one origin wide.
+
+**`visibility` is enforced.** It was recorded and unenforced for as long as
+there was no origin to enforce it at. Now a private bundle answers exactly what
+a bundle that never existed answers — byte for byte, because any difference
+between them is the answer to the question a capability URL exists to withhold.
+A bundle published but never aliased is not yet a publication. Capability URLs
+for private bundles are step 7; until then private means served to nobody.
 
 ## The invariants
 
@@ -105,7 +139,10 @@ the short version:
   and it is why the public box holds none of mecha's code.
 - **Assume the public box is lost.** It holds a request queue, published bytes
   and a TLS certificate. No provider key, no model, nothing that reaches home.
-  Everything drained from it arrives marked as third-party text.
+  Everything drained from it arrives marked as third-party text. The two keys it
+  verifies are stored as Argon2id hashes, so reading its disk gets an attacker a
+  verifier rather than a token — and packets go one way: mecha publishes and
+  drains, and the origin never dials home.
 - **The server can only return objects that validate against a schema mecha
   itself uploaded**, and mecha re-validates on arrival. A hostile origin cannot
   invent a field, change a request's type, or exceed a cap. What it *can* do is
