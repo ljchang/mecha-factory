@@ -96,11 +96,15 @@ pub type Result<T> = std::result::Result<T, ManifestError>;
 
 /// Escape text for interpolation into HTML, including attribute values.
 ///
+/// Public because the server interpolates the same class of text — a
+/// stranger's own answers, handed back to them on a confirmation page — and a
+/// second escaper would be a second thing to get wrong.
+///
 /// Hand-rolled and applied at **every** interpolation site rather than at the
 /// ones that look risky. A manifest is ours, so this is not the injection
 /// boundary that matters — but a form's `value` attribute is re-rendered from a
 /// stranger's rejected submission when errors are shown, and that one is.
-pub(crate) fn escape(text: &str) -> String {
+pub fn escape_text(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -122,11 +126,11 @@ mod tests {
     #[test]
     fn escaping_covers_both_quote_styles_and_the_ampersand_first() {
         assert_eq!(
-            escape(r#"<a href="x" onclick='y'>&"#),
+            escape_text(r#"<a href="x" onclick='y'>&"#),
             "&lt;a href=&quot;x&quot; onclick=&#39;y&#39;&gt;&amp;"
         );
         // The ampersand must not be double-escaped by a later replacement,
         // which is what a naive sequence of `replace` calls gets wrong.
-        assert_eq!(escape("&lt;"), "&amp;lt;");
+        assert_eq!(escape_text("&lt;"), "&amp;lt;");
     }
 }

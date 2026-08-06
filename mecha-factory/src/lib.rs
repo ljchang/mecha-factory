@@ -35,6 +35,7 @@ pub mod bundles;
 pub mod config;
 pub mod db;
 pub mod http;
+pub mod intake;
 pub mod keys;
 pub mod ratelimit;
 pub mod serve;

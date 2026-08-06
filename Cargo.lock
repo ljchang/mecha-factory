@@ -1086,6 +1086,7 @@ dependencies = [
  "rustls-acme",
  "serde",
  "serde_json",
+ "sha2",
  "tar",
  "tempfile",
  "thiserror 2.0.19",

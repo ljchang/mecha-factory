@@ -19,6 +19,7 @@
 //! this server permits and it is the one the local preview server uses too.
 
 pub mod artifacts;
+pub mod intake;
 pub mod v1;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -49,6 +50,9 @@ pub struct App {
     /// suits both is a number that stops a reader or lets a scraper walk the
     /// whole URL space.
     pub asset_limit: RateLimiter,
+    /// Where a verification link goes. An interface rather than a feature —
+    /// see `crate::intake`.
+    pub mailer: Box<dyn crate::intake::Mailer>,
     pub started: Instant,
 }
 
@@ -56,6 +60,17 @@ pub type Shared = Arc<App>;
 
 impl App {
     pub fn new(config: Config, db: Db) -> anyhow::Result<App> {
+        App::with_mailer(config, db, Box::new(crate::intake::LogMailer))
+    }
+
+    /// The same thing with delivery supplied — which is how a test reads the
+    /// link a stranger would have been sent, and how a real deployment will
+    /// hand in an SMTP sender without this crate learning what SMTP is.
+    pub fn with_mailer(
+        config: Config,
+        db: Db,
+        mailer: Box<dyn crate::intake::Mailer>,
+    ) -> anyhow::Result<App> {
         let files = Files::new(config.bundle_root())?;
         Ok(App {
             api_limit: RateLimiter::new(config.limits.rate_per_minute),
@@ -63,6 +78,7 @@ impl App {
             files,
             config,
             db,
+            mailer,
             started: Instant::now(),
         })
     }
@@ -88,6 +104,17 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/bundles/{id}/alias", post(v1::alias))
         .route("/v1/queue", get(v1::drain))
         .route("/v1/queue/ack", post(v1::ack))
+        // The typed way in. On the gate, path-scoped by handle rather than
+        // subdomain-scoped: a form is server-rendered HTML with no script, so
+        // it executes nothing and there is nothing for an origin to separate
+        // (§14.3). The artifact origins are a different story, and that is why
+        // they are different origins.
+        .route(
+            "/f/{handle}/{type_id}",
+            get(intake::form).post(intake::submit),
+        )
+        .route("/f/{handle}/{type_id}/{name}", get(intake::asset))
+        .route("/f/{handle}/{type_id}/c/{token}", get(intake::confirm))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))

@@ -32,7 +32,7 @@
 //! `unsafe-inline`) holds with nothing to relax. [`FormPage::assets`] returns
 //! the files to write beside the HTML.
 
-use crate::{escape, Acknowledgment, Condition, Field, FieldKind, RequestType, Step};
+use crate::{escape_text, Acknowledgment, Condition, Field, FieldKind, RequestType, Step};
 
 /// How to render. Everything here is presentation; none of it changes what
 /// validates.
@@ -84,9 +84,12 @@ impl RequestType {
     /// Render this request type as a form.
     pub fn form(&self, options: &FormOptions) -> FormPage {
         let mut body = String::new();
-        body.push_str(&format!("<h1>{}</h1>\n", escape(&self.title)));
+        body.push_str(&format!("<h1>{}</h1>\n", escape_text(&self.title)));
         if let Some(description) = &self.description {
-            body.push_str(&format!("<p class=\"intro\">{}</p>\n", escape(description)));
+            body.push_str(&format!(
+                "<p class=\"intro\">{}</p>\n",
+                escape_text(description)
+            ));
         }
 
         if !options.errors.is_empty() {
@@ -109,9 +112,9 @@ impl RequestType {
                     .unwrap_or(error.field.as_str());
                 body.push_str(&format!(
                     "<li><a href=\"#{}\">{}</a>: {}</li>\n",
-                    escape(&error.field),
-                    escape(label),
-                    escape(&error.message)
+                    escape_text(&error.field),
+                    escape_text(label),
+                    escape_text(&error.message)
                 ));
             }
             body.push_str("</ul></div>\n");
@@ -123,12 +126,12 @@ impl RequestType {
         // layer off. Found by opening the page rather than by reading the code.
         body.push_str(&format!(
             "<form method=\"post\" action=\"{}\">\n",
-            escape(&options.action)
+            escape_text(&options.action)
         ));
         if let Some(token) = &options.token {
             body.push_str(&format!(
                 "<input type=\"hidden\" name=\"_token\" value=\"{}\">\n",
-                escape(token)
+                escape_text(token)
             ));
         }
 
@@ -172,7 +175,7 @@ impl RequestType {
              <title>{}</title>\n\
              <link rel=\"stylesheet\" href=\"form.css\">\n\
              </head>\n<body>\n<main>\n{}</main>\n</body>\n</html>\n",
-            escape(&self.title),
+            escape_text(&self.title),
             body
         );
 
@@ -208,12 +211,12 @@ impl RequestType {
     fn render_step(&self, step: &Step, options: &FormOptions) -> String {
         let mut out = format!(
             "<fieldset id=\"step-{}\" data-step=\"{}\"><legend>{}</legend>\n",
-            escape(&step.id),
-            escape(&step.id),
-            escape(&step.title)
+            escape_text(&step.id),
+            escape_text(&step.id),
+            escape_text(&step.title)
         );
         if let Some(description) = &step.description {
-            out.push_str(&format!("<p>{}</p>\n", escape(description)));
+            out.push_str(&format!("<p>{}</p>\n", escape_text(description)));
         }
         for name in &step.fields {
             if let Some(field) = self.field(name) {
@@ -225,7 +228,7 @@ impl RequestType {
     }
 
     fn render_field(&self, field: &Field, options: &FormOptions) -> String {
-        let name = escape(&field.name);
+        let name = escape_text(&field.name);
         let error = options.errors.iter().find(|e| e.field == field.name);
         let described_by = {
             let mut ids = Vec::new();
@@ -255,7 +258,7 @@ impl RequestType {
                  rows=\"6\"{required}{invalid}{described_by}>{}</textarea>",
                 value
                     .and_then(|v| v.as_str())
-                    .map(escape)
+                    .map(escape_text)
                     .unwrap_or_default()
             ),
             FieldKind::Select { options: choices } => {
@@ -276,8 +279,8 @@ impl RequestType {
                     };
                     out.push_str(&format!(
                         "<option value=\"{}\"{selected}>{}</option>\n",
-                        escape(&choice.value),
-                        escape(&choice.label)
+                        escape_text(&choice.value),
+                        escape_text(&choice.label)
                     ));
                 }
                 out.push_str("</select>");
@@ -300,8 +303,8 @@ impl RequestType {
                     out.push_str(&format!(
                         "<label class=\"choice\"><input type=\"checkbox\" name=\"{name}\" \
                          value=\"{}\"{checked}> {}</label>\n",
-                        escape(&choice.value),
-                        escape(&choice.label)
+                        escape_text(&choice.value),
+                        escape_text(&choice.label)
                     ));
                 }
                 out.push_str("</div>");
@@ -329,7 +332,7 @@ impl RequestType {
                             " maxlength=\"{max_length}\"{}",
                             pattern
                                 .as_ref()
-                                .map(|p| format!(" pattern=\"{}\"", escape(p)))
+                                .map(|p| format!(" pattern=\"{}\"", escape_text(p)))
                                 .unwrap_or_default()
                         ),
                     ),
@@ -344,10 +347,10 @@ impl RequestType {
                         format!(
                             "{}{}",
                             min.as_ref()
-                                .map(|m| format!(" min=\"{}\"", escape(m)))
+                                .map(|m| format!(" min=\"{}\"", escape_text(m)))
                                 .unwrap_or_default(),
                             max.as_ref()
-                                .map(|m| format!(" max=\"{}\"", escape(m)))
+                                .map(|m| format!(" max=\"{}\"", escape_text(m)))
                                 .unwrap_or_default()
                         ),
                     ),
@@ -366,8 +369,8 @@ impl RequestType {
                      value=\"{}\"{required}{invalid}{described_by}>",
                     value
                         .map(|v| match v {
-                            serde_json::Value::String(s) => escape(s),
-                            other => escape(&other.to_string()),
+                            serde_json::Value::String(s) => escape_text(s),
+                            other => escape_text(&other.to_string()),
                         })
                         .unwrap_or_default()
                 )
@@ -384,7 +387,7 @@ impl RequestType {
             } else {
                 ""
             },
-            escape(&field.label),
+            escape_text(&field.label),
             if field.required {
                 " <span class=\"req\" aria-hidden=\"true\">*</span>"
             } else {
@@ -394,7 +397,7 @@ impl RequestType {
         if let Some(help) = &field.help {
             out.push_str(&format!(
                 "<p class=\"help\" id=\"{name}-help\">{}</p>\n",
-                escape(help)
+                escape_text(help)
             ));
         }
         out.push_str(&control);
@@ -402,7 +405,7 @@ impl RequestType {
         if let Some(error) = error {
             out.push_str(&format!(
                 "<p class=\"error\" id=\"{name}-error\">{}</p>\n",
-                escape(&error.message)
+                escape_text(&error.message)
             ));
         }
         out.push_str("</div>\n");
@@ -411,7 +414,7 @@ impl RequestType {
 }
 
 fn render_acknowledgment(ack: &Acknowledgment, options: &FormOptions) -> String {
-    let id = escape(&ack.id);
+    let id = escape_text(&ack.id);
     let checked = if options.values.get(&ack.id) == Some(&serde_json::Value::Bool(true)) {
         " checked"
     } else {
@@ -427,10 +430,13 @@ fn render_acknowledgment(ack: &Acknowledgment, options: &FormOptions) -> String 
         } else {
             String::new()
         },
-        escape(&ack.label)
+        escape_text(&ack.label)
     ));
     if let Some(description) = &ack.description {
-        out.push_str(&format!("<p class=\"help\">{}</p>\n", escape(description)));
+        out.push_str(&format!(
+            "<p class=\"help\">{}</p>\n",
+            escape_text(description)
+        ));
     }
     if let Some(link) = &ack.info_link {
         // `rel="noopener noreferrer"` because the destination is named in our
@@ -439,13 +445,13 @@ fn render_acknowledgment(ack: &Acknowledgment, options: &FormOptions) -> String 
         out.push_str(&format!(
             "<p class=\"help\"><a href=\"{}\" target=\"_blank\" rel=\"noopener noreferrer\">\
              What this means</a></p>\n",
-            escape(link)
+            escape_text(link)
         ));
     }
     if let Some(error) = error {
         out.push_str(&format!(
             "<p class=\"error\" id=\"{id}-error\">{}</p>\n",
-            escape(&error.message)
+            escape_text(&error.message)
         ));
     }
     out.push_str("</div>\n");

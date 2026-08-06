@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 2;
+const SCHEMA: i64 = 3;
 
 #[derive(Clone)]
 pub struct Db {
@@ -150,6 +150,19 @@ pub struct TypeRow {
     pub manifest: String,
     pub schema: String,
     pub updated_at: String,
+}
+
+/// A submission on its way in, before anybody has proved anything.
+#[derive(Debug, Clone)]
+pub struct Submission {
+    pub user_id: String,
+    pub type_id: String,
+    pub payload: String,
+    pub created_at: String,
+    pub retain_until: Option<String>,
+    pub verify_hash: String,
+    pub verify_expires: String,
+    pub recipient_hash: String,
 }
 
 /// A typed request as it sits on the box, before home has ever seen it.
@@ -287,6 +300,20 @@ impl Db {
             let n = conn.execute(
                 "UPDATE users SET status = ?2 WHERE id = ?1",
                 params![id, status],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Verification emails this user's forms may send in a day.
+    ///
+    /// Small at signup and raised deliberately: reputation is earned per
+    /// account rather than granted at it (§15.5).
+    pub fn user_send_budget(&self, id: &str, send_budget: i64) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE users SET send_budget = ?2 WHERE id = ?1",
+                params![id, send_budget],
             )?;
             Ok(n > 0)
         })
@@ -643,6 +670,125 @@ impl Db {
         })
     }
 
+    // ---- intake ---------------------------------------------------------
+
+    /// Store a submission awaiting verification.
+    ///
+    /// It lands as `submitted`, which `drain` does not return: an unverified
+    /// row costs a little disk and never a triage run.
+    pub fn submission_add(&self, row: &Submission) -> Result<i64> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO queue (user_id, type_id, state, payload, created_at, retain_until, \
+                 verify_hash, verify_expires, recipient_hash, submitted_on) \
+                 VALUES (?1, ?2, 'submitted', ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    row.user_id,
+                    row.type_id,
+                    row.payload,
+                    row.created_at,
+                    row.retain_until,
+                    row.verify_hash,
+                    row.verify_expires,
+                    row.recipient_hash,
+                    &row.created_at[..10.min(row.created_at.len())],
+                ],
+            )?;
+            Ok(conn.last_insert_rowid())
+        })
+    }
+
+    /// Spend a verification token: `submitted` → `queued`, once.
+    ///
+    /// Read and spend inside one transaction, keyed on the sequence number the
+    /// read found. Two clicks racing means one `UPDATE` matches a row and the
+    /// other matches nothing, which is exactly what single-use means — and
+    /// zero matched rows is the whole of "already used", "expired" and "never
+    /// existed", which is also all the caller can tell a stranger.
+    ///
+    /// **Not `last_insert_rowid()`.** An earlier version selected the row back
+    /// that way after the update; it is per *connection* and per *any* table,
+    /// so an unrelated insert between the submission and the click — minting a
+    /// key, say — silently made confirmation fail. Found by a test that did
+    /// exactly that, having passed in the test that did not.
+    pub fn submission_verify(
+        &self,
+        user_id: &str,
+        hash: &str,
+        now: &str,
+    ) -> Result<Option<QueueRow>> {
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let found: Option<QueueRow> = tx
+                .query_row(
+                    "SELECT seq, user_id, type_id, state, payload, created_at FROM queue \
+                     WHERE user_id = ?1 AND verify_hash = ?2 AND state = 'submitted' \
+                     AND verify_expires > ?3",
+                    params![user_id, hash, now],
+                    queue_row,
+                )
+                .optional()?;
+            let Some(mut row) = found else {
+                return Ok(None);
+            };
+            let changed = tx.execute(
+                "UPDATE queue SET state = 'queued', verify_hash = NULL, verify_expires = NULL \
+                 WHERE seq = ?1 AND state = 'submitted'",
+                params![row.seq],
+            )?;
+            tx.commit()?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            row.state = "queued".into();
+            Ok(Some(row))
+        })
+    }
+
+    /// Verification sends today: to this recipient, and by this user.
+    pub fn sends_today(&self, user_id: &str, recipient: &str, today: &str) -> Result<(i64, i64)> {
+        self.with(|conn| {
+            let to_recipient = conn.query_row(
+                "SELECT COUNT(*) FROM queue WHERE user_id = ?1 AND submitted_on = ?2 \
+                 AND recipient_hash = ?3",
+                params![user_id, today, recipient],
+                |r| r.get(0),
+            )?;
+            let by_user = conn.query_row(
+                "SELECT COUNT(*) FROM queue WHERE user_id = ?1 AND submitted_on = ?2",
+                params![user_id, today],
+                |r| r.get(0),
+            )?;
+            Ok((to_recipient, by_user))
+        })
+    }
+
+    /// Unverified rows whose link has expired.
+    ///
+    /// **Deleted rather than kept**: an abandoned submission is a stranger's
+    /// personal data with no consent behind it, and "never verified" is the
+    /// one state where keeping the record serves nobody. Returns what went, so
+    /// the sweep can say it.
+    pub fn expire_unverified(&self, now: &str) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM queue WHERE state = 'submitted' AND verify_expires IS NOT NULL \
+                 AND verify_expires <= ?1",
+                params![now],
+            )?)
+        })
+    }
+
+    /// Drop everything past its retention window.
+    pub fn expire_retained(&self, now: &str) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM queue WHERE retain_until IS NOT NULL AND retain_until <= ?1",
+                params![now],
+            )?)
+        })
+    }
+
     // ---- idempotency ----------------------------------------------------
 
     pub fn idempotent(&self, user_id: &str, key: &str) -> Result<Option<(String, u32)>> {
@@ -797,6 +943,12 @@ fn migrate(conn: &Connection) -> Result<()> {
     // half-migrated, because a ledger that is partly scoped is worse than one
     // that will not open — and this server has never been deployed, so the
     // honest instruction is the cheap one.
+    if version > 0 && version < SCHEMA {
+        anyhow::bail!(
+            "this ledger is schema {version} and this binary speaks {SCHEMA}. \
+             Nothing has been deployed: delete the database file and start again."
+        );
+    }
     if version == 1 {
         anyhow::bail!(
             "this ledger is schema 1, which predates users. Nothing has been \
@@ -885,9 +1037,20 @@ fn migrate(conn: &Connection) -> Result<()> {
             -- When this stops being ours to hold. A pile of other people's
             -- personal data with no deletion story is the thing you cannot
             -- start having and then stop.
-            retain_until TEXT
+            retain_until TEXT,
+            -- The verification link, as a hash, cleared when it is spent. A
+            -- row with one is `submitted` and is never drained.
+            verify_hash TEXT,
+            verify_expires TEXT,
+            -- Who the link went to, as something countable that is not a
+            -- second copy of their address.
+            recipient_hash TEXT,
+            -- The day it was submitted, for the send budgets.
+            submitted_on TEXT
         );
         CREATE INDEX IF NOT EXISTS queue_by_state ON queue (user_id, state, seq);
+        CREATE INDEX IF NOT EXISTS queue_by_verify ON queue (user_id, verify_hash);
+        CREATE INDEX IF NOT EXISTS queue_by_sends ON queue (user_id, submitted_on, recipient_hash);
 
         CREATE TABLE IF NOT EXISTS idempotency (
             key         TEXT PRIMARY KEY,
@@ -905,6 +1068,21 @@ fn migrate(conn: &Connection) -> Result<()> {
 /// Now, as the wire and the ledger both spell it.
 pub fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+/// Today, as the send budgets count it.
+pub fn today() -> String {
+    chrono::Utc::now().format("%Y-%m-%d").to_string()
+}
+
+pub fn hours_from_now(hours: u32) -> String {
+    (chrono::Utc::now() + chrono::Duration::hours(hours as i64))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+pub fn days_from_now(days: u32) -> String {
+    (chrono::Utc::now() + chrono::Duration::days(days as i64))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]

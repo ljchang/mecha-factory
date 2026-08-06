@@ -17,6 +17,26 @@ use mecha_factory::config::{Config, Limits, Listen, Origins};
 use mecha_factory::db::{Db, UserRow};
 use mecha_factory::http::App;
 
+/// A mailer that keeps the links instead of sending them, so a test can click
+/// what a stranger would have clicked.
+#[derive(Clone, Default)]
+pub struct CapturedMail(std::sync::Arc<std::sync::Mutex<Vec<String>>>);
+
+impl mecha_factory::intake::Mailer for CapturedMail {
+    fn send_verification(
+        &self,
+        _address: &str,
+        _request_type: &mecha_manifest::RequestType,
+        link: &str,
+    ) {
+        self.0.lock().unwrap().push(link.to_string());
+    }
+
+    fn describe(&self) -> String {
+        "captured (test)".into()
+    }
+}
+
 pub struct Server {
     pub gate: SocketAddr,
     pub artifacts: SocketAddr,
@@ -24,6 +44,8 @@ pub struct Server {
     pub db: Db,
     /// The user every helper acts as unless told otherwise.
     pub user: UserRow,
+    /// Every verification link that would have been sent.
+    pub mail: CapturedMail,
     pub dir: tempfile::TempDir,
 }
 
@@ -164,7 +186,8 @@ pub fn start() -> Server {
     let user = db
         .user_create("alice", "alice@example.org", "2026-08-06T00:00:00Z")
         .unwrap();
-    let app = Arc::new(App::new(config, db.clone()).unwrap());
+    let mail = CapturedMail::default();
+    let app = Arc::new(App::with_mailer(config, db.clone(), Box::new(mail.clone())).unwrap());
 
     std::thread::spawn(move || {
         runtime
@@ -181,6 +204,7 @@ pub fn start() -> Server {
         compute: addresses[2],
         db,
         user,
+        mail,
         dir,
     }
 }
@@ -221,6 +245,13 @@ impl Server {
                 "2026-08-06T00:00:00Z",
             )
             .unwrap()
+    }
+
+    /// The token from the most recent verification link.
+    pub fn verification_token(&self) -> String {
+        let links = self.mail.0.lock().unwrap();
+        let link = links.last().expect("no verification link was sent");
+        link.rsplit('/').next().unwrap().to_string()
     }
 
     pub fn key(&self, scope: mecha_factory::db::Scope) -> String {

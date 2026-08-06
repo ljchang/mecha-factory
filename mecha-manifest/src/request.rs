@@ -21,7 +21,7 @@
 //! unchanged.
 
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 
 use crate::{Condition, ManifestError, Result};
@@ -63,6 +63,88 @@ pub struct RequestType {
     /// Required checkboxes shown before submission.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acknowledgments: Vec<Acknowledgment>,
+
+    /// How a submission proves an address before it costs anybody anything.
+    ///
+    /// **Absent means the type cannot be served as a form.** Verification is
+    /// what stands between an unauthenticated endpoint and a queue that spends
+    /// tokens per stranger, so a type with no verification is one the origin
+    /// refuses to serve rather than one it serves unverified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Verification>,
+
+    /// What the submitter is told once they have verified.
+    ///
+    /// Templated in the manifest, never composed live — see §14.4. Anything a
+    /// stranger sees synchronously has to be computable by the origin alone, or
+    /// the artifact stops working the moment its agent is away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation: Option<Confirmation>,
+}
+
+/// Proving that the address on a submission belongs to whoever sent it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Verification {
+    /// The field holding the address to verify.
+    ///
+    /// **Named, never guessed.** A form may hold two email fields — yours and
+    /// your advisor's — and picking the first one would send a stranger's
+    /// verification link to somebody who never asked for it. That is not a
+    /// wrong default, it is unsolicited mail sent in the user's name.
+    pub field: String,
+    /// How long the link lives. Short on purpose: an unverified row is deleted
+    /// rather than kept, so this is also how long an abandoned submission sits
+    /// on the box.
+    #[serde(default = "default_verification_hours")]
+    pub expires_hours: u32,
+}
+
+fn default_verification_hours() -> u32 {
+    48
+}
+
+/// The page a verified submitter lands on.
+///
+/// `body` may interpolate the submission's own values as `{field_name}`, which
+/// is the submitter's own text handed back to them. Every placeholder must name
+/// a real field — checked when the manifest loads, so a typo is a startup error
+/// rather than a `{advisor_nmae}` on a stranger's screen.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Confirmation {
+    pub heading: String,
+    pub body: String,
+    /// What to say about when they will hear back.
+    ///
+    /// Optional because the honest answer is sometimes nothing: an
+    /// acknowledgment promising a reply within two days is a lie if nobody is
+    /// attached for a week (§14.4), and no promise beats a broken one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expect_reply_within: Option<String>,
+}
+
+impl Confirmation {
+    /// The body with `{field}` placeholders filled from a validated
+    /// submission.
+    ///
+    /// Values are the submitter's own words, so they are returned to them and
+    /// nowhere else — but they are still stranger-supplied text on a page we
+    /// serve, so the caller escapes the result. Newlines are collapsed here
+    /// because a value that carries them can otherwise reshape whatever it is
+    /// interpolated into.
+    pub fn render(&self, values: &Map<String, Value>) -> String {
+        let mut out = self.body.clone();
+        for (name, value) in values {
+            let text = match value {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let flattened = text.replace(['\n', '\r'], " ");
+            out = out.replace(&format!("{{{name}}}"), &flattened);
+        }
+        out
+    }
 }
 
 /// One page of a multi-step form.
@@ -374,7 +456,26 @@ impl RequestType {
                 )));
             }
         }
+        check_references(self)?;
         Ok(())
+    }
+
+    /// Whether this type can be served as a form at all.
+    ///
+    /// Verification is what stands between an unauthenticated endpoint and a
+    /// queue that costs money per stranger, so a type without it is refused by
+    /// the origin rather than served unverified. Asked here, on the type,
+    /// because the server should not be deciding what makes a request type
+    /// servable.
+    pub fn servable(&self) -> Result<&Verification> {
+        self.verification.as_ref().ok_or_else(|| {
+            ManifestError::invalid(format!(
+                "`{}` declares no [verification], so it cannot be served as a \
+                 form: an unverified submission would cost somebody a triage \
+                 run for an address nobody proved",
+                self.id
+            ))
+        })
     }
 
     /// A condition may only read a field this type declares. Otherwise it is
@@ -488,6 +589,67 @@ fn check_field_keys(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Everything wrong with a `[verification]` or `[confirmation]` block.
+///
+/// Both refer to fields by name, and a name that does not exist is a runtime
+/// surprise on a stranger's screen — or, worse, a verification link sent
+/// nowhere. Checked at load, where it is our problem instead of theirs.
+fn check_references(request_type: &RequestType) -> Result<()> {
+    if let Some(verification) = &request_type.verification {
+        let field = request_type.field(&verification.field).ok_or_else(|| {
+            ManifestError::invalid(format!(
+                "[verification] names `{}`, which is not a field on `{}`",
+                verification.field, request_type.id
+            ))
+        })?;
+        if !matches!(field.kind, FieldKind::Email { .. }) {
+            return Err(ManifestError::invalid(format!(
+                "[verification] names `{}`, which is a {:?} rather than an email \
+                 field — a link can only be sent to an address",
+                verification.field,
+                std::mem::discriminant(&field.kind)
+            )));
+        }
+        if !field.required {
+            return Err(ManifestError::invalid(format!(
+                "[verification] names `{}`, which is optional. A submission that \
+                 left it blank could never be verified, and an unverified \
+                 submission is one nobody ever reads.",
+                verification.field
+            )));
+        }
+        if verification.expires_hours == 0 {
+            return Err(ManifestError::invalid(
+                "[verification] expires_hours = 0 would expire every link before \
+                 it could be clicked",
+            ));
+        }
+    }
+
+    if let Some(confirmation) = &request_type.confirmation {
+        // Every `{placeholder}` names a real field, or a stranger reads
+        // `{advisor_nmae}` on the page that is supposed to reassure them.
+        let mut rest = confirmation.body.as_str();
+        while let Some(open) = rest.find('{') {
+            let Some(close) = rest[open..].find('}') else {
+                return Err(ManifestError::invalid(
+                    "[confirmation] body has a `{` with no `}`",
+                ));
+            };
+            let name = &rest[open + 1..open + close];
+            if request_type.field(name).is_none() {
+                return Err(ManifestError::invalid(format!(
+                    "[confirmation] interpolates `{{{name}}}`, which is not a field \
+                     on `{}`",
+                    request_type.id
+                )));
+            }
+            rest = &rest[open + close + 1..];
+        }
+    }
+    Ok(())
+}
+
 /// An id is a URL path segment, a filename, a JSON key and part of a generated
 /// tool name. Keep it to what is unambiguous in all four — the same rule
 /// trigger and producer names follow in mecha.
@@ -535,6 +697,124 @@ pub(crate) fn is_iso_date(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// A link can only be sent to an address, and only to the *right* one. A
+    /// form with two email fields is ordinary — yours and your advisor's — and
+    /// guessing would mail a stranger's verification to somebody who never
+    /// asked for it.
+    #[test]
+    fn verification_must_name_a_required_email_field() {
+        let base = r#"
+            id = "meeting"
+            version = 1
+            title = "Meeting"
+            [[fields]]
+            name = "requester_email"
+            label = "Your email"
+            kind = "email"
+            required = true
+            [[fields]]
+            name = "advisor_email"
+            label = "Your advisor"
+            kind = "email"
+            [[fields]]
+            name = "topic"
+            label = "Topic"
+            kind = "text"
+            max_length = 200
+            required = true
+        "#;
+        RequestType::from_toml(&format!(
+            "{base}\n[verification]\nfield = \"requester_email\""
+        ))
+        .unwrap();
+
+        for (block, expected) in [
+            ("field = \"nobody\"", "not a field"),
+            ("field = \"topic\"", "rather than an email"),
+            // Optional: a submission that left it blank could never be
+            // verified, and an unverified submission is one nobody reads.
+            ("field = \"advisor_email\"", "optional"),
+            (
+                "field = \"requester_email\"\nexpires_hours = 0",
+                "expire every link",
+            ),
+        ] {
+            let err = RequestType::from_toml(&format!("{base}\n[verification]\n{block}"))
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(expected), "{block}: {err}");
+        }
+    }
+
+    /// A typo in a confirmation body is a `{advisor_nmae}` on a stranger's
+    /// screen at the moment they are being reassured.
+    #[test]
+    fn a_confirmation_interpolates_only_real_fields() {
+        let base = r#"
+            id = "meeting"
+            version = 1
+            title = "Meeting"
+            [[fields]]
+            name = "topic"
+            label = "Topic"
+            kind = "text"
+            max_length = 200
+            required = true
+        "#;
+        let good = RequestType::from_toml(&format!(
+            "{base}\n[confirmation]\nheading = \"Thanks\"\nbody = \"About {{topic}}.\""
+        ))
+        .unwrap();
+        let mut values = Map::new();
+        values.insert("topic".into(), Value::String("a grant".into()));
+        assert_eq!(good.confirmation.unwrap().render(&values), "About a grant.");
+
+        let err = RequestType::from_toml(&format!(
+            "{base}\n[confirmation]\nheading = \"Thanks\"\nbody = \"About {{topci}}.\""
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("not a field"), "{err}");
+    }
+
+    /// A value carrying newlines can reshape whatever it is interpolated into,
+    /// so it arrives as one line.
+    #[test]
+    fn an_interpolated_value_cannot_add_lines() {
+        let confirmation = Confirmation {
+            heading: "Thanks".into(),
+            body: "About {topic}.".into(),
+            expect_reply_within: None,
+        };
+        let mut values = Map::new();
+        values.insert(
+            "topic".into(),
+            Value::String("a grant\n\nSubject: something else".into()),
+        );
+        let rendered = confirmation.render(&values);
+        assert!(!rendered.contains('\n'), "{rendered}");
+    }
+
+    /// A type with no verification is refused as a form rather than served
+    /// unverified: it is the difference between an unauthenticated endpoint
+    /// and an unauthenticated endpoint that spends money.
+    #[test]
+    fn a_type_without_verification_is_not_servable() {
+        let toml = r#"
+            id = "meeting"
+            version = 1
+            title = "Meeting"
+            [[fields]]
+            name = "topic"
+            label = "Topic"
+            kind = "text"
+            max_length = 200
+        "#;
+        let parsed = RequestType::from_toml(toml).unwrap();
+        let err = parsed.servable().unwrap_err().to_string();
+        assert!(err.contains("cannot be served as a form"), "{err}");
+    }
+
     use super::*;
     use serde_json::json;
 

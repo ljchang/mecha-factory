@@ -76,6 +76,14 @@ enum Command {
         #[command(subcommand)]
         action: QueueAction,
     },
+    /// Delete what we are no longer entitled to hold.
+    ///
+    /// Two sweeps, and both are policy rather than tidying. An unverified
+    /// submission past its link's expiry is a stranger's data with no consent
+    /// behind it — the one state where keeping the record serves nobody. And a
+    /// record past its type's `retain_days` is one we said we would not keep.
+    /// Run it nightly; it says what it removed.
+    Sweep,
     /// Parse the configuration, report what it would serve, and exit. What a
     /// deploy runs before restarting anything.
     Check,
@@ -191,6 +199,7 @@ fn main() -> Result<()> {
         Command::Key { action } => key(&cli, action),
         Command::Serve { dev, port } => serve(&cli, *dev, *port),
         Command::Queue { action } => queue(&cli, action),
+        Command::Sweep => sweep(&cli),
         Command::Check => check(&cli),
     }
 }
@@ -463,6 +472,19 @@ fn serve(cli: &Cli, dev: bool, port: u16) -> Result<()> {
         .block_on(mecha_factory::serve::run(config, dev))
 }
 
+fn sweep(cli: &Cli) -> Result<()> {
+    let db = open_db(cli)?;
+    let now = db::now();
+    let unverified = db.expire_unverified(&now)?;
+    let retained = db.expire_retained(&now)?;
+    println!("{unverified} unverified submission(s) past their link's expiry, removed");
+    println!("{retained} record(s) past their retention window, removed");
+    if unverified + retained == 0 {
+        println!("(nothing was due)");
+    }
+    Ok(())
+}
+
 fn check(cli: &Cli) -> Result<()> {
     let config = load_config(cli)?;
     let db = Db::open(&config.db_path())?;
@@ -475,6 +497,12 @@ fn check(cli: &Cli) -> Result<()> {
         println!("{:<9} {}", role.as_str(), config.base_url(role));
     }
     println!("tls       {}", mecha_factory::tls::describe(&config));
+    // Forms are refused outright without a way to send a link, so what the
+    // mailer is belongs in the same breath as what the certificate is.
+    println!(
+        "mail      {}",
+        mecha_factory::intake::Mailer::describe(&mecha_factory::intake::LogMailer)
+    );
     println!(
         "ledger    {} users, {} bundles, {} queued, {} keys",
         db.users()?.len(),

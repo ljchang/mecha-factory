@@ -75,3 +75,20 @@ kind = "bool"
 [[acknowledgments]]
 id = "understands_request"
 label = "I understand this is a request, not a booking, and may be declined."
+
+# What stands between an unauthenticated form and a queue that costs a triage
+# run per stranger. The field is named rather than guessed: this form has one
+# email field today, and the day it has two, "the first one" would send a
+# stranger's link to somebody who never asked for it.
+[verification]
+field = "requester_email"
+expires_hours = 48
+
+# What they see once they have clicked the link. Templated here, never composed
+# live — anything a submitter sees synchronously has to be computable by the
+# origin alone, or the form stops working the moment its agent is away.
+[confirmation]
+heading = "Thanks — that's in the queue"
+body = """
+Your request about {purpose} is confirmed, and it will be read by a person.
+"""
