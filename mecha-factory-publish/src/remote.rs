@@ -28,10 +28,59 @@ use std::path::{Path, PathBuf};
 
 use crate::store::{mecha_home, BundleStore};
 
+/// Which credential a call presents, and therefore what it may do.
+///
+/// Two keys rather than one, and they live in different files: publishing
+/// writes the public surface, draining reads other people's submissions. A
+/// compromise of one is not a compromise of the other, and the box enforces it
+/// from the database row rather than from the token's prefix — the prefix is a
+/// label for humans, so a drain key spelled `mk_pub_` still cannot publish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    Publish,
+    Drain,
+}
+
+impl Scope {
+    /// The human label a minted key carries. Checked when reading a key file,
+    /// so pointing `drain.key` at a publish key is caught here with a sentence
+    /// rather than at the far end with a 403.
+    fn prefix(&self) -> &'static str {
+        match self {
+            Scope::Publish => "mk_pub_",
+            Scope::Drain => "mk_drn_",
+        }
+    }
+
+    fn file(&self) -> &'static str {
+        match self {
+            Scope::Publish => "publish.key",
+            Scope::Drain => "drain.key",
+        }
+    }
+
+    /// The environment variable that overrides the file, which is what makes a
+    /// test or a second box a one-line change.
+    fn env(&self) -> &'static str {
+        match self {
+            Scope::Publish => "FACTORY_PUBLISH_KEY",
+            Scope::Drain => "FACTORY_DRAIN_KEY",
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Scope::Publish => "publish",
+            Scope::Drain => "drain",
+        }
+    }
+}
+
 /// Where the box is, and what to present to it.
 pub struct Remote {
     gate: String,
-    publish_key: String,
+    key: String,
+    scope: Scope,
 }
 
 /// Written by hand rather than derived, because a derived one would print the
@@ -42,7 +91,8 @@ impl std::fmt::Debug for Remote {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Remote")
             .field("gate", &self.gate)
-            .field("publish_key", &"<redacted>")
+            .field("scope", &self.scope)
+            .field("key", &"<redacted>")
             .finish()
     }
 }
@@ -74,6 +124,11 @@ impl Remote {
     /// second box a one-line change rather than an edit to a file the real
     /// deployment reads.
     pub fn configured() -> Result<Option<Remote>> {
+        Self::configured_for(Scope::Publish)
+    }
+
+    /// The configured remote presenting one particular credential.
+    pub fn configured_for(scope: Scope) -> Result<Option<Remote>> {
         let dir = Self::dir()?;
         let gate = match std::env::var("FACTORY_GATE") {
             Ok(gate) if !gate.is_empty() => gate,
@@ -95,12 +150,12 @@ impl Remote {
             );
         }
 
-        let key_path = match std::env::var("FACTORY_PUBLISH_KEY") {
+        let key_path = match std::env::var(scope.env()) {
             Ok(path) if !path.is_empty() => PathBuf::from(path),
-            _ => dir.join("publish.key"),
+            _ => dir.join(scope.file()),
         };
-        let publish_key = read_key(&key_path)?;
-        Ok(Some(Remote { gate, publish_key }))
+        let key = read_key(&key_path, scope)?;
+        Ok(Some(Remote { gate, key, scope }))
     }
 
     pub fn gate(&self) -> &str {
@@ -145,27 +200,114 @@ impl Remote {
         Ok(body["url"].as_str().unwrap_or_default().to_string())
     }
 
+    /// Upload a request type, which is what makes a form exist at all.
+    ///
+    /// The manifest travels as **TOML**, exactly as written here, and the box
+    /// parses it with the same `mecha_manifest` code this side used to check
+    /// it. Sending a JSON rendering instead would make the two ends agree only
+    /// as long as two serialisations agreed; sending the source means the form,
+    /// the JSON Schema and both validators are all derived from one text.
+    pub fn type_push(&self, manifest: &str, id: &str) -> Result<serde_json::Value> {
+        self.send(
+            "PUT",
+            &format!("/v1/types/{id}"),
+            Some(manifest.as_bytes()),
+            "text/plain; charset=utf-8",
+        )
+        .with_context(|| format!("uploading the `{id}` request type"))
+    }
+
+    /// What request types the box is serving forms for.
+    pub fn type_list(&self) -> Result<serde_json::Value> {
+        self.request("GET", "/v1/types", None)
+    }
+
+    /// Take everything verified and not yet acknowledged, from `since` on.
+    ///
+    /// A **pure read**: the box marks nothing, so a response that never
+    /// arrives costs a repeat rather than a stranger's request. Which is the
+    /// right way round — see [`Remote::ack`].
+    pub fn drain(&self, since: i64) -> Result<serde_json::Value> {
+        self.request("GET", &format!("/v1/queue?since={since}"), None)
+            .context("draining the queue")
+    }
+
+    /// Delete what home has safely stored. The *only* thing that removes a
+    /// record from the box.
+    ///
+    /// Acknowledge after writing, never before: a crash between the two means
+    /// the record arrives twice, and the duplicate is caught by the local
+    /// store's own id. A crash the other way round loses somebody's request
+    /// with no trace anywhere, which is the failure this whole surface exists
+    /// to prevent.
+    pub fn ack(&self, seqs: &[i64]) -> Result<usize> {
+        let payload = serde_json::json!({ "seqs": seqs });
+        let body = self
+            .send(
+                "POST",
+                "/v1/queue/ack",
+                Some(payload.to_string().as_bytes()),
+                "application/json",
+            )
+            .context("acknowledging drained records")?;
+        Ok(body["deleted"].as_u64().unwrap_or(0) as usize)
+    }
+
     /// Is it up, and what does it hold.
     pub fn health(&self) -> Result<serde_json::Value> {
         self.request("GET", "/v1/health", None)
     }
 
     fn request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<serde_json::Value> {
+        self.send(method, path, body, "application/gzip")
+    }
+
+    /// One HTTP call, with the credential attached and the far end's own error
+    /// message preserved.
+    ///
+    /// `method` used to be decoration — the body decided GET or POST, and the
+    /// content type was always gzip because the only body was an archive.
+    /// Uploading a manifest (TOML, `PUT`) and acknowledging a drain (JSON,
+    /// `POST`) both broke that, and a parameter that was ignored is worse than
+    /// no parameter, because every call site read as though it meant something.
+    fn send(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        content_type: &str,
+    ) -> Result<serde_json::Value> {
         let url = format!("{}{path}", self.gate);
-        let mut response = match body {
-            Some(bytes) => ureq::post(&url)
-                .header("Authorization", &format!("Bearer {}", self.publish_key))
-                .header("Content-Type", "application/gzip")
-                .config()
-                .http_status_as_error(false)
-                .build()
-                .send(bytes),
-            None => ureq::get(&url)
-                .header("Authorization", &format!("Bearer {}", self.publish_key))
+        let auth = format!("Bearer {}", self.key);
+        // ureq 3 types a request by whether it carries a body, so the verb
+        // cannot be a runtime string — which is just as well, since it makes
+        // the (method, body) pairs this client actually speaks explicit, and
+        // an unlisted pair a clear error rather than a malformed request.
+        let mut response = match (method, body) {
+            ("GET", None) => ureq::get(&url)
+                .header("Authorization", &auth)
                 .config()
                 .http_status_as_error(false)
                 .build()
                 .call(),
+            ("POST", Some(bytes)) => ureq::post(&url)
+                .header("Authorization", &auth)
+                .header("Content-Type", content_type)
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send(bytes),
+            ("PUT", Some(bytes)) => ureq::put(&url)
+                .header("Authorization", &auth)
+                .header("Content-Type", content_type)
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .send(bytes),
+            (method, body) => bail!(
+                "this client speaks GET, POST and PUT; `{method}` with {} body is not one of them",
+                if body.is_some() { "a" } else { "no" }
+            ),
         }
         .with_context(|| format!("{method} {url}"))?;
 
@@ -232,18 +374,25 @@ pub fn mirror_alias(
 }
 
 /// A key file, with the checks that make one a key file.
-fn read_key(path: &Path) -> Result<String> {
+fn read_key(path: &Path, scope: Scope) -> Result<String> {
     let text = std::fs::read_to_string(path).with_context(|| {
         format!(
-            "reading {} — mint one on the box with `factory key create --scope publish`",
-            path.display()
+            "reading {} — mint one on the box with `factory key create --scope {}`",
+            path.display(),
+            scope.as_str()
         )
     })?;
     let token = text.trim().to_string();
-    if !token.starts_with("mk_pub_") {
+    if !token.starts_with(scope.prefix()) {
+        // The box decides scope from the database row, not from this label, so
+        // presenting the wrong key would fail there anyway — with a 403 that
+        // says nothing about which file is wrong. Catching it here names the
+        // file.
         bail!(
-            "{} does not hold a publish key (expected `mk_pub_…`)",
-            path.display()
+            "{} does not hold a {} key (expected `{}…`)",
+            path.display(),
+            scope.as_str(),
+            scope.prefix()
         );
     }
     #[cfg(unix)]

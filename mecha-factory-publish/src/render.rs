@@ -110,7 +110,61 @@ pub fn report(source: &Path, out: &Path, title: Option<&str>) -> Result<Rendered
             .unwrap_or_else(|_| source.to_path_buf())],
     };
     check_class(&rendered)?;
+    write_record(&rendered)?;
     Ok(rendered)
+}
+
+/// What the renderer knows and the publisher cannot work out for itself.
+///
+/// Rendering and publishing are separate invocations by design — often
+/// separate *processes*, since a publish is released from mecha's outbox hours
+/// later — and everything the renderer decided was thrown away in between.
+/// Both front ends hardcoded `report` and `static`, so a notebook rendered as
+/// `compute` would have been stored as a static bundle and served from the
+/// artifacts origin, whose policy has no `wasm-unsafe-eval`: a page that
+/// cannot boot, published successfully.
+///
+/// It records **what was rendered, never what may be skipped.** The vendoring
+/// pins a compute bundle needs are derived from the class in code
+/// ([`crate::vendor::pins_for`]) rather than listed here, because a file inside
+/// a bundle is written by whoever produced the bundle — and a gate that can be
+/// switched off by the thing it is gating is decoration. The class is the one
+/// claim this file makes, and the worst a false one does is ask for a stricter
+/// origin or a weaker one, which a reviewer sees before release.
+pub const RENDER_RECORD: &str = "render.json";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RenderRecord {
+    pub class: ContentClass,
+    pub template: String,
+}
+
+pub fn write_record(rendered: &Rendered) -> Result<()> {
+    let record = RenderRecord {
+        class: rendered.class,
+        template: rendered.template.clone(),
+    };
+    std::fs::write(
+        rendered.dir.join(RENDER_RECORD),
+        serde_json::to_string_pretty(&record)?,
+    )?;
+    Ok(())
+}
+
+/// What a rendered directory says it is.
+///
+/// Absent for anything rendered before this existed, and for a directory
+/// somebody assembled by hand — both of which are `static`/`report`, which is
+/// what every publish assumed unconditionally until now. So the fallback is
+/// the old behaviour rather than a failure.
+pub fn read_record(bundle: &Path) -> RenderRecord {
+    std::fs::read_to_string(bundle.join(RENDER_RECORD))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or(RenderRecord {
+            class: ContentClass::Static,
+            template: "report".into(),
+        })
 }
 
 /// Refuse a bundle that emitted more than its declared class allows.

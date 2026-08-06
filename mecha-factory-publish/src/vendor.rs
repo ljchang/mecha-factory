@@ -222,6 +222,48 @@ pub fn gate(bundle: &Path) -> Result<()> {
     gate_with(bundle, &[])
 }
 
+/// The third-party trees a bundle of this class is reviewed as pinned units.
+///
+/// **Derived from the class, in code.** The alternative — letting a bundle
+/// carry its own list of directories to skip — would let whatever produced the
+/// bundle switch the gate off, which is the shape of every silently-degrading
+/// sandbox this project has found. Here the directory names are ours and only
+/// the digests come from disk, so the worst a hand-assembled `compute`
+/// directory buys is the same exemption a genuine notebook already has.
+///
+/// A `compute` bundle is marimo's frontend plus Pyodide's distribution: tens of
+/// megabytes of minified and compiled third-party code, reviewed as versioned
+/// units, where the CSP is the runtime enforcement for what is inside them.
+/// Scanning them line by line produced 277 findings on the first real notebook
+/// — schema identifiers, documentation links, strings in a bundler's runtime —
+/// none of which is a resource the page fetches, and all of which would have to
+/// be dismissed by hand before anything could ever be published.
+pub fn pins_for(bundle: &Path, class: mecha_manifest::ContentClass) -> Result<Vec<Vendored>> {
+    if class != mecha_manifest::ContentClass::Compute {
+        return Ok(Vec::new());
+    }
+    let mut pins = Vec::new();
+    for (dir, what) in [
+        ("assets", "marimo export html-wasm runtime"),
+        (crate::pyodide::BUNDLE_DIR, "pyodide distribution"),
+    ] {
+        let path = bundle.join(dir);
+        if path.is_dir() {
+            pins.push(Vendored {
+                path: PathBuf::from(dir),
+                digest: crate::store::digest_tree(&path)?,
+                description: what.to_string(),
+            });
+        }
+    }
+    Ok(pins)
+}
+
+/// The gate as a publisher runs it: the class decides what is pinned.
+pub fn gate_for_publish(bundle: &Path, class: mecha_manifest::ContentClass) -> Result<()> {
+    gate_with(bundle, &pins_for(bundle, class)?)
+}
+
 /// The gate, with declared third-party trees reviewed as pinned units.
 pub fn gate_with(bundle: &Path, vendored: &[Vendored]) -> Result<()> {
     let findings = scan_with(bundle, vendored)?;
@@ -464,11 +506,34 @@ fn urls_in_raw(text: &str) -> Vec<String> {
                     c.is_whitespace() || matches!(c, '"' | '\'' | '`' | ')' | '>' | ',' | ';')
                 })
                 .unwrap_or(after.len());
-            out.push(format!("{scheme}://{}", &after[..end]));
+            let url = &after[..end];
+            if has_literal_host(url) {
+                out.push(format!("{scheme}://{url}"));
+            }
         }
         rest = &rest[at + 3..];
     }
     out
+}
+
+/// Whether the host is written down, rather than assembled at runtime.
+///
+/// The scanner is blunt on scripts on purpose — a string in a script is a URL
+/// the page may fetch, and being clever about which ones are reachable is how a
+/// check like this stops holding. But `https://${t}` is not a reference to
+/// anywhere: without runtime data it names no host, and the gate's advice —
+/// inline it, drop it, or copy it into the bundle — cannot be acted on. It
+/// showed up in `pyodide.asm.mjs`, which is minified runtime code nobody is
+/// going to edit, and it blocked every compute bundle from being published.
+///
+/// **The host only.** `https://cdn.jsdelivr.net/pyodide/${v}/full/` still
+/// counts, because the host is real and the page will reach it — which is the
+/// exact reference the vendoring pass exists to remove, so narrowing past the
+/// host would undo the whole point.
+fn has_literal_host(url: &str) -> bool {
+    let host = url.split(['/', '?', '#']).next().unwrap_or_default().trim();
+    !host.is_empty()
+        && !host.contains(['$', '{', '}', '+', '(', ')', '<', '>', '\\', '"', '\'', '`'])
 }
 
 /// Protocol-relative (`//host/x`) counts: the browser resolves it to the page's
@@ -637,6 +702,29 @@ fn inline_blocks<'a>(text: &'a str, tag: &str) -> Vec<(usize, &'a str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A URL assembled at runtime names no host, so it is not a reference —
+    /// but one whose *host* is written down is, however much of the path is
+    /// interpolated. Getting this backwards either blocks every compute bundle
+    /// (the `pyodide.asm.mjs` case, which it did) or lets the CDN load the
+    /// vendoring pass exists to remove slip through.
+    #[test]
+    fn a_runtime_assembled_host_is_not_a_reference_but_a_literal_one_is() {
+        // No host until the program runs. Nothing to inline, drop or copy.
+        assert!(urls_in_raw("const u = `https://${t}/full/`;").is_empty());
+        assert!(urls_in_raw("fetch(\"https://\" + host)").is_empty());
+
+        // The host is real, so the page reaches it — path interpolation
+        // changes nothing about that.
+        assert_eq!(
+            urls_in_raw("let n=`https://cdn.jsdelivr.net/pyodide/${v}/full/`;"),
+            vec!["https://cdn.jsdelivr.net/pyodide/${v}/full/"]
+        );
+        assert_eq!(
+            urls_in_raw("src=\"https://wasm.marimo.app/x.js\""),
+            vec!["https://wasm.marimo.app/x.js"]
+        );
+    }
 
     struct Scratch(PathBuf);
 

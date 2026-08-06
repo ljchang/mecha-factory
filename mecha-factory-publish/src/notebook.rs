@@ -242,19 +242,26 @@ pub fn notebook(source: &Path, out: &Path, options: &NotebookOptions) -> Result<
         }
     }
 
+    let rendered = Rendered {
+        dir: out.to_path_buf(),
+        // Pyodide needs `wasm-unsafe-eval`, which is why this class exists
+        // and why it is served from its own origin rather than beside the
+        // reports.
+        class: ContentClass::Compute,
+        template: "notebook".into(),
+        title,
+        sources: vec![source
+            .canonicalize()
+            .unwrap_or_else(|_| source.to_path_buf())],
+    };
+    // Written into the bundle, because the publish is a separate invocation —
+    // often a separate process hours later, when a human releases it from an
+    // outbox — and it was assuming `static`, which is the wrong origin and a
+    // policy this cannot boot under.
+    crate::render::write_record(&rendered)?;
+
     Ok(NotebookBundle {
-        rendered: Rendered {
-            dir: out.to_path_buf(),
-            // Pyodide needs `wasm-unsafe-eval`, which is why this class exists
-            // and why it is served from its own origin rather than beside the
-            // reports.
-            class: ContentClass::Compute,
-            template: "notebook".into(),
-            title,
-            sources: vec![source
-                .canonicalize()
-                .unwrap_or_else(|_| source.to_path_buf())],
-        },
+        rendered,
         vendored,
         removed,
         inlined,

@@ -174,6 +174,43 @@ enum Command {
         #[arg(long)]
         version: Option<u32>,
     },
+    /// Request types: the manifests that become forms strangers fill in.
+    #[command(subcommand)]
+    Type(TypeAction),
+    /// Take what the box has verified and not yet handed over.
+    ///
+    /// A CLI and deliberately not a tool: the common case is "nothing new",
+    /// and it has to cost zero tokens. A trigger runs this on a schedule and
+    /// only spawns an agent when something actually arrived.
+    Drain {
+        /// Where records are written. Defaults to `~/.mecha/requests`.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Fetch and report, writing nothing and acknowledging nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// One JSON object, for a trigger's `if` rather than a human's eye.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TypeAction {
+    /// Upload a manifest, which is what makes its form exist.
+    Push {
+        /// The `.toml` manifest. Its own `id` names the type.
+        manifest: PathBuf,
+    },
+    /// What the box is serving forms for.
+    List,
+    /// Check a manifest without uploading it, and print the form's URL.
+    Check {
+        manifest: PathBuf,
+        /// The handle the form would be served under.
+        #[arg(long)]
+        handle: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -235,14 +272,18 @@ fn main() -> Result<()> {
             // The gate, before anything is written. A version is immutable, so
             // a bundle that reaches the store with an external reference in it
             // is one that can only be superseded, never fixed.
-            vendor::gate(&bundle)?;
+            // What the renderer wrote down, rather than what this command used
+            // to assume: a notebook published as `static` reaches the artifact
+            // origin, whose policy has no `wasm-unsafe-eval`, and cannot boot.
+            let record = render::read_record(&bundle);
+            vendor::gate_for_publish(&bundle, record.class)?;
             let published = store.publish(
                 &id,
                 &bundle,
                 &title,
                 description,
-                "report",
-                mecha_manifest::ContentClass::Static,
+                &record.template,
+                record.class,
                 absolute,
                 &now,
             )?;
@@ -336,6 +377,10 @@ fn main() -> Result<()> {
                 ),
             }
         }
+
+        Command::Type(action) => type_command(action)?,
+
+        Command::Drain { out, dry_run, json } => drain_command(out, dry_run, json)?,
 
         Command::Remote => match remote::Remote::configured()? {
             Some(remote) => {
@@ -667,6 +712,257 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
         } else {
             std::fs::copy(entry.path(), &target)?;
         }
+    }
+    Ok(())
+}
+
+/// The request types the box serves forms from.
+///
+/// `check` before `push` is the same split as `render` before `publish`: one
+/// is local and free, the other changes what the world can reach.
+fn type_command(action: TypeAction) -> Result<()> {
+    match action {
+        TypeAction::Check { manifest, handle } => {
+            let text = std::fs::read_to_string(&manifest)
+                .with_context(|| format!("reading {}", manifest.display()))?;
+            let parsed = mecha_manifest::RequestType::from_toml(&text)?;
+            println!("{} — {}", parsed.id, parsed.title);
+            println!("  version  {}", parsed.version);
+            println!("  fields   {}", parsed.fields.len());
+            let free: Vec<&str> = parsed.free_text_fields().map(|f| f.name.as_str()).collect();
+            // Named rather than counted, because these are the fields a
+            // stranger writes prose into — the ones the quarantine exists for,
+            // and the ones a person editing a manifest should see listed back.
+            println!(
+                "  prose    {}",
+                if free.is_empty() {
+                    "none — every field is a choice, a date or a number".to_string()
+                } else {
+                    free.join(", ")
+                }
+            );
+            match parsed.servable() {
+                Ok(verification) => println!(
+                    "  verify   {}, expiring after {}h",
+                    verification.field, verification.expires_hours
+                ),
+                Err(e) => println!("  verify   NOT SERVABLE: {e}"),
+            }
+            if let Some(handle) = handle {
+                println!(
+                    "\nIt would be served at:\n  {}/f/{handle}/{}",
+                    remote::Remote::configured()?
+                        .map(|r| r.gate().to_string())
+                        .unwrap_or_else(|| "https://<gate>".into()),
+                    parsed.id
+                );
+            }
+        }
+
+        TypeAction::Push { manifest } => {
+            let text = std::fs::read_to_string(&manifest)
+                .with_context(|| format!("reading {}", manifest.display()))?;
+            // Parsed here as well as at the far end. The box would reject a bad
+            // manifest anyway, but a round trip is a slow way to learn about a
+            // typo, and the local copy below must never be one the box refused.
+            let parsed = mecha_manifest::RequestType::from_toml(&text)?;
+            parsed.servable().with_context(|| {
+                format!(
+                    "`{}` cannot be served as a form, so pushing it would publish \
+                     something nobody can submit",
+                    parsed.id
+                )
+            })?;
+
+            let Some(remote) = remote::Remote::configured()? else {
+                bail!(
+                    "no factory is configured. Write ~/.mecha/factory/config.toml with \
+                     `gate = \"https://…\"` and put a publish key in \
+                     ~/.mecha/factory/publish.key"
+                );
+            };
+            let body = remote.type_push(&text, &parsed.id)?;
+
+            // Only after the box accepted it. The local copy is what a later
+            // drain validates against, so it must be the manifest actually
+            // being served — not one that failed on the way there.
+            let local = mecha_factory_publish::requests::remember_type(&text, &parsed.id)?;
+
+            println!(
+                "{} — {} field(s) — is live at",
+                body["id"].as_str().unwrap_or(&parsed.id),
+                body["fields"]
+                    .as_i64()
+                    .unwrap_or(parsed.fields.len() as i64),
+            );
+            println!("  {}", form_url(remote.gate(), &parsed.id));
+            println!(
+                "\nkept locally at {} so a drain can validate against it",
+                local.display()
+            );
+        }
+
+        TypeAction::List => {
+            let Some(remote) = remote::Remote::configured()? else {
+                println!("no factory is configured (~/.mecha/factory/config.toml)");
+                return Ok(());
+            };
+            let body = remote.type_list()?;
+            let types = body["types"].as_array().cloned().unwrap_or_default();
+            if types.is_empty() {
+                println!(
+                    "the box is serving no forms. Push one:\n  \
+                     factory-publish type push <manifest.toml>"
+                );
+                return Ok(());
+            }
+            for t in &types {
+                println!(
+                    "{:<20} {}",
+                    t["id"].as_str().unwrap_or("?"),
+                    t["title"].as_str().unwrap_or("")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Best-effort form URL. The handle is the user's, and the box is the authority
+/// on it, so this is a convenience rather than a claim.
+fn form_url(gate: &str, type_id: &str) -> String {
+    format!("{gate}/f/<handle>/{type_id}")
+}
+
+/// Take what the box has verified, write it down, then acknowledge it.
+///
+/// The order is the whole correctness of this command, and it is written out
+/// in `requests.rs`: acknowledging is what deletes, so it happens after the
+/// bytes are on disk here. A record whose acknowledgement is lost comes back on
+/// the next drain and is recognised by its sequence number.
+fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> {
+    use mecha_factory_publish::requests::{record_from, RequestStore};
+
+    let Some(remote) = remote::Remote::configured_for(remote::Scope::Drain)? else {
+        bail!(
+            "no factory is configured. Write ~/.mecha/factory/config.toml with \
+             `gate = \"https://…\"` and put a drain key in ~/.mecha/factory/drain.key"
+        );
+    };
+
+    // Always from zero. Acknowledgement is what removes a record, so a cursor
+    // would only add a second idea of what home holds, and one that can drift
+    // ahead of what was actually written.
+    let body = remote.drain(0)?;
+    let rows = body["records"].as_array().cloned().unwrap_or_default();
+
+    if dry_run {
+        let summary = serde_json::json!({
+            "drained": rows.len(),
+            "written": 0,
+            "acknowledged": 0,
+            "dry_run": true,
+        });
+        if json {
+            println!("{summary}");
+        } else if rows.is_empty() {
+            println!("nothing waiting");
+        } else {
+            println!("{} record(s) waiting; nothing written", rows.len());
+            for row in &rows {
+                println!(
+                    "  seq {:<5} {:<20} {}",
+                    row["seq"].as_i64().unwrap_or(0),
+                    row["type"].as_str().unwrap_or("?"),
+                    row["created_at"].as_str().unwrap_or("")
+                );
+            }
+        }
+        return Ok(());
+    }
+
+    let store = match out {
+        Some(path) => RequestStore::open(path)?,
+        None => RequestStore::open_default()?,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+
+    let mut written = Vec::new();
+    let mut already = 0usize;
+    let mut invalid = Vec::new();
+    // Every row that reached disk — including one that was already there,
+    // which is a lost acknowledgement rather than a new record and must be
+    // acknowledged again or it returns forever.
+    let mut safe = Vec::new();
+
+    for row in &rows {
+        let record = record_from(row, &now);
+        match store.write(&record) {
+            Ok(true) => {
+                if !record.valid {
+                    invalid.push(record.clone());
+                }
+                safe.push(record.seq);
+                written.push(record);
+            }
+            Ok(false) => {
+                already += 1;
+                safe.push(record.seq);
+            }
+            // Not acknowledged, so it stays on the box and comes back. A disk
+            // that is full must not be the way a request disappears.
+            Err(e) => eprintln!("failed to store seq {}: {e:#}", record.seq),
+        }
+    }
+
+    let acknowledged = if safe.is_empty() {
+        0
+    } else {
+        remote.ack(&safe)?
+    };
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "drained": rows.len(),
+                "written": written.len(),
+                "already_held": already,
+                "invalid": invalid.len(),
+                "acknowledged": acknowledged,
+                "store": store.root().display().to_string(),
+            })
+        );
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("nothing waiting");
+        return Ok(());
+    }
+    println!(
+        "{} new, {} already held, {} acknowledged → {}",
+        written.len(),
+        already,
+        acknowledged,
+        store.root().display()
+    );
+    for record in &written {
+        println!(
+            "  seq {:<5} {:<20} {}",
+            record.seq,
+            record.type_id,
+            if record.valid { "" } else { "INVALID" }
+        );
+    }
+    for record in &invalid {
+        // Loud, because an invalid record is a bug on one of the two machines
+        // and the box has now deleted its copy.
+        eprintln!(
+            "\nseq {} did not validate here: {}",
+            record.seq,
+            record.invalid_reason.as_deref().unwrap_or("")
+        );
     }
     Ok(())
 }

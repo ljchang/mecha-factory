@@ -426,7 +426,11 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                     );
                 }
             }
-            crate::vendor::gate(&bundle)?;
+            // The class and template the renderer recorded, not an assumption:
+            // a `compute` bundle published as `static` is served from the wrong
+            // origin, under a policy it cannot boot under.
+            let record = crate::render::read_record(&bundle);
+            crate::vendor::gate_for_publish(&bundle, record.class)?;
             let store = store()?;
             let published = store.publish(
                 &id,
@@ -435,8 +439,8 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 args.get("description")
                     .and_then(Value::as_str)
                     .map(String::from),
-                "report",
-                mecha_manifest::ContentClass::Static,
+                &record.template,
+                record.class,
                 sources,
                 &now,
             )?;
