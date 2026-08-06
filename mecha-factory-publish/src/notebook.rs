@@ -107,6 +107,15 @@ pub struct NotebookOptions {
     /// Wall-clock ceiling on the export, which *executes the notebook*.
     pub timeout: Duration,
     pub title: Option<String>,
+    /// Produce the bundle even though its Python runtime still comes from a
+    /// CDN.
+    ///
+    /// A diagnostic, like the preview server's `--no-csp`, and for the same
+    /// reason: the runtime check is the *last* thing to fix, and it otherwise
+    /// blocks working on everything in front of it. A bundle made this way must
+    /// never be published — it cannot boot on an origin that enforces the
+    /// policy, which is every origin we serve from.
+    pub allow_unvendored_runtime: bool,
 }
 
 impl Default for NotebookOptions {
@@ -120,6 +129,7 @@ impl Default for NotebookOptions {
             // ceiling.
             timeout: Duration::from_secs(300),
             title: None,
+            allow_unvendored_runtime: false,
         }
     }
 }
@@ -135,6 +145,9 @@ pub struct NotebookBundle {
     /// same reason `mecha work clean` names what it deleted: a sweep that
     /// prints nothing is one nobody trusts enough to leave running.
     pub removed: Vec<(String, &'static str)>,
+    /// How many inline scripts were moved into files of their own so the
+    /// policy could stay the same for every compute bundle.
+    pub inlined: usize,
 }
 
 /// Export, prune, and describe a notebook bundle.
@@ -147,6 +160,9 @@ pub fn notebook(source: &Path, out: &Path, options: &NotebookOptions) -> Result<
     }
 
     export(source, out, options)?;
+    // Before the prune, so the files it writes are on the keep-list check's
+    // radar rather than appearing afterwards.
+    let inlined = externalise_inline_scripts(out)?;
     let removed = prune(out)?;
 
     let title = options.title.clone().unwrap_or_else(|| {
@@ -158,7 +174,13 @@ pub fn notebook(source: &Path, out: &Path, options: &NotebookOptions) -> Result<
     });
     rewrite_manifest(out, &title)?;
 
-    check_runtime_vendored(out)?;
+    if options.allow_unvendored_runtime {
+        if let Err(e) = check_runtime_vendored(out) {
+            eprintln!("⚠ DIAGNOSTIC BUNDLE, DO NOT PUBLISH — {e}");
+        }
+    } else {
+        check_runtime_vendored(out)?;
+    }
 
     let assets = out.join("assets");
     let mut vendored = Vec::new();
@@ -188,6 +210,7 @@ pub fn notebook(source: &Path, out: &Path, options: &NotebookOptions) -> Result<
         },
         vendored,
         removed,
+        inlined,
     })
 }
 
@@ -250,6 +273,78 @@ fn export(source: &Path, out: &Path, options: &NotebookOptions) -> Result<()> {
     }
 }
 
+/// Move every inline `<script>` into a file of its own.
+///
+/// **Why extraction rather than hashes.** marimo's `index.html` carries four
+/// inline scripts — an iframe-resize helper, a `file:` protocol warning, and
+/// the two that define `__MARIMO_EXPORT_CONTEXT__` and
+/// `__MARIMO_MOUNT_CONFIG__`. Under `script-src 'self'` all four are blocked,
+/// and the page fails with `[marimo] mount config not found`. Both fixes work:
+/// a `'sha256-…'` per script, or turning each into an ordinary same-origin
+/// file. Hashes would make the policy **per bundle**, and the whole reason the
+/// policy lives in the manifest crate is that the preview server and the public
+/// server send the same headers. A CSP that varies per artifact is one nobody
+/// can state, test, or check by looking.
+///
+/// Execution order survives. A classic external script without `async`/`defer`
+/// blocks parsing and runs in document order exactly as an inline one does, and
+/// marimo's own bundle is `type="module"`, which is deferred and therefore
+/// still runs after all four.
+///
+/// Only executable types are touched. A `<script type="application/json">` is a
+/// data island that something reads by `textContent`; moving it out would
+/// silently empty it.
+fn externalise_inline_scripts(out: &Path) -> Result<usize> {
+    let path = out.join("index.html");
+    let Ok(html) = std::fs::read_to_string(&path) else {
+        return Ok(0);
+    };
+    let mut rebuilt = String::with_capacity(html.len());
+    let mut rest = html.as_str();
+    let mut n = 0;
+
+    while let Some(open_at) = rest.find("<script") {
+        let (before, from_tag) = rest.split_at(open_at);
+        rebuilt.push_str(before);
+        let Some(gt) = from_tag.find('>') else {
+            rebuilt.push_str(from_tag);
+            rest = "";
+            break;
+        };
+        let attributes = &from_tag[7..gt];
+        let after_open = &from_tag[gt + 1..];
+        let Some(close) = after_open.find("</script") else {
+            rebuilt.push_str(from_tag);
+            rest = "";
+            break;
+        };
+        let body = &after_open[..close];
+        let close_end = after_open[close..]
+            .find('>')
+            .map(|e| close + e + 1)
+            .unwrap_or(after_open.len());
+
+        let executable = !attributes.contains("type=")
+            || attributes.contains("type=\"module\"")
+            || attributes.contains("type=\"text/javascript\"");
+        if attributes.contains("src=") || body.trim().is_empty() || !executable {
+            rebuilt.push_str(&from_tag[..gt + 1 + close_end]);
+        } else {
+            n += 1;
+            let name = format!("inline-{n}.js");
+            std::fs::write(out.join(&name), body).with_context(|| format!("writing {name}"))?;
+            // The original attributes are kept: `type="module"` decides whether
+            // this runs deferred, and dropping it would move the script earlier
+            // in the order.
+            rebuilt.push_str(&format!("<script{attributes} src=\"{name}\"></script>"));
+        }
+        rest = &after_open[close_end..];
+    }
+    rebuilt.push_str(rest);
+    std::fs::write(&path, rebuilt)?;
+    Ok(n)
+}
+
 /// Remove everything at the top level that is not on the keep-list, and say
 /// what went.
 ///
@@ -262,7 +357,9 @@ fn prune(out: &Path) -> Result<Vec<(String, &'static str)>> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if KEEP.contains(&name.as_str()) {
+        // Written by `externalise_inline_scripts` a moment ago — they are the
+        // page's own scripts, moved out of it.
+        if KEEP.contains(&name.as_str()) || (name.starts_with("inline-") && name.ends_with(".js")) {
             continue;
         }
         std::fs::remove_file(entry.path()).with_context(|| format!("removing {name}"))?;
@@ -523,6 +620,63 @@ if __name__ == "__main__":
                 "manifest.json names {src}, which the prune would remove"
             );
         }
+    }
+
+    /// Measured: under `script-src 'self'` marimo's four inline scripts are all
+    /// blocked and the page dies with `[marimo] mount config not found`.
+    /// Extraction fixes it without a per-bundle policy.
+    #[test]
+    fn inline_scripts_become_files_and_keep_their_attributes() {
+        let s = Scratch::new("inline");
+        std::fs::write(
+            s.0.join("index.html"),
+            "<script data-marimo=\"true\">window.A = 1;</script>\n\
+             <script type=\"module\" crossorigin src=\"./assets/x.js\"></script>\n\
+             <script type=\"application/json\" id=\"d\">{\"a\":1}</script>\n\
+             <script>window.B = 2;</script>\n\
+             <script></script>",
+        )
+        .unwrap();
+
+        assert_eq!(externalise_inline_scripts(&s.0).unwrap(), 2);
+        let html = std::fs::read_to_string(s.0.join("index.html")).unwrap();
+
+        // Both executable inline scripts moved out, keeping their attributes —
+        // `type="module"` decides deferral, and dropping it would reorder them.
+        assert!(html.contains("<script data-marimo=\"true\" src=\"inline-1.js\"></script>"));
+        assert!(html.contains("<script src=\"inline-2.js\"></script>"));
+        assert_eq!(
+            std::fs::read_to_string(s.0.join("inline-1.js")).unwrap(),
+            "window.A = 1;"
+        );
+        assert_eq!(
+            std::fs::read_to_string(s.0.join("inline-2.js")).unwrap(),
+            "window.B = 2;"
+        );
+
+        // An already-external script is untouched...
+        assert!(html.contains("crossorigin src=\"./assets/x.js\""));
+        // ...and a JSON data island stays inline, or whatever reads its
+        // textContent finds nothing.
+        assert!(html.contains("<script type=\"application/json\" id=\"d\">{\"a\":1}</script>"));
+        assert!(
+            !s.0.join("inline-3.js").exists(),
+            "an empty script is not a script"
+        );
+    }
+
+    /// They are the page's own scripts, moved — deleting them would be worse
+    /// than not extracting them at all.
+    #[test]
+    fn the_prune_keeps_the_scripts_extraction_just_wrote() {
+        let s = Scratch::new("inlinekeep");
+        std::fs::write(s.0.join("index.html"), "<script>window.A=1;</script>").unwrap();
+        std::fs::write(s.0.join("CLAUDE.md"), "x").unwrap();
+        externalise_inline_scripts(&s.0).unwrap();
+        let removed = prune(&s.0).unwrap();
+        assert!(s.0.join("inline-1.js").is_file());
+        assert_eq!(removed.len(), 1);
+        assert_eq!(removed[0].0, "CLAUDE.md");
     }
 
     /// The check the general gate structurally cannot make.

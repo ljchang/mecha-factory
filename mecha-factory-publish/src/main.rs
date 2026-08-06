@@ -69,6 +69,11 @@ enum Command {
         /// Seconds the export may take. It runs the notebook.
         #[arg(long, default_value_t = 300)]
         timeout: u64,
+        /// Build it even though the Python runtime is still CDN-loaded. A
+        /// diagnostic; the result cannot boot on an origin that enforces the
+        /// policy and must never be published.
+        #[arg(long)]
+        allow_unvendored_runtime: bool,
     },
     /// Serve a rendered bundle locally with the real headers for its class.
     ///
@@ -211,10 +216,12 @@ fn main() -> Result<()> {
             out,
             title,
             timeout,
+            allow_unvendored_runtime,
         } => {
             let options = notebook::NotebookOptions {
                 title,
                 timeout: std::time::Duration::from_secs(timeout),
+                allow_unvendored_runtime,
                 ..notebook::NotebookOptions::default()
             };
             let bundle = notebook::notebook(&source, &out, &options)?;
@@ -225,6 +232,7 @@ fn main() -> Result<()> {
             );
             println!("  title  {}", bundle.rendered.title);
             println!("  class  {}", bundle.rendered.class.as_str());
+            println!("  inlined {} script(s) moved into files", bundle.inlined);
             for (name, why) in &bundle.removed {
                 println!("  pruned {name} — {why}");
             }
