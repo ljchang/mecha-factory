@@ -99,7 +99,7 @@ fn every_starter_generates_a_schema_and_a_form() {
 #[test]
 fn every_starter_survives_a_toml_round_trip() {
     for (name, t) in starters() {
-        let again = RequestType::from_toml(&t.to_toml())
+        let again = RequestType::from_toml(&t.to_toml().expect("a starter serialises"))
             .unwrap_or_else(|e| panic!("{name} does not round-trip: {e}"));
         assert_eq!(again.id, t.id);
         assert_eq!(again.fields.len(), t.fields.len(), "{name}");

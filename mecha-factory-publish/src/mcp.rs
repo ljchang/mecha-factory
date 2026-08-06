@@ -35,6 +35,27 @@
 //! and they must route through the outbox from the first day rather than from
 //! the day a VPS appears.
 //!
+//! ### Paths the model supplies are confined here, not only by the operator
+//!
+//! `bundle_render` and `bundle_fetch` take an output directory, and
+//! `bundle_publish` takes one to read. Those are **paths chosen by a model**,
+//! and mecha's path jail does not reach them: `ToolCtx::resolve` guards mecha's
+//! own tools, while an MCP server's arguments are its own business. Measured —
+//! `bundle_fetch` with an `out` anywhere on the filesystem wrote there.
+//!
+//! The design's answer is `sandbox = true` on the `[[mcp]]` block, and that is
+//! the real enforcement. It is not sufficient on its own: mecha only sets the
+//! server's working directory *when* it confines it, so an unconfined server
+//! inherits mecha's, and an operator who forgets the flag gets no boundary at
+//! all. A guard that depends on remembering a config line is the
+//! silently-degrading-sandbox shape this project keeps naming.
+//!
+//! So every model-supplied path is resolved and proved to be inside `--root`
+//! before anything touches it — the same rule, and the same containment proof,
+//! that mecha applies to its own tools. `--root` defaults to the working
+//! directory, which is the workspace when mecha confines the server, and it is
+//! printed on stderr at startup so an operator can see what it actually is.
+//!
 //! ### The transport
 //!
 //! Newline-delimited JSON-RPC on stdin/stdout, hand-rolled — the surface is
@@ -47,7 +68,7 @@
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 
@@ -192,8 +213,60 @@ fn tools() -> Vec<ToolSpec> {
     ]
 }
 
+/// Resolve a model-supplied path and prove it is inside `root`.
+///
+/// The target usually does not exist yet, so containment is proved on the
+/// nearest existing ancestor and the remainder is checked for traversal — the
+/// same shape as canonicalize-and-compare, minus the requirement that the leaf
+/// already be there.
+fn confined(root: &Path, supplied: &str) -> Result<PathBuf> {
+    let candidate = {
+        let p = PathBuf::from(supplied);
+        if p.is_absolute() {
+            p
+        } else {
+            root.join(p)
+        }
+    };
+    // Walk the path, refusing `..` outright rather than normalising it away.
+    let mut built = PathBuf::new();
+    for part in candidate.components() {
+        use std::path::Component;
+        match part {
+            Component::ParentDir => {
+                anyhow::bail!("`{supplied}` contains `..`, which is refused rather than resolved")
+            }
+            Component::CurDir => {}
+            other => built.push(other.as_os_str()),
+        }
+    }
+    // Prove containment on the deepest part that exists.
+    let mut existing = built.clone();
+    while !existing.exists() {
+        match existing.parent() {
+            Some(parent) if parent != existing => existing = parent.to_path_buf(),
+            _ => break,
+        }
+    }
+    let real_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let real = existing.canonicalize().unwrap_or(existing);
+    anyhow::ensure!(
+        real.starts_with(&real_root),
+        "`{supplied}` resolves outside {} — this server only reads and writes \
+         inside the directory it was given",
+        real_root.display()
+    );
+    Ok(built)
+}
+
 /// Serve MCP on stdin/stdout until the client closes the stream.
-pub fn serve(store_root: Option<PathBuf>) -> Result<()> {
+pub fn serve(store_root: Option<PathBuf>, root: Option<PathBuf>) -> Result<()> {
+    let root = match root {
+        Some(root) => root,
+        None => std::env::current_dir()?,
+    };
+    // stderr, never stdout: stdout is the protocol.
+    eprintln!("mecha-factory: paths are confined to {}", root.display());
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
 
@@ -236,7 +309,7 @@ pub fn serve(store_root: Option<PathBuf>) -> Result<()> {
                     },
                 })).collect::<Vec<_>>()
             })),
-            "tools/call" => Ok(call(&params, store_root.clone())),
+            "tools/call" => Ok(call(&params, store_root.clone(), &root)),
             "ping" => Ok(json!({})),
             other => Err(format!("unknown method `{other}`")),
         };
@@ -262,10 +335,10 @@ pub fn serve(store_root: Option<PathBuf>) -> Result<()> {
 /// malformed; a tool error tells it what went wrong so it can recover — and the
 /// most common failure here, an external reference surviving the gate, is
 /// precisely one the model *can* fix.
-fn call(params: &Value, store_root: Option<PathBuf>) -> Value {
+fn call(params: &Value, store_root: Option<PathBuf>, root: &Path) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    match dispatch(name, &args, store_root) {
+    match dispatch(name, &args, store_root, root) {
         Ok(text) => json!({"content": [{"type": "text", "text": text}], "isError": false}),
         Err(e) => json!({
             "content": [{"type": "text", "text": format!("{e:#}")}],
@@ -274,7 +347,7 @@ fn call(params: &Value, store_root: Option<PathBuf>) -> Value {
     }
 }
 
-fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>) -> Result<String> {
+fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) -> Result<String> {
     use crate::store::BundleStore;
 
     let store = || -> Result<BundleStore> {
@@ -293,8 +366,8 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>) -> Result<Str
 
     match name {
         "bundle_render" => {
-            let source = PathBuf::from(string("source")?);
-            let out = PathBuf::from(string("out")?);
+            let source = confined(root, &string("source")?)?;
+            let out = confined(root, &string("out")?)?;
             let title = args.get("title").and_then(Value::as_str);
             let rendered = crate::render::report(&source, &out, title)?;
             crate::vendor::gate_rendered(&rendered.dir, &source)?;
@@ -309,7 +382,7 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>) -> Result<Str
         }
         "bundle_publish" => {
             let id = string("id")?;
-            let bundle = PathBuf::from(string("bundle")?);
+            let bundle = confined(root, &string("bundle")?)?;
             let title = args
                 .get("title")
                 .and_then(Value::as_str)
@@ -395,7 +468,7 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>) -> Result<Str
         }
         "bundle_fetch" => {
             let id = string("id")?;
-            let out = PathBuf::from(string("out")?);
+            let out = confined(root, &string("out")?)?;
             let store = store()?;
             let version = match args.get("version").and_then(Value::as_u64) {
                 Some(v) => v as u32,
@@ -539,6 +612,7 @@ mod tests {
         let result = call(
             &json!({"name": "bundle_status", "arguments": {"id": "nothing-here"}}),
             Some(std::env::temp_dir().join("factory-mcp-empty")),
+            &std::env::temp_dir(),
         );
         assert_eq!(result["isError"], json!(true));
         assert!(
@@ -550,9 +624,53 @@ mod tests {
         );
     }
 
+    /// Measured before this existed: `bundle_fetch` with an `out` anywhere on
+    /// the filesystem wrote there. mecha's path jail does not reach an MCP
+    /// server's arguments, and mecha only sets the server's working directory
+    /// when it confines it — so an operator who forgets `sandbox = true` had no
+    /// boundary at all.
+    #[test]
+    fn a_model_supplied_path_cannot_leave_the_root() {
+        let root = std::env::temp_dir().join(format!("factory-confine-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("inside")).unwrap();
+
+        // Inside, existing or not, absolute or relative.
+        for good in ["inside", "inside/new/deeper", "report.md"] {
+            let path = confined(&root, good).unwrap();
+            assert!(path.starts_with(&root), "{good} → {}", path.display());
+        }
+        let absolute_inside = root.join("inside").to_string_lossy().into_owned();
+        assert!(confined(&root, &absolute_inside).is_ok());
+
+        // Out, every way there is.
+        for bad in ["/etc/passwd", "../escaped", "inside/../../up", "./../../up"] {
+            let err = confined(&root, bad).unwrap_err().to_string();
+            assert!(
+                err.contains("refused") || err.contains("resolves outside"),
+                "{bad} was allowed: {err}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// `..` is refused rather than normalised away, because a path that
+    /// *resolves* back inside after climbing out has still been interpreted,
+    /// and interpreting is where these go wrong.
+    #[test]
+    fn a_traversal_that_lands_back_inside_is_still_refused() {
+        let root = std::env::temp_dir().join(format!("factory-confine2-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(confined(&root, "a/../b").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn an_unknown_tool_is_an_error_the_model_can_read() {
-        let result = call(&json!({"name": "bundle_delete", "arguments": {}}), None);
+        let result = call(
+            &json!({"name": "bundle_delete", "arguments": {}}),
+            None,
+            &std::env::temp_dir(),
+        );
         assert_eq!(result["isError"], json!(true));
         // There is deliberately no delete verb; the message has to say so
         // rather than looking like a transient failure.

@@ -82,7 +82,13 @@ enum Command {
     /// Speak MCP on stdin/stdout. This is how mecha reaches the factory:
     /// wire it as an `[[mcp]]` server and name the publishing tools in
     /// `[outbox] publish_tools`.
-    Mcp,
+    Mcp {
+        /// Every path a model supplies must resolve inside this directory.
+        /// Defaults to the working directory — which is the workspace when
+        /// mecha confines the server, and mecha's own when it does not.
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Serve a rendered bundle locally with the real headers for its class.
     ///
     /// Loopback only. A bundle checked without its Content-Security-Policy is
@@ -268,7 +274,7 @@ fn main() -> Result<()> {
             );
         }
 
-        Command::Mcp => mecha_factory_publish::mcp::serve(cli.store.clone())?,
+        Command::Mcp { root } => mecha_factory_publish::mcp::serve(cli.store.clone(), root)?,
 
         Command::Serve {
             bundle,

@@ -135,6 +135,11 @@ the short version:
 name = "factory"
 command = "factory-publish"
 args = ["mcp"]
+# The real enforcement: mecha confines the server to the run's workspace, and
+# only sets its working directory when it does. The server also confines every
+# model-supplied path to `--root` itself, so forgetting this line narrows the
+# boundary rather than removing it.
+sandbox = true
 
 [outbox]
 tools        = ["factory__bundle_publish", "factory__bundle_alias", "factory__bundle_unpublish"]

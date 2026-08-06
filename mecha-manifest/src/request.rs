@@ -254,8 +254,16 @@ impl RequestType {
         Ok(parsed)
     }
 
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).expect("a RequestType is always serialisable")
+    /// Serialise back to TOML.
+    ///
+    /// Fallible, and not defensively: a [`Condition`]'s `value` is a JSON
+    /// value, and TOML has no representation for null. A manifest parsed from
+    /// TOML can never contain one — you cannot write it — but a `RequestType`
+    /// built programmatically can, and a library that panics on data it accepts
+    /// is a library that panics.
+    pub fn to_toml(&self) -> Result<String> {
+        toml::to_string_pretty(self)
+            .map_err(|e| ManifestError::invalid(format!("serialising `{}`: {e}", self.id)))
     }
 
     /// Everything that can be wrong with the manifest itself.
@@ -561,10 +569,23 @@ show_when = { field = "kind", op = "eq", value = "other" }
         .unwrap()
     }
 
+    /// TOML cannot represent null, and a `Condition`'s value is a JSON value.
+    /// Parsing can never produce one; constructing can.
+    #[test]
+    fn a_value_toml_cannot_represent_is_an_error_rather_than_a_panic() {
+        let mut t = meeting();
+        t.fields[2].show_when = Some(Condition {
+            field: "kind".into(),
+            operator: crate::Operator::Eq,
+            value: Some(serde_json::Value::Null),
+        });
+        assert!(t.to_toml().is_err());
+    }
+
     #[test]
     fn a_manifest_round_trips_through_toml() {
         let original = meeting();
-        let again = RequestType::from_toml(&original.to_toml()).unwrap();
+        let again = RequestType::from_toml(&original.to_toml().unwrap()).unwrap();
         assert_eq!(again.fields.len(), 3);
         assert_eq!(again.id, "meeting");
         assert_eq!(

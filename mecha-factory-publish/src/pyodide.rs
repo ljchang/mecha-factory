@@ -181,7 +181,7 @@ impl Vendorer {
             let mut p = package.clone();
             if wanted.contains(key) {
                 let url = self.package_url(package);
-                let local = file_name_of(&url);
+                let local = file_name_of(&url)?;
                 let bytes = self.fetch_cached(&url, &local, Some(&package.sha256))?;
                 fetched.push((local.clone(), bytes));
                 p.file_name = local;
@@ -508,8 +508,19 @@ fn replace_lock_url(text: &str, local: &str) -> String {
     out
 }
 
-fn file_name_of(url: &str) -> String {
-    url.rsplit('/').next().unwrap_or(url).to_string()
+/// The last path segment of a URL, as a filename.
+///
+/// The result is joined onto a cache directory, so it must be a name and not a
+/// direction: `.` and `..` are the two segments that would make `join` mean
+/// something other than "a file in here". Both currently fail later anyway —
+/// you cannot write to a directory — but failing here says why.
+fn file_name_of(url: &str) -> Result<String> {
+    let name = url.rsplit('/').next().unwrap_or(url);
+    anyhow::ensure!(
+        !name.is_empty() && name != "." && name != "..",
+        "`{url}` does not end in a filename"
+    );
+    Ok(name.to_string())
 }
 
 /// Package names are compared the way Python compares them.
@@ -551,6 +562,16 @@ mod tests {
     /// Python compares `pymdown_extensions` and `pymdown-extensions` as the
     /// same name, and the lock file uses one spelling while dependency lists
     /// use the other.
+    /// The result is joined onto a cache directory, so it has to be a name
+    /// rather than a direction.
+    #[test]
+    fn a_url_that_does_not_end_in_a_filename_is_refused() {
+        assert_eq!(file_name_of("https://h/a/b.whl").unwrap(), "b.whl");
+        for bad in ["https://h/a/..", "https://h/a/.", "https://h/a/"] {
+            assert!(file_name_of(bad).is_err(), "{bad}");
+        }
+    }
+
     #[test]
     fn package_names_normalise_the_way_python_compares_them() {
         assert_eq!(normalise("pymdown_extensions"), "pymdown-extensions");
