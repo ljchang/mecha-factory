@@ -4,6 +4,13 @@ The first thing in this project that creates a machine to patch forever. That
 sentence is the whole reason this document exists: the failure mode of
 forgetting is not "the site is down", it is "the site is someone else's".
 
+> **Done once, on 2026-08-06.** A DigitalOcean droplet in NYC —
+> Ubuntu 24.04, 1 vCPU, 1 GB RAM, x86_64 — serving
+> `gate` / `art` / `compute` under `mecha-factory.ai`, with a Let's Encrypt
+> certificate the binary obtained for itself over TLS-ALPN-01. What follows is
+> the procedure as it was actually run, including the two things that went
+> wrong.
+
 Everything below assumes the box is **assumed lost**. Nothing on it reaches
 home, and the two keys it holds are Argon2id hashes of tokens minted elsewhere.
 
@@ -77,6 +84,26 @@ fine for tens of users. Beyond that it wants a real wildcard certificate, which
 needs DNS-01 and therefore a zone-scoped API token on the box — recorded in
 §14.2 with the mitigation, and deliberately not done yet.
 
+**One consequence of that is a security property rather than a limitation.** A
+handle nobody owns has no certificate, so a request for one fails at the TLS
+handshake — a stranger cannot reach the application at all. The 404 the server
+would have returned is the *second* line of defence here, behind one the
+certificate gives for free. A wildcard certificate would remove that first
+line, which is worth knowing before treating DNS-01 as a pure upgrade.
+
+### On collapsing to one registrable domain
+
+The deployment runs all three origins under `mecha-factory.ai`, which is not
+what §14.2 prefers: the gate is the only origin no user code runs on, and it
+would ideally sit on a registrable domain of its own so that a cookie set by a
+user's artifact can never be sent to it. Nothing here uses cookies today, so
+the separation currently buys nothing.
+
+What it costs to defer: **moving the gate later changes every form URL**, since
+those live on the gate. So the day a capability becomes a cookie — which is the
+day the argument stops being theoretical — the move has to happen before any
+form link is in circulation, not after.
+
 ### If the DNS is at Cloudflare
 
 Use **DNS only** — the grey cloud, not the orange one. Proxying changes two
@@ -96,13 +123,44 @@ one to arrive at by clicking a toggle.
 
 ## Installing
 
+**Swap first, if the box has 1 GB of RAM.** A release build will not link
+without it, and the failure is an OOM kill part-way through rather than
+anything that names the cause:
+
 ```sh
-# On the box, as root.
+fallocate -l 2G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+echo "/swapfile none swap sw 0 0" >> /etc/fstab
+```
+
+Then the firewall and the patching, before anything is listening:
+
+```sh
+apt-get install -y build-essential pkg-config git curl unattended-upgrades ufw
+ufw default deny incoming && ufw default allow outgoing
+ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable
+systemctl enable --now unattended-upgrades
+```
+
+**The binary is built on the box, from the public repository.** One vCPU takes
+a while — this is the step to start and walk away from:
+
+```sh
+curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+git clone --depth 1 https://github.com/ljchang/mecha-factory /root/build
+cd /root/build && cargo build --release -p mecha-factory --bin factory
+```
+
+*Worth replacing:* a release workflow that publishes an x86_64 binary would
+mean the box never needs a Rust toolchain at all, which is one fewer thing to
+patch on a machine whose whole premise is that it is one static binary and a
+SQLite file.
+
+```sh
 adduser --system --group --no-create-home factory
-install -m 0755 factory /usr/local/bin/factory
+install -m 0755 target/release/factory /usr/local/bin/factory
 install -d -m 0755 /etc/mecha-factory
 install -m 0644 factory.toml /etc/mecha-factory/factory.toml
-install -m 0644 mecha-factory.service /etc/systemd/system/
+install -m 0644 scripts/mecha-factory.service /etc/systemd/system/
 
 systemctl daemon-reload
 systemctl enable --now mecha-factory
@@ -112,11 +170,37 @@ journalctl -u mecha-factory -f
 The unit runs `factory check` before it starts, so a configuration typo fails
 without stopping the server that is already running.
 
+> **Do not run `factory check` as root before the service has ever started.**
+> It creates the ledger, and it creates it owned by root — after which the
+> service can read it and not write it, and the first thing you try (`user
+> create`) fails with `attempt to write a readonly database`. This happened.
+> The fix is `chown -R factory:factory /var/lib/mecha-factory`; the reason it
+> cannot recur through the normal path is that the unit runs `check` as the
+> service user.
+
 **Start with `staging = true`.** Let's Encrypt's production rate limits are
 per-week; the staging directory's are enormous and its certificates are trusted
-by nobody. Confirm in the log that an order completed, then set `staging =
-false` and restart. The certificate cache lives in the data directory, so a
-restart does not re-issue.
+by nobody. Confirm in the log that an order completed — the sequence to look
+for is `trigger challenge` for each name, then `completed all authorizations`,
+`sending csr`, `download certificate`, `DeployedNewCert`.
+
+Then set `staging = false`, **delete the certificate cache**, and restart:
+
+```sh
+rm -rf /var/lib/mecha-factory/acme
+systemctl restart mecha-factory
+```
+
+The cache holds the staging account *and* the staging certificate, and without
+clearing it the server happily goes on serving one no browser trusts. Verify
+from somewhere else entirely:
+
+```sh
+echo | openssl s_client -connect gate.<yours>:443 -servername gate.<yours> 2>/dev/null \
+  | openssl x509 -noout -issuer -ext subjectAltName
+```
+
+One certificate covers all three names, and one more per active user.
 
 ## The keys
 
@@ -158,6 +242,20 @@ working on a box where every key has just been rotated. With a key it also
 reports **that user's** queue depth and account status — not the box's totals,
 because how many strangers wrote to somebody else this week is not a fact this
 endpoint owes anyone.
+
+## Where it actually runs
+
+| | |
+|---|---|
+| box | DigitalOcean, NYC, Ubuntu 24.04, 1 vCPU / 1 GB / 24 GB, 2 GB swap |
+| gate | `https://gate.mecha-factory.ai` |
+| artifacts | `https://<handle>.art.mecha-factory.ai` |
+| compute | `https://<handle>.compute.mecha-factory.ai` |
+| first user | `ljchang` |
+| keys at home | `~/.mecha/factory/{publish,drain}.key`, mode 0600, with `config.toml` naming the gate |
+| DNS | Squarespace, five A records, no proxy in front |
+
+`mecha-factory.org` is registered and unused; the intention is to forward it.
 
 ## What is deliberately not here yet
 
