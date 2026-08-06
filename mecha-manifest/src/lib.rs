@@ -58,6 +58,7 @@
 mod bundle;
 mod condition;
 mod csp;
+mod digest;
 mod form;
 mod request;
 mod schema;
@@ -66,8 +67,9 @@ mod validate;
 pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};
 pub use csp::Header;
+pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::FormOptions;
-pub use request::{Acknowledgment, Field, FieldKind, RequestType, Step};
+pub use request::{valid_id, Acknowledgment, Field, FieldKind, RequestType, Step};
 pub use validate::{Submission, ValidationError};
 
 /// Anything wrong with a manifest itself, as opposed to with a submission

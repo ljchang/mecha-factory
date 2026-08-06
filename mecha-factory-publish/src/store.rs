@@ -38,7 +38,6 @@
 
 use anyhow::{bail, Context, Result};
 use mecha_manifest::{BundleManifest, ContentClass, Visibility};
-use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// `~/.mecha`, or `$MECHA_HOME`.
@@ -373,8 +372,10 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<()>
                 .replace('\\', "/");
             // A rendered directory that already carries a manifest is one being
             // re-published; the store writes its own, so the old one must not
-            // be copied in *or* counted in the digest.
-            if relative == "bundle.json" {
+            // be copied in. (`digest_files` excludes it from the address on its
+            // own, on both sides of the wire — this is about the bytes that
+            // land in the version directory.)
+            if relative == mecha_manifest::MANIFEST_FILE {
                 continue;
             }
             out.push((relative, std::fs::read(&path)?));
@@ -388,19 +389,11 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<()>
 
 /// A digest over the whole bundle.
 ///
-/// Lengths are hashed before the values they precede, so `("ab", "c")` and
-/// `("a", "bc")` cannot collide — without that, moving a character from a path
-/// into a file would produce the same digest and two different bundles would
-/// share a version.
+/// The rule itself lives in `mecha-manifest` because the **server** computes it
+/// too, over the same bundle after it crossed a network. One definition, or the
+/// two ends eventually disagree about whether anything changed.
 fn digest_of(files: &[(String, Vec<u8>)]) -> String {
-    let mut hasher = Sha256::new();
-    for (path, bytes) in files {
-        hasher.update((path.len() as u64).to_le_bytes());
-        hasher.update(path.as_bytes());
-        hasher.update((bytes.len() as u64).to_le_bytes());
-        hasher.update(bytes);
-    }
-    format!("sha256:{:x}", hasher.finalize())
+    mecha_manifest::digest_files(files.iter().map(|(p, b)| (p.as_str(), b.as_slice())))
 }
 
 #[cfg(test)]

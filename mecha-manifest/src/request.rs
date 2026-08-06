@@ -491,7 +491,11 @@ fn check_field_keys(text: &str) -> Result<()> {
 /// An id is a URL path segment, a filename, a JSON key and part of a generated
 /// tool name. Keep it to what is unambiguous in all four — the same rule
 /// trigger and producer names follow in mecha.
-pub(crate) fn valid_id(id: &str, what: &str) -> Result<()> {
+///
+/// Public because the server checks an id that arrived off the wire against
+/// exactly this rule. It is a path segment on a public origin, and the two ends
+/// disagreeing about what one may contain is how a traversal gets in.
+pub fn valid_id(id: &str, what: &str) -> Result<()> {
     if id.is_empty() {
         return Err(ManifestError::invalid(format!("{what} is empty")));
     }
