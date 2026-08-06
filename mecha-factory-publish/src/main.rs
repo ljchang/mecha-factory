@@ -1,0 +1,285 @@
+//! `factory-publish` — render a bundle, publish it, move its alias.
+//!
+//! The CLI exists before the MCP server on purpose: every verb is testable from
+//! a shell, and the server is the same library with a different front end. The
+//! split between the cheap verb and the expensive one is real here too — `render`
+//! writes a directory you look at, and `publish` is the one that costs a review.
+
+use anyhow::{bail, Context, Result};
+use clap::{Parser, Subcommand};
+use mecha_factory_publish::{render, store::BundleStore};
+use mecha_manifest::Visibility;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+#[command(
+    name = "factory-publish",
+    version,
+    about = "Render and publish bundles"
+)]
+struct Cli {
+    /// The bundle store. Defaults to `~/.mecha/bundles` (or `$MECHA_HOME`).
+    #[arg(long, global = true)]
+    store: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Render a source into a directory, locally. Cheap, and nothing leaves.
+    Render {
+        /// The markdown to render.
+        source: PathBuf,
+        /// Where to write the bundle.
+        #[arg(long)]
+        out: PathBuf,
+        /// Overrides the first `# heading`.
+        #[arg(long)]
+        title: Option<String>,
+    },
+    /// Take a rendered directory in as a new immutable version, and point the
+    /// share URL at it.
+    Publish {
+        /// The bundle id — stable across versions; the share URL is built on it.
+        id: String,
+        /// A directory `render` produced.
+        bundle: PathBuf,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        /// What this was rendered from. Recorded so `mecha work clean` never
+        /// removes the input of a published report.
+        #[arg(long = "source")]
+        sources: Vec<PathBuf>,
+        /// Publish the version without moving the share URL to it.
+        #[arg(long)]
+        no_alias: bool,
+    },
+    /// Point the share URL at a specific version.
+    Alias { id: String, version: u32 },
+    /// Point the share URL at nothing. Destroys no version.
+    Unpublish { id: String },
+    /// What is published, and at which version.
+    List,
+    /// One bundle: its versions, its alias, and who can reach it.
+    Status { id: String },
+    /// Copy a published bundle out of the store, by id — never by path.
+    Fetch {
+        id: String,
+        #[arg(long)]
+        out: PathBuf,
+        /// A specific version. Defaults to whatever the alias points at.
+        #[arg(long)]
+        version: Option<u32>,
+    },
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    let store = match &cli.store {
+        Some(path) => BundleStore::open(path)?,
+        None => BundleStore::open_default()?,
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+
+    match cli.command {
+        Command::Render { source, out, title } => {
+            let rendered = render::report(&source, &out, title.as_deref())?;
+            println!("{} → {}", rendered.template, rendered.dir.display());
+            println!("  title  {}", rendered.title);
+            println!("  class  {}", rendered.class.as_str());
+            println!("  open   {}", rendered.dir.join("index.html").display());
+            println!(
+                "\nLook at it, then publish it:\n  factory-publish publish <id> {} --source {}",
+                rendered.dir.display(),
+                source.display()
+            );
+        }
+
+        Command::Publish {
+            id,
+            bundle,
+            title,
+            description,
+            sources,
+            no_alias,
+        } => {
+            // The manifest a previous render left behind is the best source of
+            // the title and class, and re-deriving them from flags would let a
+            // publish disagree with what was rendered.
+            let title = title.unwrap_or_else(|| id.clone());
+            let mut absolute = Vec::new();
+            for source in &sources {
+                absolute.push(
+                    source
+                        .canonicalize()
+                        .with_context(|| format!("--source {} does not exist", source.display()))?,
+                );
+            }
+            let published = store.publish(
+                &id,
+                &bundle,
+                &title,
+                description,
+                "report",
+                mecha_manifest::ContentClass::Static,
+                absolute,
+                &now,
+            )?;
+            if published.existing {
+                println!(
+                    "{id} v{} — identical bytes, so nothing new was minted",
+                    published.version
+                );
+            } else {
+                println!("{id} v{} published", published.version);
+            }
+            println!("  digest {}", published.digest);
+            println!("  path   {}", published.path.display());
+            if !no_alias {
+                let visibility = store
+                    .alias(&id)?
+                    .map(|a| a.visibility)
+                    .unwrap_or(Visibility::Private);
+                store.set_alias(&id, Some(published.version), visibility, &now)?;
+                println!("  alias  → v{}", published.version);
+            }
+            reach(&store, &id)?;
+        }
+
+        Command::Alias { id, version } => {
+            let visibility = store
+                .alias(&id)?
+                .map(|a| a.visibility)
+                .unwrap_or(Visibility::Private);
+            store.set_alias(&id, Some(version), visibility, &now)?;
+            println!("{id} → v{version}");
+            reach(&store, &id)?;
+        }
+
+        Command::Unpublish { id } => {
+            let before = store.alias(&id)?.and_then(|a| a.version);
+            store.set_alias(&id, None, Visibility::Private, &now)?;
+            match before {
+                Some(v) => println!("{id}: the share URL no longer resolves (was v{v})"),
+                None => println!("{id}: already unpublished"),
+            }
+            // Said every time, because "unpublish" reads like "delete" and the
+            // difference is the whole point: the record survives.
+            println!(
+                "  {} version(s) remain on disk — nothing here deletes one",
+                store.versions(&id)?.len()
+            );
+        }
+
+        Command::List => {
+            let bundles = store.bundles()?;
+            if bundles.is_empty() {
+                println!("nothing published yet — {}", store.root().display());
+                return Ok(());
+            }
+            for id in bundles {
+                let versions = store.versions(&id)?;
+                let alias = store.alias(&id)?;
+                let at = match alias.as_ref().and_then(|a| a.version) {
+                    Some(v) => format!("→ v{v}"),
+                    None => "→ (taken down)".into(),
+                };
+                println!(
+                    "{id:<28} {at:<16} {} version(s), latest v{}",
+                    versions.len(),
+                    versions.last().copied().unwrap_or(0)
+                );
+            }
+        }
+
+        Command::Status { id } => {
+            let versions = store.versions(&id)?;
+            if versions.is_empty() {
+                bail!("no bundle `{id}` in {}", store.root().display());
+            }
+            let alias = store.alias(&id)?;
+            println!("{id}");
+            for version in &versions {
+                let m = store.manifest(&id, *version)?;
+                let marker = if alias.as_ref().and_then(|a| a.version) == Some(*version) {
+                    "→"
+                } else {
+                    " "
+                };
+                println!(
+                    "{marker} v{version}  {}  {}  {}",
+                    m.published_at.as_deref().unwrap_or("—"),
+                    m.class.as_str(),
+                    m.digest.as_deref().unwrap_or("—")
+                );
+                for source in &m.sources {
+                    println!("      source {}", source.display());
+                }
+            }
+            if alias.as_ref().and_then(|a| a.version).is_none() {
+                println!("  the share URL resolves to nothing (taken down)");
+            }
+            reach(&store, &id)?;
+        }
+
+        Command::Fetch { id, out, version } => {
+            // The caller names a bundle id, never a path. The store resolves it
+            // internally, so no path from outside is ever joined onto the root
+            // — the same pattern as naming an account rather than a provider.
+            let version = match version {
+                Some(v) => v,
+                None => store
+                    .alias(&id)?
+                    .and_then(|a| a.version)
+                    .context("that bundle has no aliased version; name one with --version")?,
+            };
+            let from = store.version_dir(&id, version);
+            if !from.is_dir() {
+                bail!("{id} has no version {version}");
+            }
+            copy_dir(&from, &out)?;
+            println!("{id} v{version} → {}", out.display());
+        }
+    }
+    Ok(())
+}
+
+/// Say who can actually reach this right now.
+///
+/// Printed rather than assumed, because at this stage there is no gate origin:
+/// the tailnet is the boundary, and `visibility` is recorded metadata that
+/// nothing yet enforces. A flag that reads as enforcement and is not would be
+/// exactly the wrong thing to leave unsaid.
+fn reach(store: &BundleStore, id: &str) -> Result<()> {
+    let visibility = store
+        .alias(id)?
+        .map(|a| a.visibility)
+        .unwrap_or(Visibility::Private);
+    println!(
+        "  reach  whoever can read {} — recorded visibility is `{}`, which nothing \
+         enforces until there is a gate origin",
+        store.root().display(),
+        match visibility {
+            Visibility::Private => "private",
+            Visibility::Public => "public",
+        }
+    );
+    Ok(())
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}

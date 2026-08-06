@@ -1,0 +1,24 @@
+[package]
+name = "mecha-factory-publish"
+description = "The home side of the public surface: renders bundles, versions them immutably, and (later) holds the publish key."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "factory-publish"
+path = "src/main.rs"
+
+[dependencies]
+mecha-manifest = { path = "../mecha-manifest", version = "0.1.0" }
+anyhow.workspace = true
+chrono.workspace = true
+clap.workspace = true
+minijinja.workspace = true
+pulldown-cmark.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+toml.workspace = true

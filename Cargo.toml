@@ -1,5 +1,5 @@
 [workspace]
-members = ["mecha-manifest"]
+members = ["mecha-manifest", "mecha-factory-publish"]
 resolver = "2"
 
 [workspace.package]
@@ -11,7 +11,12 @@ repository = "https://github.com/ljchang/mecha-factory"
 
 [workspace.dependencies]
 anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4", features = ["derive"] }
+minijinja = "2"
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 serde_json = "1"
 thiserror = "2"
 toml = "0.8"

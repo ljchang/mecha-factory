@@ -26,23 +26,48 @@ A factory is where machines are built and shipped from — and it is deliberatel
 | Crate | What it is |
 |---|---|
 | `mecha-manifest` | The versioned data contract. Request types and bundles, their JSON Schema, their HTML form, and the one validator both ends run. Pure, no I/O, no network. |
+| `mecha-factory-publish` | The home side. Renders bundles, versions them immutably, moves the one alias a share URL resolves through. Later it also holds the publish key and serves the MCP surface. |
 
-Planned, in order: the bundle store and a markdown `report` template; the
-vendoring gate; the `notebook` template; `mecha-factory-publish` (the home-side
-MCP server that holds the publish key); and `mecha-factory` itself (the server
-on the public box).
+Planned, in order: the vendoring gate (every external reference named with its
+file and line, and a publish that *fails* rather than warns); the `notebook`
+template on `marimo export html-wasm`; the MCP surface; and `mecha-factory`
+itself — the server on the public box, which is the first thing here that
+creates a machine to patch forever.
 
 ## Try it
 
+A form, from one manifest:
+
 ```sh
-cargo test
 cargo run --example render -- mecha-manifest/types/speaking.toml /tmp/form
 xdg-open /tmp/form/index.html
 ```
 
-That writes `index.html`, `form.css`, `form.js` and `schema.json` from one
-manifest. Nothing in any of them makes an external request — which is not a
-nicety: the publish gate **fails** on a surviving external reference.
+That writes `index.html`, `form.css`, `form.js` and `schema.json`. Nothing in
+any of them makes an external request — which is not a nicety: the publish gate
+**fails** on a surviving external reference.
+
+A published report, from a markdown file:
+
+```sh
+cargo run --bin factory-publish -- render notes.md --out /tmp/brief
+cargo run --bin factory-publish -- publish morning-brief /tmp/brief --source notes.md
+cargo run --bin factory-publish -- status morning-brief
+```
+
+`render` is cheap and local; `publish` is the one that costs a human review, so
+they are separate verbs. Publishing identical bytes returns the existing version
+rather than minting a new one, which makes "did anything actually change?" a
+comparison rather than a guess. `alias` moves the share URL; `unpublish` points
+it at nothing and destroys no version.
+
+Until there is a server, `~/.mecha/bundles` is the whole of it — point
+`tailscale serve` at that directory and the share URLs work over the tailnet. No
+VPS, no domains, no origin decisions, and nothing yet to patch forever.
+
+**`visibility` is recorded and not yet enforced**, and every command says so:
+the tailnet is the boundary at this stage. A flag that read as enforcement and
+was not would be the silently-degrading-sandbox shape.
 
 ## The invariants
 
