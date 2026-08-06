@@ -116,6 +116,9 @@ pub struct NotebookOptions {
     /// never be published — it cannot boot on an origin that enforces the
     /// policy, which is every origin we serve from.
     pub allow_unvendored_runtime: bool,
+    /// Fetch and embed the Python runtime. The pinned version, and where the
+    /// cache lives.
+    pub vendor_runtime: Option<(String, PathBuf)>,
 }
 
 impl Default for NotebookOptions {
@@ -130,6 +133,7 @@ impl Default for NotebookOptions {
             timeout: Duration::from_secs(300),
             title: None,
             allow_unvendored_runtime: false,
+            vendor_runtime: None,
         }
     }
 }
@@ -148,6 +152,8 @@ pub struct NotebookBundle {
     /// How many inline scripts were moved into files of their own so the
     /// policy could stay the same for every compute bundle.
     pub inlined: usize,
+    /// What the runtime vendoring fetched, when it ran.
+    pub runtime: Option<crate::pyodide::VendorReport>,
 }
 
 /// Export, prune, and describe a notebook bundle.
@@ -174,6 +180,29 @@ pub fn notebook(source: &Path, out: &Path, options: &NotebookOptions) -> Result<
     });
     rewrite_manifest(out, &title)?;
 
+    // After the prune (which only removes files, so `pyodide/` is safe) and
+    // before the pin, so the digest covers the rewritten workers.
+    let mut runtime = None;
+    if let Some((version, cache)) = &options.vendor_runtime {
+        // `marimo --version` prints a bare version; the lock URL wants it.
+        let marimo = marimo_version(options);
+        let marimo = marimo
+            .split_whitespace()
+            .last()
+            .unwrap_or(&marimo)
+            .to_string();
+        let vendorer = crate::pyodide::Vendorer::new(version, &marimo, cache.clone());
+        let report = vendorer.vendor_into(out, &top_level_imports(source)?)?;
+        let workers = crate::pyodide::point_workers_at_bundle(out, version)?;
+        anyhow::ensure!(
+            workers > 0,
+            "no worker referenced pyodide at {version} — the literal this \
+             substitutes is gone, which means marimo changed how it loads the \
+             runtime and the substitution is now silently doing nothing"
+        );
+        runtime = Some(report);
+    }
+
     if options.allow_unvendored_runtime {
         if let Err(e) = check_runtime_vendored(out) {
             eprintln!("⚠ DIAGNOSTIC BUNDLE, DO NOT PUBLISH — {e}");
@@ -182,17 +211,35 @@ pub fn notebook(source: &Path, out: &Path, options: &NotebookOptions) -> Result<
         check_runtime_vendored(out)?;
     }
 
-    let assets = out.join("assets");
+    // Two third-party trees, each reviewed as a unit at the version pinned:
+    // marimo's frontend and Pyodide's distribution. Neither is ours, both are
+    // minified or compiled, and the CSP is the runtime enforcement for what is
+    // inside them — which is what the pinned mode is for.
     let mut vendored = Vec::new();
-    if assets.is_dir() {
-        vendored.push(Vendored {
-            path: PathBuf::from("assets"),
-            digest: crate::store::digest_tree(&assets)?,
-            description: format!(
+    for (dir, what) in [
+        (
+            "assets",
+            format!(
                 "marimo export html-wasm runtime ({})",
                 marimo_version(options)
             ),
-        });
+        ),
+        (
+            crate::pyodide::BUNDLE_DIR,
+            match &options.vendor_runtime {
+                Some((version, _)) => format!("pyodide {version} distribution"),
+                None => "pyodide distribution".into(),
+            },
+        ),
+    ] {
+        let path = out.join(dir);
+        if path.is_dir() {
+            vendored.push(Vendored {
+                path: PathBuf::from(dir),
+                digest: crate::store::digest_tree(&path)?,
+                description: what,
+            });
+        }
     }
 
     Ok(NotebookBundle {
@@ -211,7 +258,33 @@ pub fn notebook(source: &Path, out: &Path, options: &NotebookOptions) -> Result<
         vendored,
         removed,
         inlined,
+        runtime,
     })
+}
+
+/// A notebook's top-level imports, so the vendorer knows which wheels it needs
+/// beyond marimo's own.
+///
+/// Deliberately shallow: `import x` and `from x import y` at the start of a
+/// line. A deeper analysis would be guessing at dynamic imports, and the lock
+/// file's dependency closure covers the transitive case anyway.
+fn top_level_imports(source: &Path) -> Result<Vec<String>> {
+    let text = std::fs::read_to_string(source)?;
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let module = line
+            .strip_prefix("import ")
+            .or_else(|| line.strip_prefix("from "))
+            .and_then(|rest| rest.split_whitespace().next());
+        if let Some(module) = module {
+            let root = module.split('.').next().unwrap_or(module);
+            if !root.is_empty() && !out.iter().any(|m| m == root) {
+                out.push(root.to_string());
+            }
+        }
+    }
+    Ok(out)
 }
 
 fn export(source: &Path, out: &Path, options: &NotebookOptions) -> Result<()> {

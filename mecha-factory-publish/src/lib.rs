@@ -18,6 +18,7 @@
 //! contract is `mecha-manifest`, which is data.
 
 pub mod notebook;
+pub mod pyodide;
 pub mod render;
 pub mod serve;
 pub mod store;

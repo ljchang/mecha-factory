@@ -74,6 +74,10 @@ enum Command {
         /// policy and must never be published.
         #[arg(long)]
         allow_unvendored_runtime: bool,
+        /// Fetch and embed Pyodide at this version, from the pinned allowlist.
+        /// Without it the bundle keeps marimo's CDN loader and will not boot.
+        #[arg(long)]
+        vendor_runtime: Option<String>,
     },
     /// Serve a rendered bundle locally with the real headers for its class.
     ///
@@ -217,11 +221,16 @@ fn main() -> Result<()> {
             title,
             timeout,
             allow_unvendored_runtime,
+            vendor_runtime,
         } => {
             let options = notebook::NotebookOptions {
                 title,
                 timeout: std::time::Duration::from_secs(timeout),
                 allow_unvendored_runtime,
+                vendor_runtime: match vendor_runtime {
+                    Some(v) => Some((v, mecha_factory_publish::pyodide::default_cache()?)),
+                    None => None,
+                },
                 ..notebook::NotebookOptions::default()
             };
             let bundle = notebook::notebook(&source, &out, &options)?;
@@ -233,6 +242,15 @@ fn main() -> Result<()> {
             println!("  title  {}", bundle.rendered.title);
             println!("  class  {}", bundle.rendered.class.as_str());
             println!("  inlined {} script(s) moved into files", bundle.inlined);
+            if let Some(r) = &bundle.runtime {
+                println!(
+                    "  runtime pyodide {} — {} files, {} package(s), {:.1} MB",
+                    r.version,
+                    r.files,
+                    r.packages,
+                    r.bytes as f64 / 1e6
+                );
+            }
             for (name, why) in &bundle.removed {
                 println!("  pruned {name} — {why}");
             }

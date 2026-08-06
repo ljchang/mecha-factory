@@ -127,6 +127,32 @@ the short version:
   one enforcement the artifact security model rests on, and a warning is how it
   silently stops holding.
 
+## Notebooks
+
+```sh
+factory-publish notebook nb.py --out /tmp/nb --title "Weekly figures" \
+  --vendor-runtime v314.0.0
+factory-publish serve /tmp/nb --class compute --port 8347 &
+scripts/csp-probe.py http://127.0.0.1:8347/ --expect-text "…" \
+  --allow-violation "script-src=zod:a guarded Function() probe that falls back"
+```
+
+`marimo export html-wasm`, never islands: the islands runtime resolves packages
+through an AST scan plus a `micropip` list baked into its JS bundle and reads no
+PEP 723, so a pure-Python package Pyodide does not ship fails to import with no
+way to fix it from the host page.
+
+**A `compute` bundle is not publishable until its runtime is vendored.**
+marimo's export loads Pyodide, the standard library and every wheel from three
+hosts at runtime, and `connect-src 'self'` correctly refuses all of it. The
+vendorer fetches from a hardcoded allowlist — never from a URL that came out of
+notebook content — verifies every wheel against the sha256 in Pyodide's own lock
+file, caches per version under `~/.mecha/pyodide/`, and copies into each bundle
+so a published version stays self-contained.
+
+Verified in a browser, not asserted: a notebook boots and computes under the
+full compute policy with **zero off-origin loads**. See `scripts/csp-probe.py`.
+
 ## Confinement — a gap, stated rather than implied
 
 The `notebook` template is the one renderer that **executes code we did not

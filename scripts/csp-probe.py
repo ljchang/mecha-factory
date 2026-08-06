@@ -48,6 +48,16 @@ def main() -> int:
         help="seconds to wait for the expected text (a cold Pyodide boot is slow)",
     )
     parser.add_argument("--screenshot", help="write a PNG here, for a human to look at")
+    parser.add_argument(
+        "--allow-violation",
+        action="append",
+        default=[],
+        metavar="DIRECTIVE=SUBSTRING:REASON",
+        help="a violation that is known and explained, e.g. "
+        "'script-src=zod:a guarded Function() feature probe that falls back'. "
+        "Fail-closed, like a pinned vendored tree: anything not declared still "
+        "fails, and the reason is required so nobody silences one by habit.",
+    )
     args = parser.parse_args()
 
     try:
@@ -124,11 +134,34 @@ def main() -> int:
             page.screenshot(path=args.screenshot, full_page=True)
         browser.close()
 
+    allowed = []
+    for spec in args.allow_violation:
+        directive, _, rest = spec.partition("=")
+        substring, _, reason = rest.partition(":")
+        if not directive or not substring or not reason:
+            print(
+                f"--allow-violation {spec!r} needs DIRECTIVE=SUBSTRING:REASON",
+                file=sys.stderr,
+            )
+            return 2
+        allowed.append((directive.strip(), substring.strip(), reason.strip()))
+
+    def excuse(v):
+        for directive, substring, reason in allowed:
+            haystack = f"{v.get('blocked','')} {v.get('source','')}"
+            if v["directive"].startswith(directive) and substring in haystack:
+                return reason
+        return None
+
+    unexpected = [v for v in violations if excuse(v) is None]
+
     print(f"url                {args.url}")
-    print(f"csp violations     {len(violations)}")
+    print(f"csp violations     {len(violations)} ({len(unexpected)} unexpected)")
     for v in violations[:20]:
         where = f" at {v['source']}:{v['line']}" if v.get("source") else ""
-        print(f"  {v['directive']}  blocked {v['blocked']}{where}")
+        reason = excuse(v)
+        note = f"  [declared: {reason}]" if reason else ""
+        print(f"  {v['directive']}  blocked {v['blocked']}{where}{note}")
     print(f"off-origin loads   {len(off_origin)}")
     for url in sorted(set(off_origin))[:20]:
         print(f"  {url}")
@@ -141,7 +174,7 @@ def main() -> int:
     if args.expect_text:
         print(f"expected text      {'found' if found else 'NOT FOUND'}")
 
-    ok = not violations and not off_origin and (found if args.expect_text else True)
+    ok = not unexpected and not off_origin and (found if args.expect_text else True)
     print(f"\n{'PASS' if ok else 'FAIL'}")
     return 0 if ok else 1
 
