@@ -14,10 +14,22 @@ use std::net::SocketAddr;
 
 /// Put a bundle on disk and in the ledger, the way a publish does.
 fn publish(server: &Server, id: &str, version: u32, class: ContentClass, visibility: Visibility) {
+    publish_as(server, &server.user.clone(), id, version, class, visibility)
+}
+
+fn publish_as(
+    server: &Server,
+    user: &mecha_factory::db::UserRow,
+    id: &str,
+    version: u32,
+    class: ContentClass,
+    visibility: Visibility,
+) {
     let dir = server
         .dir
         .path()
         .join("bundles")
+        .join(&user.id)
         .join(id)
         .join(version.to_string());
     std::fs::create_dir_all(dir.join("assets")).unwrap();
@@ -26,6 +38,7 @@ fn publish(server: &Server, id: &str, version: u32, class: ContentClass, visibil
     server
         .db
         .bundle_insert(&BundleRow {
+            user_id: user.id.clone(),
             id: id.into(),
             version,
             digest: format!("sha256:{id}{version}"),
@@ -35,16 +48,24 @@ fn publish(server: &Server, id: &str, version: u32, class: ContentClass, visibil
             template: "report".into(),
             published_at: Some("2026-08-06T07:00:00Z".into()),
             received_at: "2026-08-06T07:00:01Z".into(),
+            withheld_at: None,
+            withheld_reason: None,
         })
         .unwrap();
     server
         .db
-        .alias_set(id, Some(version), visibility, "2026-08-06T07:00:02Z")
+        .alias_set(
+            &user.id,
+            id,
+            Some(version),
+            visibility,
+            "2026-08-06T07:00:02Z",
+        )
         .unwrap();
 }
 
 /// A request under a `Host` the test chooses, which is the whole subject here.
-fn get_as(address: SocketAddr, host: &str, target: &str, auth: Option<&str>) -> common::Reply {
+fn get_host(address: SocketAddr, host: &str, target: &str, auth: Option<&str>) -> common::Reply {
     let mut request = Request::new("GET", target, host);
     if let Some(token) = auth {
         request = request.auth(token);
@@ -67,18 +88,18 @@ fn each_origin_answers_only_for_what_belongs_on_it() {
     publish(&server, "nb", 1, ContentClass::Compute, Visibility::Public);
 
     // A name we do not serve gets nothing, on a socket that serves plenty.
-    let reply = get_as(server.artifacts, "elsewhere.example", "/b/brief/", None);
+    let reply = get_host(server.artifacts, "elsewhere.example", "/b/brief/", None);
     assert_eq!(reply.status, 404);
 
     // The API is the gate's, and only the gate's.
     assert_eq!(
-        get_as(server.gate, &server.gate.to_string(), "/v1/health", None).status,
+        get_host(server.gate, &server.gate.to_string(), "/v1/health", None).status,
         200
     );
     assert_eq!(
-        get_as(
+        get_host(
             server.artifacts,
-            &server.artifacts.to_string(),
+            &server.host(server.artifacts),
             "/v1/health",
             None
         )
@@ -87,14 +108,14 @@ fn each_origin_answers_only_for_what_belongs_on_it() {
     );
     // …and bundles are not the gate's.
     assert_eq!(
-        get_as(server.gate, &server.gate.to_string(), "/b/brief/", None).status,
+        get_host(server.gate, &server.gate.to_string(), "/b/brief/", None).status,
         404
     );
 
     // A static report, under a policy where nothing runs.
-    let reply = get_as(
+    let reply = get_host(
         server.artifacts,
-        &server.artifacts.to_string(),
+        &server.host(server.artifacts),
         "/b/brief/v/1/",
         None,
     );
@@ -111,9 +132,9 @@ fn each_origin_answers_only_for_what_belongs_on_it() {
     assert_eq!(reply.header("x-content-type-options").unwrap(), "nosniff");
 
     // A notebook, on the origin that exists to hold `wasm-unsafe-eval`.
-    let reply = get_as(
+    let reply = get_host(
         server.compute,
-        &server.compute.to_string(),
+        &server.host(server.compute),
         "/b/nb/v/1/",
         None,
     );
@@ -127,9 +148,9 @@ fn each_origin_answers_only_for_what_belongs_on_it() {
 
     // The same notebook asked for on the artifact origin is sent to the right
     // one rather than served under the wrong policy.
-    let reply = get_as(
+    let reply = get_host(
         server.artifacts,
-        &server.artifacts.to_string(),
+        &server.host(server.artifacts),
         "/b/nb/v/1/",
         None,
     );
@@ -138,7 +159,7 @@ fn each_origin_answers_only_for_what_belongs_on_it() {
         reply
             .header("location")
             .unwrap()
-            .starts_with(&format!("http://{}", server.compute)),
+            .starts_with(&format!("http://alice.{}", server.compute)),
         "{:?}",
         reply.header("location")
     );
@@ -150,9 +171,9 @@ fn each_origin_answers_only_for_what_belongs_on_it() {
 fn wasm_is_served_as_wasm() {
     let server = start();
     publish(&server, "nb", 1, ContentClass::Compute, Visibility::Public);
-    let reply = get_as(
+    let reply = get_host(
         server.compute,
-        &server.compute.to_string(),
+        &server.host(server.compute),
         "/b/nb/v/1/assets/app.wasm",
         None,
     );
@@ -180,24 +201,24 @@ fn the_share_url_moves_and_the_version_url_does_not() {
         Visibility::Public,
     );
 
-    let host = server.artifacts.to_string();
-    let reply = get_as(server.artifacts, &host, "/b/brief/", None);
+    let host = server.host(server.artifacts);
+    let reply = get_host(server.artifacts, &host, "/b/brief/", None);
     assert_eq!(reply.status, 302);
     assert_eq!(reply.header("location").unwrap(), "/b/brief/v/2/");
     assert_eq!(reply.header("cache-control").unwrap(), "no-store");
 
     // Version 1 is still exactly where it was.
-    let reply = get_as(server.artifacts, &host, "/b/brief/v/1/", None);
+    let reply = get_host(server.artifacts, &host, "/b/brief/v/1/", None);
     assert_eq!(reply.status, 200);
     assert!(reply.body.contains("brief v1"));
 
     // Moving the alias back moves every share link with it.
     server
         .db
-        .alias_set("brief", Some(1), Visibility::Public, "t")
+        .alias_set(&server.user.id, "brief", Some(1), Visibility::Public, "t")
         .unwrap();
     assert_eq!(
-        get_as(server.artifacts, &host, "/b/brief/", None)
+        get_host(server.artifacts, &host, "/b/brief/", None)
             .header("location")
             .unwrap(),
         "/b/brief/v/1/"
@@ -217,16 +238,16 @@ fn a_private_bundle_is_indistinguishable_from_one_that_never_existed() {
         ContentClass::Static,
         Visibility::Private,
     );
-    let host = server.artifacts.to_string();
+    let host = server.host(server.artifacts);
 
-    let private = get_as(server.artifacts, &host, "/b/secret/", None);
-    let absent = get_as(server.artifacts, &host, "/b/nothing/", None);
+    let private = get_host(server.artifacts, &host, "/b/secret/", None);
+    let absent = get_host(server.artifacts, &host, "/b/nothing/", None);
     assert_eq!(private.status, 404);
     assert_eq!(absent.status, 404);
     assert_eq!(private.body, absent.body, "the difference is the answer");
     // The version URL is not a way around it.
     assert_eq!(
-        get_as(server.artifacts, &host, "/b/secret/v/1/", None).status,
+        get_host(server.artifacts, &host, "/b/secret/v/1/", None).status,
         404
     );
 
@@ -234,6 +255,7 @@ fn a_private_bundle_is_indistinguishable_from_one_that_never_existed() {
     server
         .db
         .bundle_insert(&BundleRow {
+            user_id: server.user.id.clone(),
             id: "unaliased".into(),
             version: 1,
             digest: "sha256:x".into(),
@@ -243,10 +265,12 @@ fn a_private_bundle_is_indistinguishable_from_one_that_never_existed() {
             template: "report".into(),
             published_at: None,
             received_at: "t".into(),
+            withheld_at: None,
+            withheld_reason: None,
         })
         .unwrap();
     assert_eq!(
-        get_as(server.artifacts, &host, "/b/unaliased/v/1/", None).status,
+        get_host(server.artifacts, &host, "/b/unaliased/v/1/", None).status,
         404
     );
 }
@@ -263,14 +287,14 @@ fn a_takedown_is_gone_everywhere_and_says_so() {
         ContentClass::Static,
         Visibility::Public,
     );
-    let host = server.artifacts.to_string();
+    let host = server.host(server.artifacts);
     server
         .db
-        .alias_set("brief", None, Visibility::Public, "t")
+        .alias_set(&server.user.id, "brief", None, Visibility::Public, "t")
         .unwrap();
 
     for target in ["/b/brief/", "/b/brief/v/1/", "/b/brief/v/1/index.html"] {
-        let reply = get_as(server.artifacts, &host, target, None);
+        let reply = get_host(server.artifacts, &host, target, None);
         assert_eq!(reply.status, 410, "{target}");
         assert!(reply.body.contains("taken down"), "{target}");
     }
@@ -287,9 +311,9 @@ fn a_takedown_is_gone_everywhere_and_says_so() {
     );
     server
         .db
-        .alias_set("secret", None, Visibility::Private, "t")
+        .alias_set(&server.user.id, "secret", None, Visibility::Private, "t")
         .unwrap();
-    let reply = get_as(server.artifacts, &host, "/b/secret/", None);
+    let reply = get_host(server.artifacts, &host, "/b/secret/", None);
     assert_eq!(reply.status, 404);
     assert!(!reply.body.contains("taken down"));
 }
@@ -313,7 +337,7 @@ fn nothing_escapes_a_bundle() {
         ContentClass::Static,
         Visibility::Public,
     );
-    let host = server.artifacts.to_string();
+    let host = server.host(server.artifacts);
 
     for target in [
         "/b/brief/v/1/../../../../factory.db",
@@ -321,7 +345,7 @@ fn nothing_escapes_a_bundle() {
         "/b/brief/v/1/%2e%2e/%2e%2e/other/1/index.html",
         "/b/brief/v/1/./../../other/1/index.html",
     ] {
-        let reply = get_as(server.artifacts, &host, target, None);
+        let reply = get_host(server.artifacts, &host, target, None);
         assert!(
             reply.status == 404 || reply.status == 400,
             "{target} → {} {}",
@@ -334,7 +358,7 @@ fn nothing_escapes_a_bundle() {
     // ordinary case still works.
     assert!(server.dir.path().join("factory.db").is_file());
     assert_eq!(
-        get_as(server.artifacts, &host, "/b/brief/v/1/index.html", None).status,
+        get_host(server.artifacts, &host, "/b/brief/v/1/index.html", None).status,
         200
     );
 }
@@ -353,20 +377,34 @@ fn health_is_public_and_the_counts_are_not() {
     );
     let host = server.gate.to_string();
 
-    let reply = get_as(server.gate, &host, "/v1/health", None);
+    let reply = get_host(server.gate, &host, "/v1/health", None);
     assert_eq!(reply.status, 200);
     assert!(reply.body.contains("\"status\":\"ok\""), "{}", reply.body);
-    assert!(!reply.body.contains("bundles"), "{}", reply.body);
+    assert!(!reply.body.contains("queued"), "{}", reply.body);
 
-    let minted =
-        mecha_factory::keys::mint(&server.db, mecha_factory::db::Scope::Drain, "trigger").unwrap();
-    let reply = get_as(server.gate, &host, "/v1/health", Some(&minted.token));
-    assert!(reply.body.contains("\"bundles\":1"), "{}", reply.body);
+    let minted = mecha_factory::keys::mint(
+        &server.db,
+        &server.user.id,
+        mecha_factory::db::Scope::Drain,
+        "trigger",
+    )
+    .unwrap();
+    // What a key gets is *its own user's* state — not the box's. How many
+    // reports somebody else published is not a fact this endpoint owes anyone,
+    // and a health check that leaked it would be the one place tenancy quietly
+    // did not hold.
+    let reply = get_host(server.gate, &host, "/v1/health", Some(&minted.token));
+    assert!(
+        reply.body.contains("\"handle\":\"alice\""),
+        "{}",
+        reply.body
+    );
     assert!(reply.body.contains("\"queued\":0"), "{}", reply.body);
+    assert!(!reply.body.contains("bundles"), "{}", reply.body);
 
     // A wrong token gets the public answer rather than a refusal: health must
     // work on a box where every key has just been rotated.
-    let reply = get_as(server.gate, &host, "/v1/health", Some("mk_pub_aa.bb"));
+    let reply = get_host(server.gate, &host, "/v1/health", Some("mk_pub_aa.bb"));
     assert_eq!(reply.status, 200);
-    assert!(!reply.body.contains("bundles"));
+    assert!(!reply.body.contains("handle"));
 }

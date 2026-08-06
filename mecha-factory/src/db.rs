@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 1;
+const SCHEMA: i64 = 2;
 
 #[derive(Clone)]
 pub struct Db {
@@ -36,11 +36,45 @@ pub struct Db {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRow {
     pub id: String,
+    /// Whose key this is. Every row a key creates carries the same value, and
+    /// every read a key performs is filtered by it — which is the whole of
+    /// tenant isolation, expressed as one column rather than as discipline in
+    /// each handler.
+    pub user_id: String,
     pub scope: Scope,
     pub hash: String,
     pub label: String,
     pub created_at: String,
     pub revoked_at: Option<String>,
+}
+
+/// A person. Never deleted — `status` is how an account stops working, because
+/// the ledger of what they published has to outlive the account itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UserRow {
+    /// Opaque and stable. Rows point at this and never at the email, which is
+    /// a mutable fact about a person rather than an identifier.
+    pub id: String,
+    /// The label in the hostname. See [`Db::user_create`] for why one of these
+    /// is never handed out twice.
+    pub handle: String,
+    pub email: String,
+    /// `active` | `suspended`.
+    pub status: String,
+    pub created_at: String,
+    /// Published bytes this user may hold. Enforced at publish; present before
+    /// it is enforced so that turning it on is a policy change rather than a
+    /// migration.
+    pub quota_bytes: i64,
+    /// Verification emails per day, once anything sends them. Reputation is
+    /// earned per account rather than granted at signup.
+    pub send_budget: i64,
+}
+
+impl UserRow {
+    pub fn active(&self) -> bool {
+        self.status == "active"
+    }
 }
 
 /// What a key may do. Two of them, mirroring the two forced-command SSH keys
@@ -84,6 +118,7 @@ impl Scope {
 /// One published version, as the index knows it.
 #[derive(Debug, Clone)]
 pub struct BundleRow {
+    pub user_id: String,
     pub id: String,
     pub version: u32,
     pub digest: String,
@@ -93,6 +128,11 @@ pub struct BundleRow {
     pub template: String,
     pub published_at: Option<String>,
     pub received_at: String,
+    /// Set when this was taken out of service on a report. The bytes stay on
+    /// disk: withholding is instant and reversible, and destroying evidence in
+    /// response to a complaint is how you lose the ability to answer it.
+    pub withheld_at: Option<String>,
+    pub withheld_reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +144,7 @@ pub struct AliasRow {
 
 #[derive(Debug, Clone)]
 pub struct TypeRow {
+    pub user_id: String,
     pub id: String,
     pub title: String,
     pub manifest: String,
@@ -115,6 +156,7 @@ pub struct TypeRow {
 #[derive(Debug, Clone)]
 pub struct QueueRow {
     pub seq: i64,
+    pub user_id: String,
     pub type_id: String,
     pub state: String,
     pub payload: String,
@@ -135,7 +177,7 @@ impl Db {
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
-        migrate(&conn)?;
+        migrate(&conn).with_context(|| format!("migrating {}", path.display()))?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -154,14 +196,122 @@ impl Db {
         f(&conn)
     }
 
+    // ---- users ----------------------------------------------------------
+
+    /// Create a user and claim their handle, or fail.
+    ///
+    /// **A handle is never issued twice**, and the `handles` table is what
+    /// makes that true across renames and closed accounts rather than only
+    /// across live ones. The check and the claim are one transaction: two
+    /// concurrent signups for the same name must not both succeed, and a
+    /// check-then-insert is exactly the race that lets them.
+    pub fn user_create(&self, handle: &str, email: &str, now: &str) -> Result<UserRow> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            if let Some((owner, retired)) = handle_owner(&tx, handle)? {
+                anyhow::bail!(
+                    "the handle `{handle}` {} — handles are never reused, because \
+                     every URL somebody published under one would otherwise resolve \
+                     to whoever claimed the name next",
+                    if retired {
+                        format!("was retired by user {owner}")
+                    } else {
+                        format!("belongs to user {owner}")
+                    }
+                );
+            }
+            tx.execute(
+                "INSERT INTO users (id, handle, email, status, created_at) \
+                 VALUES (?1, ?2, ?3, 'active', ?4)",
+                params![id, handle, email, now],
+            )?;
+            tx.execute(
+                "INSERT INTO handles (handle, user_id, issued_at) VALUES (?1, ?2, ?3)",
+                params![handle, id, now],
+            )?;
+            tx.commit()?;
+            Ok(())
+        })?;
+        self.user(&id)?
+            .ok_or_else(|| anyhow::anyhow!("the user vanished between writing and reading it"))
+    }
+
+    pub fn user(&self, id: &str) -> Result<Option<UserRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id, handle, email, status, created_at, quota_bytes, send_budget \
+                     FROM users WHERE id = ?1",
+                    params![id],
+                    user_row,
+                )
+                .optional()?)
+        })
+    }
+
+    /// The user a hostname's leading label names.
+    ///
+    /// Only a *live* handle resolves. A retired one is not an error and not a
+    /// redirect: it names nobody, so what was published under it stops being
+    /// served rather than being served by its next owner — which is the point
+    /// of never reusing one.
+    pub fn user_by_handle(&self, handle: &str) -> Result<Option<UserRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id, handle, email, status, created_at, quota_bytes, send_budget \
+                     FROM users WHERE handle = ?1",
+                    params![handle],
+                    user_row,
+                )
+                .optional()?)
+        })
+    }
+
+    pub fn users(&self) -> Result<Vec<UserRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, handle, email, status, created_at, quota_bytes, send_budget \
+                 FROM users ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map([], user_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Stop or restart an account. Never a delete: the record of what somebody
+    /// published has to outlive their access to publish more.
+    pub fn user_status(&self, id: &str, status: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE users SET status = ?2 WHERE id = ?1",
+                params![id, status],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    pub fn user_quota(&self, id: &str, quota_bytes: i64) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE users SET quota_bytes = ?2 WHERE id = ?1",
+                params![id, quota_bytes],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
     // ---- keys -----------------------------------------------------------
 
     pub fn key_insert(&self, row: &KeyRow) -> Result<()> {
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO keys (id, scope, hash, label, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO keys (id, user_id, scope, hash, label, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     row.id,
+                    row.user_id,
                     row.scope.as_str(),
                     row.hash,
                     row.label,
@@ -176,7 +326,8 @@ impl Db {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT id, scope, hash, label, created_at, revoked_at FROM keys WHERE id = ?1",
+                    "SELECT id, user_id, scope, hash, label, created_at, revoked_at \
+                     FROM keys WHERE id = ?1",
                     params![id],
                     key_row,
                 )
@@ -187,7 +338,8 @@ impl Db {
     pub fn keys(&self) -> Result<Vec<KeyRow>> {
         self.with(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, scope, hash, label, created_at, revoked_at FROM keys ORDER BY created_at",
+                "SELECT id, user_id, scope, hash, label, created_at, revoked_at \
+                 FROM keys ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], key_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -211,9 +363,11 @@ impl Db {
     pub fn bundle_insert(&self, row: &BundleRow) -> Result<()> {
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO bundles (id, version, digest, class, title, description, template, \
-                 published_at, received_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                "INSERT INTO bundles (user_id, id, version, digest, class, title, description, \
+                 template, published_at, received_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
+                    row.user_id,
                     row.id,
                     row.version,
                     row.digest,
@@ -229,41 +383,75 @@ impl Db {
         })
     }
 
-    pub fn bundle(&self, id: &str, version: u32) -> Result<Option<BundleRow>> {
+    pub fn bundle(&self, user_id: &str, id: &str, version: u32) -> Result<Option<BundleRow>> {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT id, version, digest, class, title, description, template, \
-                     published_at, received_at FROM bundles WHERE id = ?1 AND version = ?2",
-                    params![id, version],
+                    &format!("{BUNDLE_COLUMNS} WHERE user_id = ?1 AND id = ?2 AND version = ?3"),
+                    params![user_id, id, version],
                     bundle_row,
                 )
                 .optional()?)
         })
     }
 
-    /// The content-addressed lookup: has this id already been published with
-    /// exactly these bytes? A yes means a republish mints nothing.
-    pub fn bundle_by_digest(&self, id: &str, digest: &str) -> Result<Option<BundleRow>> {
+    /// The content-addressed lookup: has this user already published this id
+    /// with exactly these bytes? A yes means a republish mints nothing.
+    ///
+    /// Scoped to the user, so two people publishing byte-identical reports get
+    /// a version each. Sharing storage across users on a digest match would be
+    /// a cross-tenant read with extra steps.
+    pub fn bundle_by_digest(
+        &self,
+        user_id: &str,
+        id: &str,
+        digest: &str,
+    ) -> Result<Option<BundleRow>> {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT id, version, digest, class, title, description, template, \
-                     published_at, received_at FROM bundles WHERE id = ?1 AND digest = ?2 \
-                     ORDER BY version LIMIT 1",
-                    params![id, digest],
+                    &format!(
+                        "{BUNDLE_COLUMNS} WHERE user_id = ?1 AND id = ?2 AND digest = ?3 \
+                         ORDER BY version LIMIT 1"
+                    ),
+                    params![user_id, id, digest],
                     bundle_row,
                 )
                 .optional()?)
         })
     }
 
-    pub fn bundle_versions(&self, id: &str) -> Result<Vec<u32>> {
+    pub fn bundle_versions(&self, user_id: &str, id: &str) -> Result<Vec<u32>> {
         self.with(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT version FROM bundles WHERE id = ?1 ORDER BY version")?;
-            let rows = stmt.query_map(params![id], |r| r.get::<_, u32>(0))?;
+            let mut stmt = conn.prepare(
+                "SELECT version FROM bundles WHERE user_id = ?1 AND id = ?2 ORDER BY version",
+            )?;
+            let rows = stmt.query_map(params![user_id, id], |r| r.get::<_, u32>(0))?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Take a version out of service without destroying it.
+    ///
+    /// The response to a report, and deliberately reversible: the bytes stay,
+    /// so an accusation that turns out to be wrong costs nothing, and one that
+    /// turns out to be right leaves the evidence intact. Destroying bytes is
+    /// `purge`, which is a different verb nobody automates.
+    pub fn bundle_withhold(
+        &self,
+        user_id: &str,
+        id: &str,
+        version: u32,
+        reason: Option<&str>,
+        now: Option<&str>,
+    ) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE bundles SET withheld_at = ?4, withheld_reason = ?5 \
+                 WHERE user_id = ?1 AND id = ?2 AND version = ?3",
+                params![user_id, id, version, now, reason],
+            )?;
+            Ok(n > 0)
         })
     }
 
@@ -273,12 +461,13 @@ impl Db {
 
     // ---- aliases --------------------------------------------------------
 
-    pub fn alias(&self, id: &str) -> Result<Option<AliasRow>> {
+    pub fn alias(&self, user_id: &str, id: &str) -> Result<Option<AliasRow>> {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT version, visibility, updated_at FROM aliases WHERE id = ?1",
-                    params![id],
+                    "SELECT version, visibility, updated_at FROM aliases \
+                     WHERE user_id = ?1 AND id = ?2",
+                    params![user_id, id],
                     |r| {
                         Ok(AliasRow {
                             version: r.get(0)?,
@@ -293,6 +482,7 @@ impl Db {
 
     pub fn alias_set(
         &self,
+        user_id: &str,
         id: &str,
         version: Option<u32>,
         visibility: mecha_manifest::Visibility,
@@ -300,9 +490,12 @@ impl Db {
     ) -> Result<()> {
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO aliases (id, version, visibility, updated_at) VALUES (?1, ?2, ?3, ?4) \
-                 ON CONFLICT(id) DO UPDATE SET version = ?2, visibility = ?3, updated_at = ?4",
+                "INSERT INTO aliases (user_id, id, version, visibility, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5) \
+                 ON CONFLICT(user_id, id) DO UPDATE SET version = ?3, visibility = ?4, \
+                 updated_at = ?5",
                 params![
+                    user_id,
                     id,
                     version,
                     match visibility {
@@ -321,160 +514,256 @@ impl Db {
     pub fn type_put(&self, row: &TypeRow) -> Result<()> {
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO types (id, title, manifest, schema, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT(id) DO UPDATE SET \
-                 title = ?2, manifest = ?3, schema = ?4, updated_at = ?5",
-                params![row.id, row.title, row.manifest, row.schema, row.updated_at],
+                "INSERT INTO types (user_id, id, title, manifest, schema, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT(user_id, id) DO UPDATE SET \
+                 title = ?3, manifest = ?4, schema = ?5, updated_at = ?6",
+                params![
+                    row.user_id,
+                    row.id,
+                    row.title,
+                    row.manifest,
+                    row.schema,
+                    row.updated_at
+                ],
             )?;
             Ok(())
         })
     }
 
-    pub fn type_get(&self, id: &str) -> Result<Option<TypeRow>> {
+    pub fn type_get(&self, user_id: &str, id: &str) -> Result<Option<TypeRow>> {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT id, title, manifest, schema, updated_at FROM types WHERE id = ?1",
-                    params![id],
+                    "SELECT user_id, id, title, manifest, schema, updated_at FROM types \
+                     WHERE user_id = ?1 AND id = ?2",
+                    params![user_id, id],
                     type_row,
                 )
                 .optional()?)
         })
     }
 
-    pub fn types(&self) -> Result<Vec<TypeRow>> {
+    pub fn types(&self, user_id: &str) -> Result<Vec<TypeRow>> {
         self.with(|conn| {
-            let mut stmt = conn
-                .prepare("SELECT id, title, manifest, schema, updated_at FROM types ORDER BY id")?;
-            let rows = stmt.query_map([], type_row)?;
+            let mut stmt = conn.prepare(
+                "SELECT user_id, id, title, manifest, schema, updated_at FROM types \
+                 WHERE user_id = ?1 ORDER BY id",
+            )?;
+            let rows = stmt.query_map(params![user_id], type_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
     // ---- the queue ------------------------------------------------------
 
-    pub fn queue_add(&self, type_id: &str, state: &str, payload: &str, now: &str) -> Result<i64> {
+    pub fn queue_add(
+        &self,
+        user_id: &str,
+        type_id: &str,
+        state: &str,
+        payload: &str,
+        now: &str,
+        retain_until: Option<&str>,
+    ) -> Result<i64> {
         self.with(|conn| {
             conn.execute(
-                "INSERT INTO queue (type_id, state, payload, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![type_id, state, payload, now],
+                "INSERT INTO queue (user_id, type_id, state, payload, created_at, retain_until) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![user_id, type_id, state, payload, now, retain_until],
             )?;
             Ok(conn.last_insert_rowid())
         })
     }
 
-    /// Everything queued after `since`, oldest first.
+    /// Everything of this user's queued after `since`, oldest first.
     ///
     /// **A pure read.** Marking a row drained here would lose it whenever the
     /// response failed to arrive, and the whole point of the queue is that a
     /// stranger's request cannot silently evaporate. Home acknowledges what it
     /// has stored, and until then the row comes back.
-    pub fn drain(&self, since: i64, limit: usize) -> Result<Vec<QueueRow>> {
+    pub fn drain(&self, user_id: &str, since: i64, limit: usize) -> Result<Vec<QueueRow>> {
         self.with(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT seq, type_id, state, payload, created_at FROM queue \
-                 WHERE seq > ?1 AND state = 'queued' ORDER BY seq LIMIT ?2",
+                "SELECT seq, user_id, type_id, state, payload, created_at FROM queue \
+                 WHERE user_id = ?1 AND seq > ?2 AND state = 'queued' ORDER BY seq LIMIT ?3",
             )?;
-            let rows = stmt.query_map(params![since, limit as i64], |r| {
-                Ok(QueueRow {
-                    seq: r.get(0)?,
-                    type_id: r.get(1)?,
-                    state: r.get(2)?,
-                    payload: r.get(3)?,
-                    created_at: r.get(4)?,
-                })
-            })?;
+            let rows = stmt.query_map(params![user_id, since, limit as i64], queue_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
-    /// Delete exactly the sequence numbers home says it has.
+    /// Delete exactly the sequence numbers this user says they have.
     ///
     /// By list rather than by watermark: a watermark deletes rows nobody named,
-    /// and the failure is silent. Returns how many rows actually went.
-    pub fn queue_ack(&self, seqs: &[i64]) -> Result<usize> {
+    /// and the failure is silent. Scoped by user for the obvious reason —
+    /// acknowledging somebody else's record would delete it.
+    pub fn queue_ack(&self, user_id: &str, seqs: &[i64]) -> Result<usize> {
         self.with(|conn| {
             let mut removed = 0;
             let tx = conn.unchecked_transaction()?;
             for seq in seqs {
-                removed += tx.execute("DELETE FROM queue WHERE seq = ?1", params![seq])?;
+                removed += tx.execute(
+                    "DELETE FROM queue WHERE user_id = ?1 AND seq = ?2",
+                    params![user_id, seq],
+                )?;
             }
             tx.commit()?;
             Ok(removed)
         })
     }
 
-    pub fn queue_depth(&self) -> Result<i64> {
-        self.with(|conn| {
-            Ok(conn.query_row(
+    pub fn queue_depth(&self, user_id: Option<&str>) -> Result<i64> {
+        self.with(|conn| match user_id {
+            Some(user_id) => Ok(conn.query_row(
+                "SELECT COUNT(*) FROM queue WHERE user_id = ?1 AND state = 'queued'",
+                params![user_id],
+                |r| r.get(0),
+            )?),
+            None => Ok(conn.query_row(
                 "SELECT COUNT(*) FROM queue WHERE state = 'queued'",
                 [],
                 |r| r.get(0),
-            )?)
+            )?),
+        })
+    }
+
+    /// Records whose retention window has passed.
+    ///
+    /// The sweep that reads this is what makes `retain_until` a policy rather
+    /// than a column — see §15.4. Returned rather than deleted here so the
+    /// caller can say what it removed, the same shape `mecha work clean` uses.
+    pub fn queue_expired(&self, now: &str) -> Result<Vec<QueueRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT seq, user_id, type_id, state, payload, created_at FROM queue \
+                 WHERE retain_until IS NOT NULL AND retain_until <= ?1 ORDER BY seq",
+            )?;
+            let rows = stmt.query_map(params![now], queue_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
     // ---- idempotency ----------------------------------------------------
 
-    pub fn idempotent(&self, key: &str) -> Result<Option<(String, u32)>> {
+    pub fn idempotent(&self, user_id: &str, key: &str) -> Result<Option<(String, u32)>> {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT bundle_id, version FROM idempotency WHERE key = ?1",
-                    params![key],
+                    "SELECT bundle_id, version FROM idempotency WHERE user_id = ?1 AND key = ?2",
+                    params![user_id, key],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?)
         })
     }
 
-    pub fn idempotency_record(&self, key: &str, id: &str, version: u32, now: &str) -> Result<()> {
+    pub fn idempotency_record(
+        &self,
+        user_id: &str,
+        key: &str,
+        id: &str,
+        version: u32,
+        now: &str,
+    ) -> Result<()> {
         self.with(|conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO idempotency (key, bundle_id, version, created_at) \
-                 VALUES (?1, ?2, ?3, ?4)",
-                params![key, id, version, now],
+                "INSERT OR REPLACE INTO idempotency (key, user_id, bundle_id, version, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![key, user_id, id, version, now],
             )?;
             Ok(())
         })
     }
 }
 
+/// Who owns a handle, and whether they still use it. Inside a transaction,
+/// because the check and the claim have to be one.
+fn handle_owner(conn: &Connection, handle: &str) -> Result<Option<(String, bool)>> {
+    Ok(conn
+        .query_row(
+            "SELECT user_id, retired_at FROM handles WHERE handle = ?1",
+            params![handle],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?.is_some(),
+                ))
+            },
+        )
+        .optional()?)
+}
+
+const BUNDLE_COLUMNS: &str = "SELECT user_id, id, version, digest, class, title, description, \
+     template, published_at, received_at, withheld_at, withheld_reason FROM bundles";
+
 fn key_row(r: &rusqlite::Row) -> rusqlite::Result<KeyRow> {
     Ok(KeyRow {
         id: r.get(0)?,
+        user_id: r.get(1)?,
         // An unreadable scope is treated as the narrower one rather than as an
         // error, because the alternative is an unparseable row locking out a
         // legitimate key. `drain` cannot publish.
-        scope: Scope::parse(&r.get::<_, String>(1)?).unwrap_or(Scope::Drain),
-        hash: r.get(2)?,
-        label: r.get(3)?,
+        scope: Scope::parse(&r.get::<_, String>(2)?).unwrap_or(Scope::Drain),
+        hash: r.get(3)?,
+        label: r.get(4)?,
+        created_at: r.get(5)?,
+        revoked_at: r.get(6)?,
+    })
+}
+
+fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
+    Ok(UserRow {
+        id: r.get(0)?,
+        handle: r.get(1)?,
+        email: r.get(2)?,
+        // An unreadable status is `suspended`, not `active`: a row we cannot
+        // interpret must not be the one that keeps serving.
+        status: match r.get::<_, String>(3)?.as_str() {
+            "active" => "active".to_string(),
+            other => other.to_string(),
+        },
         created_at: r.get(4)?,
-        revoked_at: r.get(5)?,
+        quota_bytes: r.get(5)?,
+        send_budget: r.get(6)?,
+    })
+}
+
+fn queue_row(r: &rusqlite::Row) -> rusqlite::Result<QueueRow> {
+    Ok(QueueRow {
+        seq: r.get(0)?,
+        user_id: r.get(1)?,
+        type_id: r.get(2)?,
+        state: r.get(3)?,
+        payload: r.get(4)?,
+        created_at: r.get(5)?,
     })
 }
 
 fn bundle_row(r: &rusqlite::Row) -> rusqlite::Result<BundleRow> {
     Ok(BundleRow {
-        id: r.get(0)?,
-        version: r.get(1)?,
-        digest: r.get(2)?,
-        class: class_of(&r.get::<_, String>(3)?),
-        title: r.get(4)?,
-        description: r.get(5)?,
-        template: r.get(6)?,
-        published_at: r.get(7)?,
-        received_at: r.get(8)?,
+        user_id: r.get(0)?,
+        id: r.get(1)?,
+        version: r.get(2)?,
+        digest: r.get(3)?,
+        class: class_of(&r.get::<_, String>(4)?),
+        title: r.get(5)?,
+        description: r.get(6)?,
+        template: r.get(7)?,
+        published_at: r.get(8)?,
+        received_at: r.get(9)?,
+        withheld_at: r.get(10)?,
+        withheld_reason: r.get(11)?,
     })
 }
 
 fn type_row(r: &rusqlite::Row) -> rusqlite::Result<TypeRow> {
     Ok(TypeRow {
-        id: r.get(0)?,
-        title: r.get(1)?,
-        manifest: r.get(2)?,
-        schema: r.get(3)?,
-        updated_at: r.get(4)?,
+        user_id: r.get(0)?,
+        id: r.get(1)?,
+        title: r.get(2)?,
+        manifest: r.get(3)?,
+        schema: r.get(4)?,
+        updated_at: r.get(5)?,
     })
 }
 
@@ -503,10 +792,44 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version >= SCHEMA {
         return Ok(());
     }
+    // Schema 1 predates users, and the change is not one SQLite can make in
+    // place: every table's primary key gained a user. Refused rather than
+    // half-migrated, because a ledger that is partly scoped is worse than one
+    // that will not open — and this server has never been deployed, so the
+    // honest instruction is the cheap one.
+    if version == 1 {
+        anyhow::bail!(
+            "this ledger is schema 1, which predates users. Nothing has been \
+             deployed from it: delete the database file and start again."
+        );
+    }
     conn.execute_batch(
         "
+        CREATE TABLE IF NOT EXISTS users (
+            id           TEXT PRIMARY KEY,
+            handle       TEXT NOT NULL UNIQUE,
+            email        TEXT NOT NULL DEFAULT '',
+            status       TEXT NOT NULL DEFAULT 'active',
+            created_at   TEXT NOT NULL,
+            quota_bytes  INTEGER NOT NULL DEFAULT 1073741824,
+            send_budget  INTEGER NOT NULL DEFAULT 50
+        );
+
+        -- Every handle ever issued, including ones nobody uses any more. The
+        -- UNIQUE on users.handle says who owns a name *now*; this says who has
+        -- ever owned it, which is what makes a handle unreusable after a
+        -- rename or a closed account. A freed handle is a hijack: every URL
+        -- that person put in a paper resolves to whoever claims the name next.
+        CREATE TABLE IF NOT EXISTS handles (
+            handle      TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            issued_at   TEXT NOT NULL,
+            retired_at  TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS keys (
             id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL DEFAULT '',
             scope       TEXT NOT NULL,
             hash        TEXT NOT NULL,
             label       TEXT NOT NULL DEFAULT '',
@@ -515,6 +838,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS bundles (
+            user_id      TEXT NOT NULL DEFAULT '',
             id           TEXT NOT NULL,
             version      INTEGER NOT NULL,
             digest       TEXT NOT NULL,
@@ -524,36 +848,50 @@ fn migrate(conn: &Connection) -> Result<()> {
             template     TEXT NOT NULL,
             published_at TEXT,
             received_at  TEXT NOT NULL,
-            PRIMARY KEY (id, version)
+            withheld_at  TEXT,
+            withheld_reason TEXT,
+            -- Scoped by user, so two people may both publish `morning-brief`
+            -- and neither can address the other's.
+            PRIMARY KEY (user_id, id, version)
         );
-        CREATE INDEX IF NOT EXISTS bundles_by_digest ON bundles (id, digest);
+        CREATE INDEX IF NOT EXISTS bundles_by_digest ON bundles (user_id, id, digest);
 
         CREATE TABLE IF NOT EXISTS aliases (
-            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL DEFAULT '',
+            id          TEXT NOT NULL,
             version     INTEGER,
             visibility  TEXT NOT NULL DEFAULT 'private',
-            updated_at  TEXT NOT NULL
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (user_id, id)
         );
 
         CREATE TABLE IF NOT EXISTS types (
-            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL DEFAULT '',
+            id          TEXT NOT NULL,
             title       TEXT NOT NULL DEFAULT '',
             manifest    TEXT NOT NULL,
             schema      TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            updated_at  TEXT NOT NULL,
+            PRIMARY KEY (user_id, id)
         );
 
         CREATE TABLE IF NOT EXISTS queue (
             seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     TEXT NOT NULL DEFAULT '',
             type_id     TEXT NOT NULL,
             state       TEXT NOT NULL,
             payload     TEXT NOT NULL,
-            created_at  TEXT NOT NULL
+            created_at  TEXT NOT NULL,
+            -- When this stops being ours to hold. A pile of other people's
+            -- personal data with no deletion story is the thing you cannot
+            -- start having and then stop.
+            retain_until TEXT
         );
-        CREATE INDEX IF NOT EXISTS queue_by_state ON queue (state, seq);
+        CREATE INDEX IF NOT EXISTS queue_by_state ON queue (user_id, state, seq);
 
         CREATE TABLE IF NOT EXISTS idempotency (
             key         TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL DEFAULT '',
             bundle_id   TEXT NOT NULL,
             version     INTEGER NOT NULL,
             created_at  TEXT NOT NULL
@@ -574,8 +912,18 @@ mod tests {
     use super::*;
     use mecha_manifest::{ContentClass, Visibility};
 
-    fn bundle(id: &str, version: u32, digest: &str) -> BundleRow {
+    /// A database with one user in it, since nothing exists outside a user now.
+    fn db_with_user() -> (Db, String) {
+        let db = Db::open_in_memory().unwrap();
+        let user = db
+            .user_create("alice", "alice@example.org", "2026-08-06T00:00:00Z")
+            .unwrap();
+        (db, user.id)
+    }
+
+    fn bundle(user_id: &str, id: &str, version: u32, digest: &str) -> BundleRow {
         BundleRow {
+            user_id: user_id.into(),
             id: id.into(),
             version,
             digest: digest.into(),
@@ -585,6 +933,8 @@ mod tests {
             template: "report".into(),
             published_at: Some("2026-08-06T07:00:00Z".into()),
             received_at: "2026-08-06T07:00:01Z".into(),
+            withheld_at: None,
+            withheld_reason: None,
         }
     }
 
@@ -592,80 +942,103 @@ mod tests {
     /// database enforces rather than as discipline in a handler.
     #[test]
     fn a_version_cannot_be_rewritten() {
-        let db = Db::open_in_memory().unwrap();
-        db.bundle_insert(&bundle("brief", 1, "sha256:aaa")).unwrap();
+        let (db, u) = db_with_user();
+        db.bundle_insert(&bundle(&u, "brief", 1, "sha256:aaa"))
+            .unwrap();
         let err = db
-            .bundle_insert(&bundle("brief", 1, "sha256:bbb"))
+            .bundle_insert(&bundle(&u, "brief", 1, "sha256:bbb"))
             .unwrap_err()
             .to_string();
         assert!(err.contains("UNIQUE"), "{err}");
-        assert_eq!(db.bundle("brief", 1).unwrap().unwrap().digest, "sha256:aaa");
+        assert_eq!(
+            db.bundle(&u, "brief", 1).unwrap().unwrap().digest,
+            "sha256:aaa"
+        );
     }
 
     #[test]
     fn identical_bytes_are_found_by_their_address() {
-        let db = Db::open_in_memory().unwrap();
-        db.bundle_insert(&bundle("brief", 1, "sha256:aaa")).unwrap();
-        db.bundle_insert(&bundle("brief", 2, "sha256:bbb")).unwrap();
+        let (db, u) = db_with_user();
+        db.bundle_insert(&bundle(&u, "brief", 1, "sha256:aaa"))
+            .unwrap();
+        db.bundle_insert(&bundle(&u, "brief", 2, "sha256:bbb"))
+            .unwrap();
         assert_eq!(
-            db.bundle_by_digest("brief", "sha256:bbb")
+            db.bundle_by_digest(&u, "brief", "sha256:bbb")
                 .unwrap()
                 .unwrap()
                 .version,
             2
         );
         assert!(db
-            .bundle_by_digest("brief", "sha256:ccc")
+            .bundle_by_digest(&u, "brief", "sha256:ccc")
             .unwrap()
             .is_none());
         // Another bundle's identical bytes are a different publication.
         assert!(db
-            .bundle_by_digest("other", "sha256:aaa")
+            .bundle_by_digest(&u, "other", "sha256:aaa")
             .unwrap()
             .is_none());
-        assert_eq!(db.bundle_versions("brief").unwrap(), vec![1, 2]);
+        assert_eq!(db.bundle_versions(&u, "brief").unwrap(), vec![1, 2]);
     }
 
     #[test]
     fn the_alias_is_the_only_thing_that_moves_and_a_takedown_keeps_the_versions() {
-        let db = Db::open_in_memory().unwrap();
-        db.bundle_insert(&bundle("brief", 1, "sha256:aaa")).unwrap();
-        db.alias_set("brief", Some(1), Visibility::Public, "2026-08-06T08:00:00Z")
+        let (db, u) = db_with_user();
+        db.bundle_insert(&bundle(&u, "brief", 1, "sha256:aaa"))
             .unwrap();
-        let alias = db.alias("brief").unwrap().unwrap();
+        db.alias_set(
+            &u,
+            "brief",
+            Some(1),
+            Visibility::Public,
+            "2026-08-06T08:00:00Z",
+        )
+        .unwrap();
+        let alias = db.alias(&u, "brief").unwrap().unwrap();
         assert_eq!(alias.version, Some(1));
         assert_eq!(alias.visibility, Visibility::Public);
 
-        db.alias_set("brief", None, Visibility::Private, "2026-08-07T08:00:00Z")
-            .unwrap();
-        assert_eq!(db.alias("brief").unwrap().unwrap().version, None);
-        assert_eq!(db.bundle_versions("brief").unwrap(), vec![1]);
+        db.alias_set(
+            &u,
+            "brief",
+            None,
+            Visibility::Private,
+            "2026-08-07T08:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(db.alias(&u, "brief").unwrap().unwrap().version, None);
+        assert_eq!(db.bundle_versions(&u, "brief").unwrap(), vec![1]);
     }
 
     /// A drain that mutated would lose a stranger's request whenever the
     /// response failed to arrive.
     #[test]
     fn draining_twice_returns_the_same_records_until_they_are_acknowledged() {
-        let db = Db::open_in_memory().unwrap();
+        let (db, u) = db_with_user();
         let a = db
-            .queue_add("meeting", "queued", r#"{"a":1}"#, "t1")
+            .queue_add(&u, "meeting", "queued", r#"{"a":1}"#, "t1", None)
             .unwrap();
         let b = db
-            .queue_add("meeting", "queued", r#"{"b":2}"#, "t2")
+            .queue_add(&u, "meeting", "queued", r#"{"b":2}"#, "t2", None)
             .unwrap();
         // Never drained: it has not been verified, and unverified never costs a
         // token.
-        db.queue_add("meeting", "submitted", r#"{"c":3}"#, "t3")
+        db.queue_add(&u, "meeting", "submitted", r#"{"c":3}"#, "t3", None)
             .unwrap();
 
-        let first = db.drain(0, 10).unwrap();
+        let first = db.drain(&u, 0, 10).unwrap();
         assert_eq!(first.iter().map(|r| r.seq).collect::<Vec<_>>(), vec![a, b]);
-        assert_eq!(db.drain(0, 10).unwrap().len(), 2, "a read changed nothing");
-        assert_eq!(db.queue_depth().unwrap(), 2);
-
-        assert_eq!(db.queue_ack(&[a]).unwrap(), 1);
         assert_eq!(
-            db.drain(0, 10)
+            db.drain(&u, 0, 10).unwrap().len(),
+            2,
+            "a read changed nothing"
+        );
+        assert_eq!(db.queue_depth(Some(&u)).unwrap(), 2);
+
+        assert_eq!(db.queue_ack(&u, &[a]).unwrap(), 1);
+        assert_eq!(
+            db.drain(&u, 0, 10)
                 .unwrap()
                 .iter()
                 .map(|r| r.seq)
@@ -673,14 +1046,15 @@ mod tests {
             vec![b]
         );
         // And the watermark form of the same question.
-        assert!(db.drain(b, 10).unwrap().is_empty());
+        assert!(db.drain(&u, b, 10).unwrap().is_empty());
     }
 
     #[test]
     fn a_key_is_revoked_once_and_the_row_survives_it() {
-        let db = Db::open_in_memory().unwrap();
+        let (db, u) = db_with_user();
         db.key_insert(&KeyRow {
             id: "abcd1234".into(),
+            user_id: u.clone(),
             scope: Scope::Publish,
             hash: "$argon2id$…".into(),
             label: "laptop".into(),

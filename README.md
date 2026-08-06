@@ -32,7 +32,7 @@ A factory is where machines are built and shipped from — and it is deliberatel
 |---|---|
 | `mecha-manifest` | The versioned data contract. Request types and bundles, their JSON Schema, their HTML form, and the one validator both ends run. Pure, no I/O, no network. |
 | `mecha-factory-publish` | The home side. Renders bundles, versions them immutably, moves the one alias a share URL resolves through, holds the publish key, and serves the MCP surface mecha wires. |
-| `mecha-factory` | The box. One binary serving three origins under three policies, an authenticated write API, and a queue home drains. Holds no credential that reaches home. |
+| `mecha-factory` | The box. One binary serving three origins under three policies, an authenticated write API, and a queue home drains. **Multi-user**: every row belongs to a person, and each person's artifacts are served from their own hostname. Holds no credential that reaches home. |
 
 Next, in order: the inbound form and its verification (§12 step 7), then the
 booking page (step 8).
@@ -113,6 +113,17 @@ three loopback ports to the three roles and takes the identical path through
 a domain existing.
 
 Deployment, the Cloudflare decision, and what to watch: [`docs/DEPLOY.md`](docs/DEPLOY.md).
+
+**A tenant is a person, and the boundary is a hostname.** Alice's report is at
+`alice.artifacts.example.org` and Bob's is at `bob.artifacts.example.org`; both
+may be called `brief` and neither can address the other's. That shape is in the
+first row rather than added later for two reasons: a published URL has to stay
+resolvable forever, and a path prefix would give a namespace with no isolation
+at all — origin is the only boundary a browser enforces. A handle is **never
+issued twice**, including after a rename or a closed account, because a freed
+handle would let its next owner serve content at URLs somebody already
+published. `factory user create`, `factory user suspend`, `factory withhold`;
+the reasoning is §14 and §15 of the design document.
 
 **Three origins, because one of them has to permit WebAssembly.** A bundle's
 content class decides which origin may serve it: `static` and `interactive` go

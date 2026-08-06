@@ -33,6 +33,29 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// The people this box serves.
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+    },
+    /// Take a published version out of service, on a report.
+    ///
+    /// Reversible and destroys nothing: the bytes stay, so an accusation that
+    /// turns out to be wrong costs nothing and one that turns out to be right
+    /// leaves the evidence. Destroying bytes is a different verb, and it is
+    /// deliberately not automated.
+    Withhold {
+        /// The user's handle.
+        handle: String,
+        /// The bundle id.
+        id: String,
+        version: u32,
+        #[arg(long)]
+        reason: Option<String>,
+        /// Put it back.
+        #[arg(long)]
+        undo: bool,
+    },
     /// Mint, list and revoke the keys mecha authenticates with.
     Key {
         #[command(subcommand)]
@@ -59,9 +82,46 @@ enum Command {
 }
 
 #[derive(Subcommand)]
+enum UserAction {
+    /// Create a user and claim their handle.
+    ///
+    /// Today this is how an account comes to exist; a signup flow later calls
+    /// exactly this. The front door is new, the mechanism is not — a parallel
+    /// path is how two ways of creating a user come to disagree about what a
+    /// valid one is.
+    Create {
+        /// The label in their hostname: `alice` in `alice.artifacts.example.org`.
+        /// Claimed once and never issued again, even if the account closes.
+        handle: String,
+        #[arg(long, default_value = "")]
+        email: String,
+        /// Mint their first publish key at the same time, and print it.
+        #[arg(long)]
+        with_key: bool,
+    },
+    List,
+    /// Stop an account serving and publishing. Never a delete.
+    Suspend {
+        handle: String,
+    },
+    /// Undo a suspension.
+    Restore {
+        handle: String,
+    },
+    /// Set how many bytes of published artifacts this user may hold.
+    Quota {
+        handle: String,
+        bytes: i64,
+    },
+}
+
+#[derive(Subcommand)]
 enum QueueAction {
     /// What is waiting, and what state it is in.
-    List,
+    List {
+        #[arg(long)]
+        handle: String,
+    },
     /// Put a record in by hand.
     ///
     /// The inbound form and its verification are step 7; until they exist this
@@ -72,6 +132,9 @@ enum QueueAction {
     /// will — a queue that could hold a record no schema accepts would break
     /// the one property that makes draining safe.
     Add {
+        /// Whose queue it goes in.
+        #[arg(long)]
+        handle: String,
         /// The request type id, which must already be uploaded.
         #[arg(long = "type")]
         type_id: String,
@@ -89,6 +152,9 @@ enum QueueAction {
 enum KeyAction {
     /// Mint a key and print it **once**. There is no way to read it back.
     Create {
+        /// Whose key it is.
+        #[arg(long)]
+        handle: String,
         /// `publish` (types, bundles, aliases) or `drain` (the queue).
         #[arg(long)]
         scope: String,
@@ -114,6 +180,14 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match &cli.command {
+        Command::User { action } => user(&cli, action),
+        Command::Withhold {
+            handle,
+            id,
+            version,
+            reason,
+            undo,
+        } => withhold(&cli, handle, id, *version, reason.as_deref(), *undo),
         Command::Key { action } => key(&cli, action),
         Command::Serve { dev, port } => serve(&cli, *dev, *port),
         Command::Queue { action } => queue(&cli, action),
@@ -145,12 +219,112 @@ fn load_config(cli: &Cli) -> Result<Config> {
     Config::load(&path)
 }
 
+/// Look a user up by handle, or say so.
+fn find_user(db: &Db, handle: &str) -> Result<mecha_factory::db::UserRow> {
+    db.user_by_handle(handle)?
+        .ok_or_else(|| anyhow::anyhow!("no user with the handle `{handle}`"))
+}
+
+fn user(cli: &Cli, action: &UserAction) -> Result<()> {
+    let db = open_db(cli)?;
+    match action {
+        UserAction::Create {
+            handle,
+            email,
+            with_key,
+        } => {
+            mecha_factory::config::valid_handle(handle)?;
+            let user = db.user_create(handle, email, &db::now())?;
+            println!("{}  {}  {}", user.id, user.handle, user.email);
+            if *with_key {
+                let minted = keys::mint(&db, &user.id, Scope::Publish, "first")?;
+                println!("{}", minted.token);
+                eprintln!(
+                    "that is {}'s publish key, shown once. A drain key is \
+                     `factory key create --handle {} --scope drain`.",
+                    user.handle, user.handle
+                );
+            }
+            Ok(())
+        }
+        UserAction::List => {
+            let users = db.users()?;
+            if users.is_empty() {
+                println!("no users");
+                return Ok(());
+            }
+            for user in users {
+                println!(
+                    "{}  {:<20} {:<10} {:<28} quota {}",
+                    user.id, user.handle, user.status, user.email, user.quota_bytes
+                );
+            }
+            Ok(())
+        }
+        UserAction::Suspend { handle } => {
+            let user = find_user(&db, handle)?;
+            db.user_status(&user.id, "suspended")?;
+            println!(
+                "suspended {handle}: their artifacts stop being served and their keys stop working"
+            );
+            println!("nothing was deleted — `factory user restore {handle}` puts it back");
+            Ok(())
+        }
+        UserAction::Restore { handle } => {
+            let user = find_user(&db, handle)?;
+            db.user_status(&user.id, "active")?;
+            println!("restored {handle}");
+            Ok(())
+        }
+        UserAction::Quota { handle, bytes } => {
+            let user = find_user(&db, handle)?;
+            db.user_quota(&user.id, *bytes)?;
+            println!("{handle} may hold {bytes} bytes");
+            Ok(())
+        }
+    }
+}
+
+fn withhold(
+    cli: &Cli,
+    handle: &str,
+    id: &str,
+    version: u32,
+    reason: Option<&str>,
+    undo: bool,
+) -> Result<()> {
+    let db = open_db(cli)?;
+    let user = find_user(&db, handle)?;
+    let now = db::now();
+    let changed = db.bundle_withhold(
+        &user.id,
+        id,
+        version,
+        if undo { None } else { reason },
+        if undo { None } else { Some(&now) },
+    )?;
+    if !changed {
+        bail!("{handle} has no {id} version {version}");
+    }
+    if undo {
+        println!("{handle}/{id} v{version} is served again");
+    } else {
+        println!("{handle}/{id} v{version} is withheld — served to nobody, and still on disk");
+    }
+    Ok(())
+}
+
 fn key(cli: &Cli, action: &KeyAction) -> Result<()> {
     let db = open_db(cli)?;
     match action {
-        KeyAction::Create { scope, label } => {
+        KeyAction::Create {
+            scope,
+            label,
+            handle,
+        } => {
             let scope = Scope::parse(scope)?;
-            let minted = keys::mint(&db, scope, label).context("minting a key")?;
+            let user = find_user(&db, handle)?;
+            let minted = keys::mint(&db, &user.id, scope, label).context("minting a key")?;
             // stdout, alone, so `factory key create … > publish.key` is the
             // whole installation procedure.
             println!("{}", minted.token);
@@ -169,10 +343,17 @@ fn key(cli: &Cli, action: &KeyAction) -> Result<()> {
                 println!("no keys");
                 return Ok(());
             }
+            let users = db.users()?;
             for row in rows {
+                let handle = users
+                    .iter()
+                    .find(|u| u.id == row.user_id)
+                    .map(|u| u.handle.as_str())
+                    .unwrap_or("(none)");
                 println!(
-                    "{}  {:<7}  {:<19}  {}{}",
+                    "{}  {:<14} {:<7}  {:<19}  {}{}",
                     row.id,
+                    handle,
                     row.scope.as_str(),
                     row.created_at,
                     if row.label.is_empty() {
@@ -202,8 +383,9 @@ fn key(cli: &Cli, action: &KeyAction) -> Result<()> {
 fn queue(cli: &Cli, action: &QueueAction) -> Result<()> {
     let db = open_db(cli)?;
     match action {
-        QueueAction::List => {
-            for row in db.drain(0, 1000)? {
+        QueueAction::List { handle } => {
+            let user = find_user(&db, handle)?;
+            for row in db.drain(&user.id, 0, 1000)? {
                 println!(
                     "{:>5}  {:<12}  {}  {}",
                     row.seq, row.type_id, row.created_at, row.payload
@@ -212,10 +394,12 @@ fn queue(cli: &Cli, action: &QueueAction) -> Result<()> {
             Ok(())
         }
         QueueAction::Add {
+            handle,
             type_id,
             payload,
             state,
         } => {
+            let user = find_user(&db, handle)?;
             let text = if payload.as_os_str() == "-" {
                 std::io::read_to_string(std::io::stdin())?
             } else {
@@ -225,7 +409,7 @@ fn queue(cli: &Cli, action: &QueueAction) -> Result<()> {
             let raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)
                 .context("the payload must be a JSON object of field values")?;
 
-            let Some(stored) = db.type_get(type_id)? else {
+            let Some(stored) = db.type_get(&user.id, type_id)? else {
                 bail!(
                     "no type `{type_id}` is uploaded. The queue only ever holds \
                      records that validate against a schema mecha itself uploaded, \
@@ -245,10 +429,12 @@ fn queue(cli: &Cli, action: &QueueAction) -> Result<()> {
             })?;
 
             let seq = db.queue_add(
+                &user.id,
                 type_id,
                 state,
                 &serde_json::to_string(&submission.values)?,
                 &db::now(),
+                None,
             )?;
             println!("queued {seq} ({type_id}, {state})");
             Ok(())
@@ -290,9 +476,10 @@ fn check(cli: &Cli) -> Result<()> {
     }
     println!("tls       {}", mecha_factory::tls::describe(&config));
     println!(
-        "ledger    {} bundles, {} queued, {} keys",
+        "ledger    {} users, {} bundles, {} queued, {} keys",
+        db.users()?.len(),
         db.bundle_count()?,
-        db.queue_depth()?,
+        db.queue_depth(None)?,
         db.keys()?.iter().filter(|k| k.revoked_at.is_none()).count()
     );
     Ok(())

@@ -10,7 +10,16 @@ data_dir = "/var/lib/mecha-factory"
 
 # Three registrable names, one per content class. They must be three distinct
 # names: sharing one would put a notebook and a report under one policy, which
-# is the whole reason there are three. The certificate covers exactly these.
+# is the whole reason there are three.
+#
+# `artifacts` and `compute` are **base** names: a user's pages are served from
+# `<handle>.<base>`, so alice's report is at alice.artifacts.example.org. That
+# is not decoration — origin is the only isolation a browser enforces, and a
+# path prefix would give a namespace and no separation at all. Pick names that
+# read well with a handle in front of them.
+#
+# The gate is shared and has no handle: it serves the API and server-rendered
+# forms, which execute nothing.
 [origins]
 gate      = "gate.example.org"       # the API, and later the forms
 artifacts = "artifacts.example.org"  # reports — nothing executes
@@ -25,6 +34,10 @@ http = "0.0.0.0:80"
 
 # Remove this block to serve plain HTTP on loopback (which is all it will let
 # you do: a public address without TLS is refused at startup).
+# The certificate covers the three base names plus one hostname per active
+# user. TLS-ALPN-01 issues for a fixed list, so a user created while the server
+# is running needs a restart before their name has a certificate — fine for
+# tens of users, and the reason a wildcard (which needs DNS-01) is on the list.
 [tls]
 contact = "mailto:you@example.org"
 # Start here. These certificates are trusted by nobody and rate-limited by

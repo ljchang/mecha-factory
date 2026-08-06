@@ -21,6 +21,35 @@ The box never initiates a connection to home. There is no field in its
 configuration where a credential could be put, which is a property you verify
 by reading `/etc/mecha-factory/factory.toml` rather than by trusting a claim.
 
+## Users
+
+A tenant is a person. Create one, and their first key with them:
+
+```sh
+factory --config /etc/mecha-factory/factory.toml user create alice \
+    --email alice@example.org --with-key
+```
+
+The token prints once. A drain key is
+`factory key create --handle alice --scope drain`.
+
+**A handle is never issued twice**, including after a rename or a closed
+account: a freed handle would let whoever claimed it next serve content at URLs
+somebody already put in a paper. Reserved names (`www`, `abuse`,
+`_acme-challenge`, …) are refused, and so is anything that is not a legal DNS
+label.
+
+Two operations exist for content that should stop being served, and only one of
+them destroys anything:
+
+```sh
+factory withhold alice brief 1 --reason "reported"   # instant, reversible, keeps the bytes
+factory user suspend alice                           # their whole namespace stops serving
+```
+
+Neither deletes. That is deliberate — see §15.3 of the design document — and it
+is what lets a report that turns out to be wrong cost nothing.
+
 ## The three names
 
 Three registrable names are required and they must be distinct, because the
@@ -30,7 +59,23 @@ notebook and a report under one policy, which is the whole reason there are
 three.
 
 Point all three at the droplet's address with **A records** (and AAAA if it has
-v6). Nothing else about DNS matters here.
+v6), **plus a wildcard** for the two artifact names:
+
+```
+gate.example.org           A    203.0.113.10
+artifacts.example.org      A    203.0.113.10
+*.artifacts.example.org    A    203.0.113.10
+compute.example.org        A    203.0.113.10
+*.compute.example.org      A    203.0.113.10
+```
+
+The wildcards are how `alice.artifacts.example.org` resolves. The
+*certificate* is a separate matter: TLS-ALPN-01 cannot issue a wildcard, so the
+server orders one name per active user at startup and **a user created while it
+is running needs a restart before their hostname has a certificate**. That is
+fine for tens of users. Beyond that it wants a real wildcard certificate, which
+needs DNS-01 and therefore a zone-scoped API token on the box — recorded in
+§14.2 with the mitigation, and deliberately not done yet.
 
 ### If the DNS is at Cloudflare
 
@@ -75,9 +120,11 @@ restart does not re-issue.
 
 ## The keys
 
+Every key belongs to a user, so minting one names them:
+
 ```sh
-factory --config /etc/mecha-factory/factory.toml key create --scope publish --label home
-factory --config /etc/mecha-factory/factory.toml key create --scope drain   --label home
+factory --config /etc/mecha-factory/factory.toml key create --handle alice --scope publish --label laptop
+factory --config /etc/mecha-factory/factory.toml key create --handle alice --scope drain   --label laptop
 ```
 
 Each prints its token **once**, on stdout, alone — so redirecting it to a file
@@ -108,8 +155,9 @@ And **watch it from home rather than remembering to look**: a mecha trigger that
 `GET`s `https://<gate>/v1/health` on a schedule and stages a warning when it is
 not 200. Health is public precisely so that check costs nothing and keeps
 working on a box where every key has just been rotated. With a key it also
-reports how many bundles and how many queued records — those are not public,
-because queue depth is a fact about how many strangers wrote to us this week.
+reports **that user's** queue depth and account status — not the box's totals,
+because how many strangers wrote to somebody else this week is not a fact this
+endpoint owes anyone.
 
 ## What is deliberately not here yet
 
@@ -120,6 +168,8 @@ because queue depth is a fact about how many strangers wrote to us this week.
 - **Capability URLs for private bundles.** A private bundle is served to nobody
   and answers exactly what a bundle that never existed answers. The gate issuing
   short-lived URLs comes with the same step.
+- **A real wildcard certificate**, and with it users who can sign up without a
+  restart. See "The three names".
 - **Backups.** The published bytes are also mirrored at home under
   `~/.mecha/bundles/`, so the box is not the only copy of anything that matters
   — but the ledger and the queue are only here. A nightly `sqlite3 .backup` of

@@ -14,7 +14,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 
 use mecha_factory::config::{Config, Limits, Listen, Origins};
-use mecha_factory::db::Db;
+use mecha_factory::db::{Db, UserRow};
 use mecha_factory::http::App;
 
 pub struct Server {
@@ -22,6 +22,8 @@ pub struct Server {
     pub artifacts: SocketAddr,
     pub compute: SocketAddr,
     pub db: Db,
+    /// The user every helper acts as unless told otherwise.
+    pub user: UserRow,
     pub dir: tempfile::TempDir,
 }
 
@@ -159,6 +161,9 @@ pub fn start() -> Server {
         limits: Limits::default(),
     };
     let db = Db::open(&config.db_path()).unwrap();
+    let user = db
+        .user_create("alice", "alice@example.org", "2026-08-06T00:00:00Z")
+        .unwrap();
     let app = Arc::new(App::new(config, db.clone()).unwrap());
 
     std::thread::spawn(move || {
@@ -175,17 +180,55 @@ pub fn start() -> Server {
         artifacts: addresses[1],
         compute: addresses[2],
         db,
+        user,
         dir,
     }
 }
 
 impl Server {
+    /// The `Host` a request for this address carries.
+    ///
+    /// Artifacts and compute are per-user, so they are reached at
+    /// `<handle>.<origin>`; the gate is shared and is reached bare. Tests set
+    /// the header themselves and connect to the socket, which is exactly what
+    /// a browser does once DNS has resolved a wildcard.
+    pub fn host_for(&self, address: SocketAddr, handle: &str) -> String {
+        if address == self.gate {
+            address.to_string()
+        } else {
+            format!("{handle}.{address}")
+        }
+    }
+
+    pub fn host(&self, address: SocketAddr) -> String {
+        self.host_for(address, &self.user.handle)
+    }
+
     pub fn get(&self, address: SocketAddr, target: &str) -> Reply {
-        Request::new("GET", target, address.to_string()).send(address)
+        Request::new("GET", target, self.host(address)).send(address)
+    }
+
+    /// A request as somebody else's reader.
+    pub fn get_as(&self, address: SocketAddr, handle: &str, target: &str) -> Reply {
+        Request::new("GET", target, self.host_for(address, handle)).send(address)
+    }
+
+    pub fn add_user(&self, handle: &str) -> UserRow {
+        self.db
+            .user_create(
+                handle,
+                &format!("{handle}@example.org"),
+                "2026-08-06T00:00:00Z",
+            )
+            .unwrap()
     }
 
     pub fn key(&self, scope: mecha_factory::db::Scope) -> String {
-        mecha_factory::keys::mint(&self.db, scope, "test")
+        self.key_for(&self.user, scope)
+    }
+
+    pub fn key_for(&self, user: &UserRow, scope: mecha_factory::db::Scope) -> String {
+        mecha_factory::keys::mint(&self.db, &user.id, scope, "test")
             .unwrap()
             .token
     }

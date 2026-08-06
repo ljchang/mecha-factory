@@ -10,8 +10,8 @@ use axum::{Extension, Json};
 use mecha_manifest::Visibility;
 
 use super::{Failure, Shared};
-use crate::config::Role;
-use crate::db::{KeyRow, Scope};
+use crate::config::{Origin, Role};
+use crate::db::{KeyRow, Scope, UserRow};
 use crate::keys;
 
 /// Read the bearer header, if there is one.
@@ -26,8 +26,9 @@ pub fn bearer(headers: &HeaderMap) -> Option<&str> {
 /// Returns the refusal rather than taking a `Result`, so the call site reads
 /// as one line and there is no error type large enough for a whole `Response`
 /// to travel in.
-pub fn not_on_gate(role: Role) -> Option<Response> {
-    (role != Role::Gate).then(|| Failure::text(StatusCode::NOT_FOUND, "not found").into_response())
+pub fn not_on_gate(origin: &Origin) -> Option<Response> {
+    (origin.role != Role::Gate)
+        .then(|| Failure::text(StatusCode::NOT_FOUND, "not found").into_response())
 }
 
 /// `GET /v1/health` — is it up, what version, how many queued.
@@ -39,10 +40,10 @@ pub fn not_on_gate(role: Role) -> Option<Response> {
 /// live key gets the detail.
 pub async fn health(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
     let mut body = serde_json::json!({
@@ -51,12 +52,18 @@ pub async fn health(
         "uptime_s": app.started.elapsed().as_secs(),
     });
 
+    // The counts a key gets are **its own user's**, not the box's. How many
+    // reports somebody else published is not a fact this endpoint owes anyone,
+    // and a health check that leaked it would be the one place tenancy
+    // silently did not hold.
     if let Ok(row) = keys::authenticate_any(&app.db, bearer(&headers)) {
-        let bundles = app.db.bundle_count().unwrap_or(-1);
-        let queued = app.db.queue_depth().unwrap_or(-1);
-        body["bundles"] = bundles.into();
+        let queued = app.db.queue_depth(Some(&row.user_id)).unwrap_or(-1);
         body["queued"] = queued.into();
-        body["key"] = row.id.into();
+        body["key"] = row.id.clone().into();
+        if let Ok(Some(user)) = app.db.user(&row.user_id) {
+            body["handle"] = user.handle.into();
+            body["status"] = user.status.into();
+        }
     }
     (StatusCode::OK, Json(body)).into_response()
 }
@@ -65,11 +72,40 @@ pub async fn health(
 ///
 /// Logs which key acted, because rotation and revocation are only reviewable
 /// after the fact if there is a record of what a key did while it was live.
-fn authorised(app: &Shared, headers: &HeaderMap, needs: Scope) -> Result<KeyRow, Box<Response>> {
+fn authorised(
+    app: &Shared,
+    headers: &HeaderMap,
+    needs: Scope,
+) -> Result<(KeyRow, UserRow), Box<Response>> {
     match keys::authenticate(&app.db, bearer(headers), needs) {
         Ok(row) => {
-            tracing::info!(key = %row.id, scope = row.scope.as_str(), "authenticated");
-            Ok(row)
+            // A live key belonging to a suspended user is refused here, once,
+            // rather than in each handler — suspension has to mean the account
+            // stops working, not that most of it does.
+            let user = match app.db.user(&row.user_id) {
+                Ok(Some(user)) if user.active() => user,
+                Ok(Some(user)) => {
+                    tracing::warn!(key = %row.id, handle = %user.handle, "suspended account");
+                    return Err(Box::new(
+                        Failure::json(StatusCode::FORBIDDEN, "this account is suspended")
+                            .into_response(),
+                    ));
+                }
+                _ => {
+                    tracing::error!(key = %row.id, user = %row.user_id, "key with no user");
+                    return Err(Box::new(
+                        Failure::json(StatusCode::UNAUTHORIZED, "a valid bearer token is required")
+                            .into_response(),
+                    ));
+                }
+            };
+            tracing::info!(
+                key = %row.id,
+                handle = %user.handle,
+                scope = row.scope.as_str(),
+                "authenticated"
+            );
+            Ok((row, user))
         }
         Err(e) => {
             tracing::warn!(error = %e, "refused");
@@ -102,16 +138,17 @@ fn authorised(app: &Shared, headers: &HeaderMap, needs: Scope) -> Result<KeyRow,
 /// same report are not always byte-identical.
 pub async fn publish(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    if let Err(refusal) = authorised(&app, &headers, Scope::Publish) {
-        return *refusal;
-    }
+    let user = match authorised(&app, &headers, Scope::Publish) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
     let idempotency = headers
         .get("idempotency-key")
         .and_then(|v| v.to_str().ok())
@@ -119,9 +156,9 @@ pub async fn publish(
         .filter(|s| !s.is_empty() && s.len() <= 200);
 
     if let Some(key) = &idempotency {
-        if let Ok(Some((id, version))) = app.db.idempotent(key) {
+        if let Ok(Some((id, version))) = app.db.idempotent(&user.id, key) {
             tracing::info!(%id, version, "a retry of a publish that already landed");
-            return published(&app, &id, version, true, StatusCode::OK);
+            return published(&app, &user, &id, version, true, StatusCode::OK);
         }
     }
 
@@ -145,15 +182,15 @@ pub async fn publish(
     let id = incoming.manifest.id.clone();
     let version = incoming.manifest.version;
 
-    match app.db.bundle_by_digest(&id, &incoming.digest) {
+    match app.db.bundle_by_digest(&user.id, &id, &incoming.digest) {
         Ok(Some(row)) => {
             if let Some(key) = &idempotency {
-                let _ = app
-                    .db
-                    .idempotency_record(key, &id, row.version, &crate::db::now());
+                let _ =
+                    app.db
+                        .idempotency_record(&user.id, key, &id, row.version, &crate::db::now());
             }
             tracing::info!(%id, version = row.version, "identical bytes; nothing minted");
-            return published(&app, &id, row.version, true, StatusCode::OK);
+            return published(&app, &user, &id, row.version, true, StatusCode::OK);
         }
         Ok(None) => {}
         Err(e) => {
@@ -162,7 +199,7 @@ pub async fn publish(
         }
     }
 
-    if let Ok(Some(existing)) = app.db.bundle(&id, version) {
+    if let Ok(Some(existing)) = app.db.bundle(&user.id, &id, version) {
         return Failure::json(
             StatusCode::CONFLICT,
             format!(
@@ -174,7 +211,27 @@ pub async fn publish(
         .into_response();
     }
 
-    if let Err(e) = app.files.install(&id, version, &incoming.files) {
+    // The quota, checked before the bytes land rather than after. A per-user
+    // limit is what stops one held key filling a disk everybody shares — a
+    // global cap stopped being a cap the moment the disk had more than one
+    // tenant on it.
+    let incoming_bytes: u64 = incoming.files.iter().map(|(_, b)| b.len() as u64).sum();
+    let held = app.files.user_bytes(&user.id);
+    if user.quota_bytes > 0 && held + incoming_bytes > user.quota_bytes as u64 {
+        return Failure::json(
+            StatusCode::INSUFFICIENT_STORAGE,
+            format!(
+                "this would put you at {} bytes against a quota of {}. Published \
+                 versions are never deleted, so the way down is a smaller bundle \
+                 or a larger quota.",
+                held + incoming_bytes,
+                user.quota_bytes
+            ),
+        )
+        .into_response();
+    }
+
+    if let Err(e) = app.files.install(&user.id, &id, version, &incoming.files) {
         tracing::error!(%id, version, error = %e, "installing a version");
         return Failure::json(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -184,6 +241,7 @@ pub async fn publish(
     }
 
     let row = crate::db::BundleRow {
+        user_id: user.id.clone(),
         id: id.clone(),
         version,
         digest: incoming.digest.clone(),
@@ -193,6 +251,8 @@ pub async fn publish(
         template: incoming.manifest.template.clone(),
         published_at: incoming.manifest.published_at.clone(),
         received_at: crate::db::now(),
+        withheld_at: None,
+        withheld_reason: None,
     };
     if let Err(e) = app.db.bundle_insert(&row) {
         tracing::error!(%id, version, error = %e, "indexing a version");
@@ -205,22 +265,29 @@ pub async fn publish(
     if let Some(key) = &idempotency {
         let _ = app
             .db
-            .idempotency_record(key, &id, version, &crate::db::now());
+            .idempotency_record(&user.id, key, &id, version, &crate::db::now());
     }
-    tracing::info!(%id, version, digest = %incoming.digest, "published");
-    published(&app, &id, version, false, StatusCode::CREATED)
+    tracing::info!(handle = %user.handle, %id, version, digest = %incoming.digest, "published");
+    published(&app, &user, &id, version, false, StatusCode::CREATED)
 }
 
 /// What a publish answers with: enough to print a URL without asking again.
-fn published(app: &Shared, id: &str, version: u32, existing: bool, status: StatusCode) -> Response {
+fn published(
+    app: &Shared,
+    user: &UserRow,
+    id: &str,
+    version: u32,
+    existing: bool,
+    status: StatusCode,
+) -> Response {
     let class = app
         .db
-        .bundle(id, version)
+        .bundle(&user.id, id, version)
         .ok()
         .flatten()
         .map(|row| row.class)
         .unwrap_or_default();
-    let base = app.config.base_url(Role::for_class(class));
+    let base = app.config.user_url(Role::for_class(class), &user.handle);
     (
         status,
         Json(serde_json::json!({
@@ -254,17 +321,18 @@ pub struct AliasRequest {
 /// publish rather than treating it as bookkeeping.
 pub async fn alias(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    if let Err(refusal) = authorised(&app, &headers, Scope::Publish) {
-        return *refusal;
-    }
+    let user = match authorised(&app, &headers, Scope::Publish) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
     if mecha_manifest::valid_id(&id, "bundle id").is_err() {
         return Failure::json(StatusCode::BAD_REQUEST, "not a bundle id").into_response();
     }
@@ -276,7 +344,7 @@ pub async fn alias(
     };
 
     if let Some(version) = request.version {
-        match app.db.bundle(&id, version) {
+        match app.db.bundle(&user.id, &id, version) {
             Ok(Some(_)) => {}
             Ok(None) => {
                 return Failure::json(
@@ -293,7 +361,7 @@ pub async fn alias(
         }
     }
 
-    let current = app.db.alias(&id).ok().flatten();
+    let current = app.db.alias(&user.id, &id).ok().flatten();
     let visibility = match request.visibility.as_deref() {
         Some("public") => Visibility::Public,
         Some("private") => Visibility::Private,
@@ -307,10 +375,13 @@ pub async fn alias(
         }
     };
 
-    if let Err(e) = app
-        .db
-        .alias_set(&id, request.version, visibility, &crate::db::now())
-    {
+    if let Err(e) = app.db.alias_set(
+        &user.id,
+        &id,
+        request.version,
+        visibility,
+        &crate::db::now(),
+    ) {
         tracing::error!(%id, error = %e, "moving an alias");
         return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
     }
@@ -318,10 +389,10 @@ pub async fn alias(
 
     let class = request
         .version
-        .and_then(|v| app.db.bundle(&id, v).ok().flatten())
+        .and_then(|v| app.db.bundle(&user.id, &id, v).ok().flatten())
         .map(|row| row.class)
         .unwrap_or_default();
-    let base = app.config.base_url(Role::for_class(class));
+    let base = app.config.user_url(Role::for_class(class), &user.handle);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -347,17 +418,18 @@ pub async fn alias(
 /// manifest crate.
 pub async fn put_type(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     Path(id): Path<String>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    if let Err(refusal) = authorised(&app, &headers, Scope::Publish) {
-        return *refusal;
-    }
+    let user = match authorised(&app, &headers, Scope::Publish) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
     let parsed = match mecha_manifest::RequestType::from_toml(&body) {
         Ok(parsed) => parsed,
         Err(e) => {
@@ -378,6 +450,7 @@ pub async fn put_type(
     }
 
     let row = crate::db::TypeRow {
+        user_id: user.id.clone(),
         id: parsed.id.clone(),
         title: parsed.title.clone(),
         manifest: body,
@@ -406,11 +479,22 @@ pub async fn put_type(
 /// Public, because discovery is the point: an agent that finds this endpoint
 /// can learn the shape of every request it could make without being told
 /// anything first. A request type is our own declaration, not anyone's data.
-pub async fn list_types(State(app): State<Shared>, Extension(role): Extension<Role>) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+pub async fn list_types(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    match app.db.types() {
+    // Discovery is per-user, and therefore authenticated: "what can this
+    // surface accept" has a different answer for each person on it, and there
+    // is no answer for somebody who is not on it at all.
+    let user = match authorised(&app, &headers, Scope::Publish) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    match app.db.types(&user.id) {
         Ok(rows) => {
             let base = app.config.base_url(Role::Gate);
             let types: Vec<_> = rows
@@ -436,13 +520,18 @@ pub async fn list_types(State(app): State<Shared>, Extension(role): Extension<Ro
 /// `GET /v1/types/{id}` — one type's schema, and its manifest.
 pub async fn get_type(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    match app.db.type_get(&id) {
+    let user = match authorised(&app, &headers, Scope::Publish) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    match app.db.type_get(&user.id, &id) {
         Ok(Some(row)) => {
             let schema: serde_json::Value =
                 serde_json::from_str(&row.schema).unwrap_or(serde_json::Value::Null);
@@ -482,17 +571,21 @@ pub struct DrainQuery {
 /// connection.
 pub async fn drain(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     Query(query): Query<DrainQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    if let Err(refusal) = authorised(&app, &headers, Scope::Drain) {
-        return *refusal;
-    }
-    match app.db.drain(query.since, app.config.limits.drain_batch) {
+    let user = match authorised(&app, &headers, Scope::Drain) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    match app
+        .db
+        .drain(&user.id, query.since, app.config.limits.drain_batch)
+    {
         Ok(rows) => {
             let records: Vec<_> = rows
                 .iter()
@@ -539,23 +632,24 @@ pub struct AckRequest {
 /// names its subjects one by one.
 pub async fn ack(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Some(refusal) = not_on_gate(role) {
+    if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    if let Err(refusal) = authorised(&app, &headers, Scope::Drain) {
-        return *refusal;
-    }
+    let user = match authorised(&app, &headers, Scope::Drain) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
     let request: AckRequest = match serde_json::from_slice(&body) {
         Ok(request) => request,
         Err(e) => {
             return Failure::json(StatusCode::BAD_REQUEST, format!("body: {e}")).into_response()
         }
     };
-    match app.db.queue_ack(&request.seqs) {
+    match app.db.queue_ack(&user.id, &request.seqs) {
         Ok(deleted) => {
             tracing::info!(deleted, asked = request.seqs.len(), "acknowledged");
             (

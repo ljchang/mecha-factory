@@ -90,8 +90,18 @@ pub struct Minted {
     pub row: KeyRow,
 }
 
-/// Mint a key, store its hash, and hand back the token.
-pub fn mint(db: &Db, scope: Scope, label: &str) -> Result<Minted> {
+/// An opaque identifier: a user id, and the lookup half of a key.
+///
+/// Opaque on purpose. A user id that encoded a handle or an email would be a
+/// foreign key on a mutable fact, and this is the value every row points at.
+pub fn random_id() -> String {
+    // A failure here is a system with no entropy source, which is not a
+    // condition this program can sensibly continue under.
+    hex(&random::<16>().expect("the system random source is readable"))
+}
+
+/// Mint a key for a user, store its hash, and hand back the token.
+pub fn mint(db: &Db, user_id: &str, scope: Scope, label: &str) -> Result<Minted> {
     let id = hex(&random::<8>()?);
     let secret = hex(&random::<32>()?);
     let salt = SaltString::encode_b64(&random::<16>()?)
@@ -103,6 +113,7 @@ pub fn mint(db: &Db, scope: Scope, label: &str) -> Result<Minted> {
 
     let row = KeyRow {
         id: id.clone(),
+        user_id: user_id.to_string(),
         scope,
         hash,
         label: label.to_string(),
@@ -234,10 +245,17 @@ mod tests {
         Db::open_in_memory().unwrap()
     }
 
+    /// Every test needs somebody to own the key.
+    fn user(db: &Db) -> String {
+        db.user_create("alice", "alice@example.org", "2026-08-06T00:00:00Z")
+            .unwrap()
+            .id
+    }
+
     #[test]
     fn a_minted_key_authenticates_once_and_only_for_its_own_scope() {
         let db = db();
-        let minted = mint(&db, Scope::Publish, "laptop").unwrap();
+        let minted = mint(&db, &user(&db), Scope::Publish, "laptop").unwrap();
         assert!(minted.token.starts_with("mk_pub_"));
 
         let header = format!("Bearer {}", minted.token);
@@ -258,7 +276,7 @@ mod tests {
     #[test]
     fn the_prefix_is_never_the_authorisation() {
         let db = db();
-        let minted = mint(&db, Scope::Drain, "trigger").unwrap();
+        let minted = mint(&db, &user(&db), Scope::Drain, "trigger").unwrap();
         let relabelled = minted.token.replace("mk_drn_", "mk_pub_");
         let header = format!("Bearer {relabelled}");
         assert_eq!(
@@ -275,7 +293,7 @@ mod tests {
     #[test]
     fn a_revoked_key_stops_working_and_the_row_stays() {
         let db = db();
-        let minted = mint(&db, Scope::Publish, "old").unwrap();
+        let minted = mint(&db, &user(&db), Scope::Publish, "old").unwrap();
         let header = format!("Bearer {}", minted.token);
         authenticate(&db, Some(&header), Scope::Publish).unwrap();
 
@@ -291,7 +309,7 @@ mod tests {
     #[test]
     fn nothing_else_gets_in() {
         let db = db();
-        let minted = mint(&db, Scope::Publish, "k").unwrap();
+        let minted = mint(&db, &user(&db), Scope::Publish, "k").unwrap();
         let (id, secret) = split(&minted.token).unwrap();
 
         for header in [
@@ -318,8 +336,9 @@ mod tests {
     #[test]
     fn health_takes_either_key_and_still_takes_nothing_else() {
         let db = db();
+        let user = user(&db);
         for scope in [Scope::Publish, Scope::Drain] {
-            let minted = mint(&db, scope, "k").unwrap();
+            let minted = mint(&db, &user, scope, "k").unwrap();
             let header = format!("Bearer {}", minted.token);
             assert_eq!(authenticate_any(&db, Some(&header)).unwrap().scope, scope);
         }
@@ -332,8 +351,9 @@ mod tests {
     #[test]
     fn two_keys_are_two_keys() {
         let db = db();
-        let a = mint(&db, Scope::Publish, "a").unwrap();
-        let b = mint(&db, Scope::Publish, "b").unwrap();
+        let user = user(&db);
+        let a = mint(&db, &user, Scope::Publish, "a").unwrap();
+        let b = mint(&db, &user, Scope::Publish, "b").unwrap();
         assert_ne!(a.token, b.token);
         assert_ne!(a.row.id, b.row.id);
         assert_ne!(a.row.hash, b.row.hash);

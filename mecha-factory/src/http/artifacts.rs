@@ -36,7 +36,30 @@ use axum::Extension;
 use mecha_manifest::Visibility;
 
 use super::{Failure, Shared};
-use crate::config::Role;
+use crate::config::{Origin, Role};
+use crate::db::UserRow;
+
+/// Whose artifacts this request is for.
+///
+/// A bare origin name (`artifacts.example.org` with no label) belongs to
+/// nobody and serves nothing — there is no "default user", for the same reason
+/// there is no default origin. A **retired** handle resolves to nobody too:
+/// what was published under it stops being served rather than being served by
+/// whoever holds the name next, which is the entire point of never reusing one.
+///
+/// A **suspended** user serves nothing either, and it reads exactly like a name
+/// that never existed.
+fn owner(app: &Shared, origin: &Origin) -> Option<UserRow> {
+    let handle = origin.handle.as_deref()?;
+    match app.db.user_by_handle(handle) {
+        Ok(Some(user)) if user.active() => Some(user),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::error!(handle, error = %e, "resolving a handle");
+            None
+        }
+    }
+}
 
 /// What the reader is allowed to see, resolved once so every route agrees.
 enum Access {
@@ -48,8 +71,8 @@ enum Access {
     Nothing,
 }
 
-fn access(app: &Shared, id: &str) -> Access {
-    match app.db.alias(id) {
+fn access(app: &Shared, user_id: &str, id: &str) -> Access {
+    match app.db.alias(user_id, id) {
         // No alias row at all means published-but-never-aliased, which is not
         // yet a publication. Serving it would make `--no-alias` meaningless.
         Ok(None) => Access::Nothing,
@@ -86,13 +109,16 @@ fn missing() -> Response {
 /// `/b/<id>/` — the stable share URL, which follows the alias.
 pub async fn share(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     Path(id): Path<String>,
 ) -> Response {
-    if role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
+    if origin.role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
         return missing();
     }
-    match access(&app, &id) {
+    let Some(user) = owner(&app, &origin) else {
+        return missing();
+    };
+    match access(&app, &user.id, &id) {
         Access::Nothing => missing(),
         Access::Gone => gone(&id),
         Access::Current(version) => {
@@ -113,39 +139,42 @@ pub async fn share(
 /// `/b/<id>/v/<n>/` — a version's index.
 pub async fn version_root(
     state: State<Shared>,
-    role: Extension<Role>,
+    origin: Extension<Origin>,
     Path((id, version)): Path<(String, u32)>,
 ) -> Response {
-    serve(state, role, id, version, String::new()).await
+    serve(state, origin, id, version, String::new()).await
 }
 
 /// `/b/<id>/v/<n>/<path>` — a file inside a version.
 pub async fn version_file(
     state: State<Shared>,
-    role: Extension<Role>,
+    origin: Extension<Origin>,
     Path((id, version, path)): Path<(String, u32, String)>,
 ) -> Response {
-    serve(state, role, id, version, path).await
+    serve(state, origin, id, version, path).await
 }
 
 async fn serve(
     State(app): State<Shared>,
-    Extension(role): Extension<Role>,
+    Extension(origin): Extension<Origin>,
     id: String,
     version: u32,
     path: String,
 ) -> Response {
-    if role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
+    if origin.role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
         return missing();
     }
-    match access(&app, &id) {
+    let Some(user) = owner(&app, &origin) else {
+        return missing();
+    };
+    match access(&app, &user.id, &id) {
         Access::Nothing => return missing(),
         // A takedown covers the version URLs too, or it is a suggestion.
         Access::Gone => return gone(&id),
         Access::Current(_) => {}
     }
 
-    let row = match app.db.bundle(&id, version) {
+    let row = match app.db.bundle(&user.id, &id, version) {
         Ok(Some(row)) => row,
         Ok(None) => return missing(),
         Err(e) => {
@@ -154,14 +183,21 @@ async fn serve(
         }
     };
 
+    // Withheld on a report: served to nobody, and indistinguishable from a
+    // bundle that never existed. The bytes are still on disk — withholding is
+    // reversible and destroying evidence in response to a complaint is not.
+    if row.withheld_at.is_some() {
+        return missing();
+    }
+
     // The class decides the origin, and this is where that is enforced. A
     // reader who followed a compute bundle's link to the artifact origin is
     // sent to the right one rather than served under the wrong policy.
     let belongs = Role::for_class(row.class);
-    if belongs != role {
+    if belongs != origin.role {
         let target = format!(
             "{}/b/{id}/v/{version}/{}",
-            app.config.base_url(belongs),
+            app.config.user_url(belongs, &user.handle),
             path.trim_start_matches('/')
         );
         return (
@@ -174,7 +210,7 @@ async fn serve(
             .into_response();
     }
 
-    let Some(file) = app.files.resolve(&id, version, &path) else {
+    let Some(file) = app.files.resolve(&user.id, &id, version, &path) else {
         return missing();
     };
     let bytes = match std::fs::read(&file) {

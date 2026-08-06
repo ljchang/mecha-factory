@@ -35,13 +35,41 @@ use std::sync::Arc;
 use crate::config::Config;
 use crate::http::{router, App};
 
+/// Every name the certificate has to cover.
+///
+/// The three base origins **plus one artifact hostname per active user**,
+/// because artifacts are served from `<handle>.<origin>` and a certificate
+/// that covered only the bases would fail the handshake for every actual user
+/// — silently, and only in a browser.
+///
+/// The honest limitation: TLS-ALPN-01 issues for a fixed list, so **a new user
+/// needs a restart before their hostname has a certificate**. That is
+/// acceptable for tens of users and not for thousands; the fix is a wildcard,
+/// which requires DNS-01 and a zone-scoped token on the box (§14.2). Stated
+/// here rather than discovered later, because "works for the operator and not
+/// for the first person who signs up" is the shape of failure this project
+/// keeps naming.
+fn certificate_names(app: &App, config: &Config) -> Vec<String> {
+    let mut names = config.origins.names();
+    if let Ok(users) = app.db.users() {
+        for user in users.iter().filter(|u| u.active()) {
+            for role in [crate::config::Role::Artifacts, crate::config::Role::Compute] {
+                names.push(config.origins.host_for(role, &user.handle));
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
 /// Serve HTTPS on `listen.https`, with certificates this process obtains.
 pub async fn serve(app: Arc<App>, config: &Config) -> Result<()> {
     let tls = config
         .tls
         .as_ref()
         .context("serve_tls called without a [tls] block")?;
-    let names = config.origins.names();
+    let names = certificate_names(&app, config);
     std::fs::create_dir_all(config.acme_cache())?;
 
     let mut state = AcmeConfig::new(names.clone())
@@ -68,6 +96,10 @@ pub async fn serve(app: Arc<App>, config: &Config) -> Result<()> {
         }
     });
 
+    tracing::info!(
+        count = names.len(),
+        "ordering certificates; a user created after this needs a restart to get one"
+    );
     if tls.staging {
         tracing::warn!(
             "using the Let's Encrypt staging directory — browsers will refuse \
@@ -114,10 +146,22 @@ async fn redirect_to_https(app: Arc<App>, address: SocketAddr) -> Result<()> {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         match app.config.origins.role_of(host) {
-            Some(role) => {
-                let base = app.config.base_url(role);
+            Some(origin) => {
+                // Redirect to the name they asked for, not to the bare origin:
+                // `alice.artifacts.example.org` on port 80 must arrive at
+                // `https://alice.artifacts.example.org`, or every user's plain
+                // links would land on somebody else's namespace.
+                let scheme = if app.config.tls.is_some() {
+                    "https"
+                } else {
+                    "http"
+                };
+                let base = match &origin.handle {
+                    Some(handle) => app.config.origins.host_for(origin.role, handle),
+                    None => app.config.origins.authority(origin.role).to_string(),
+                };
                 let path = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-                Redirect::permanent(&format!("{base}{path}")).into_response()
+                Redirect::permanent(&format!("{scheme}://{base}{path}")).into_response()
             }
             None => (StatusCode::NOT_FOUND, "not found").into_response(),
         }
@@ -178,15 +222,36 @@ mod tests {
         }
     }
 
-    /// The certificate covers exactly the three names, or one of the origins
-    /// is unreachable in a way that only shows up in a browser.
+    /// The certificate covers every origin *and* every user, or the first
+    /// person who signs up gets a TLS error nobody sees until a browser shows
+    /// it to them.
     #[test]
-    fn the_order_covers_every_origin_and_nothing_else() {
+    fn the_order_covers_every_origin_and_every_user() {
         let config = config(None);
         assert_eq!(
             config.origins.names(),
             vec!["art.example.org", "compute.example.org", "gate.example.org"]
         );
+
+        let db = crate::db::Db::open_in_memory().unwrap();
+        db.user_create("alice", "a@example.org", "t").unwrap();
+        let suspended = db.user_create("bob", "b@example.org", "t").unwrap();
+        db.user_status(&suspended.id, "suspended").unwrap();
+        let app = App::new(config.clone(), db).unwrap();
+
+        let names = certificate_names(&app, &config);
+        assert!(
+            names.contains(&"alice.art.example.org".to_string()),
+            "{names:?}"
+        );
+        assert!(
+            names.contains(&"alice.compute.example.org".to_string()),
+            "{names:?}"
+        );
+        // A suspended account serves nothing, so it needs no certificate — and
+        // ordering one would spend issuance budget on a name with no pages.
+        assert!(!names.iter().any(|n| n.starts_with("bob.")), "{names:?}");
+        assert!(names.contains(&"gate.example.org".to_string()));
     }
 
     #[test]

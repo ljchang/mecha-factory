@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::bundles::Files;
-use crate::config::{Config, Role};
+use crate::config::{Config, Origin, Role};
 use crate::db::Db;
 use crate::ratelimit::RateLimiter;
 
@@ -112,7 +112,7 @@ async fn guard(
         .and_then(|h| h.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let Some(role) = app.config.origins.role_of(&host) else {
+    let Some(origin) = app.config.origins.role_of(&host) else {
         // Not "misdirected request": a name we do not serve is told nothing
         // about what we do serve.
         tracing::debug!(%host, "request for an unserved name");
@@ -131,7 +131,7 @@ async fn guard(
     }
 
     let mut request = request;
-    request.extensions_mut().insert(role);
+    request.extensions_mut().insert(origin);
     let mut response = next.run(request).await;
 
     // The default policy, applied only where a handler did not already declare
@@ -150,8 +150,8 @@ async fn guard(
 
 /// The gate's own front page. Deliberately almost nothing: this origin exists
 /// to serve an API and, later, forms — not to say who runs it.
-async fn root(role: Extension<Role>) -> Response {
-    if *role != Role::Gate {
+async fn root(origin: Extension<Origin>) -> Response {
+    if origin.role != Role::Gate {
         return Failure::text(StatusCode::NOT_FOUND, "not found").into_response();
     }
     let body = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\

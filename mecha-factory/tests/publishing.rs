@@ -27,7 +27,8 @@ fn a_bundle_published_and_then_aliased_is_a_page_on_the_internet() {
     assert_eq!(published["existing"], false);
     assert_eq!(
         published["url"],
-        format!("http://{}/b/brief/", server.artifacts)
+        format!("http://alice.{}/b/brief/", server.artifacts),
+        "a published URL names its owner, from the first one"
     );
 
     // Published is not yet readable: the alias has not moved and nothing is
@@ -103,7 +104,12 @@ fn identical_bytes_mint_nothing_and_a_changed_version_is_refused() {
         .body(archive.clone())
         .send(server.gate);
     assert_eq!(first.status, 201);
-    let original = server.db.bundle("brief", 1).unwrap().unwrap().digest;
+    let original = server
+        .db
+        .bundle(&server.user.id, "brief", 1)
+        .unwrap()
+        .unwrap()
+        .digest;
 
     let again = Request::new("POST", "/v1/bundles", &gate)
         .auth(&key)
@@ -112,7 +118,10 @@ fn identical_bytes_mint_nothing_and_a_changed_version_is_refused() {
     assert_eq!(again.status, 200, "{}", again.body);
     assert_eq!(again.json()["existing"], true);
     assert_eq!(again.json()["version"], 1);
-    assert_eq!(server.db.bundle_versions("brief").unwrap(), vec![1]);
+    assert_eq!(
+        server.db.bundle_versions(&server.user.id, "brief").unwrap(),
+        vec![1]
+    );
 
     // Version 1 with different bytes: refused, and version 1 is untouched.
     let conflict = Request::new("POST", "/v1/bundles", &gate)
@@ -122,7 +131,12 @@ fn identical_bytes_mint_nothing_and_a_changed_version_is_refused() {
     assert_eq!(conflict.status, 409, "{}", conflict.body);
     assert!(conflict.body.contains("written once"), "{}", conflict.body);
     assert_eq!(
-        server.db.bundle("brief", 1).unwrap().unwrap().digest,
+        server
+            .db
+            .bundle(&server.user.id, "brief", 1)
+            .unwrap()
+            .unwrap()
+            .digest,
         original,
         "the refused publish changed the version it collided with"
     );
@@ -133,7 +147,10 @@ fn identical_bytes_mint_nothing_and_a_changed_version_is_refused() {
         .body(bundle_archive("brief", 2, ContentClass::Static, "Tuesday"))
         .send(server.gate);
     assert_eq!(second.status, 201, "{}", second.body);
-    assert_eq!(server.db.bundle_versions("brief").unwrap(), vec![1, 2]);
+    assert_eq!(
+        server.db.bundle_versions(&server.user.id, "brief").unwrap(),
+        vec![1, 2]
+    );
 }
 
 /// A retry after a timeout may be re-rendering rather than re-sending, and two
@@ -160,7 +177,10 @@ fn an_idempotency_key_returns_the_publish_that_already_landed() {
     assert_eq!(retry.status, 200, "{}", retry.body);
     assert_eq!(retry.json()["version"], 1);
     assert_eq!(retry.json()["existing"], true);
-    assert_eq!(server.db.bundle_versions("brief").unwrap(), vec![1]);
+    assert_eq!(
+        server.db.bundle_versions(&server.user.id, "brief").unwrap(),
+        vec![1]
+    );
 }
 
 /// Two keys, two scopes, and neither does the other's work.
@@ -291,17 +311,25 @@ fn a_request_type_is_uploaded_once_and_readable_by_anyone() {
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(reply.json()["fields"].as_u64().unwrap() > 0);
 
-    // Discovery is public: an agent that finds the endpoint learns the shape
-    // of every request it could make.
-    let reply = server.get(server.gate, "/v1/types");
+    // Discovery is per-user, so it is authenticated: an agent learns the shape
+    // of every request *it* could make. An anonymous listing would have been a
+    // list of every user's forms, which is the one place tenancy would have
+    // silently not held.
+    let reply = Request::new("GET", "/v1/types", &gate)
+        .auth(&key)
+        .send(server.gate);
     assert_eq!(reply.status, 200);
     assert_eq!(reply.json()["types"][0]["id"], "meeting");
 
-    let reply = server.get(server.gate, "/v1/types/meeting");
+    let reply = Request::new("GET", "/v1/types/meeting", &gate)
+        .auth(&key)
+        .send(server.gate);
     assert_eq!(reply.status, 200);
     assert_eq!(reply.json()["schema"]["type"], "object");
 
-    // Uploading is not.
+    assert_eq!(server.get(server.gate, "/v1/types").status, 401);
+
+    // Uploading is not public either.
     assert_eq!(
         Request::new("PUT", "/v1/types/meeting", &gate)
             .body(manifest.clone())
@@ -334,16 +362,37 @@ fn a_record_survives_until_home_says_it_has_it() {
 
     let a = server
         .db
-        .queue_add("meeting", "queued", r#"{"name":"A"}"#, "t1")
+        .queue_add(
+            &server.user.id,
+            "meeting",
+            "queued",
+            r#"{"name":"A"}"#,
+            "t1",
+            None,
+        )
         .unwrap();
     let b = server
         .db
-        .queue_add("meeting", "queued", r#"{"name":"B"}"#, "t2")
+        .queue_add(
+            &server.user.id,
+            "meeting",
+            "queued",
+            r#"{"name":"B"}"#,
+            "t2",
+            None,
+        )
         .unwrap();
     // Submitted but never verified: never drained, and it never costs a token.
     server
         .db
-        .queue_add("meeting", "submitted", r#"{"name":"C"}"#, "t3")
+        .queue_add(
+            &server.user.id,
+            "meeting",
+            "submitted",
+            r#"{"name":"C"}"#,
+            "t3",
+            None,
+        )
         .unwrap();
 
     let reply = Request::new("GET", "/v1/queue", &gate)

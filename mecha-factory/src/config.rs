@@ -59,6 +59,73 @@ impl Role {
     }
 }
 
+/// Names nobody may take, because something else already answers to them or
+/// will need to.
+///
+/// A user who claimed `www`, `api` or `abuse` would be serving their own
+/// content at a name people reasonably assume is ours — and `_acme-challenge`
+/// is how certificates are issued. Reserved before the first signup, because
+/// afterwards the fix is taking a name off somebody.
+const RESERVED_HANDLES: &[&str] = &[
+    "www",
+    "api",
+    "gate",
+    "admin",
+    "abuse",
+    "security",
+    "support",
+    "help",
+    "mail",
+    "smtp",
+    "mx",
+    "ns",
+    "ns1",
+    "ns2",
+    "dns",
+    "static",
+    "assets",
+    "cdn",
+    "app",
+    "auth",
+    "login",
+    "status",
+    "_acme-challenge",
+    "acme-challenge",
+    "localhost",
+    "test",
+    "example",
+    "factory",
+    "mecha",
+];
+
+/// A handle is a DNS label, so the rule is DNS's and not ours.
+///
+/// Stricter than a bundle id, which may contain `_`: an underscore is not
+/// legal in a hostname, and a handle that cannot be a hostname is a handle
+/// that cannot be served.
+pub fn valid_handle(handle: &str) -> anyhow::Result<()> {
+    if handle.is_empty() || handle.len() > 63 {
+        anyhow::bail!("a handle is 1–63 characters (it is a DNS label)");
+    }
+    if !handle
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    {
+        anyhow::bail!("a handle may hold lowercase letters, digits and `-` only");
+    }
+    if handle.starts_with('-') || handle.ends_with('-') {
+        anyhow::bail!("a handle may not start or end with `-`");
+    }
+    // Would collide with the `xn--` form of an internationalised name.
+    if handle.len() > 4 && handle[2..4] == *"--" {
+        anyhow::bail!("`{handle}` looks like a punycode label, which is reserved");
+    }
+    if RESERVED_HANDLES.contains(&handle) {
+        anyhow::bail!("`{handle}` is reserved");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Origins {
     /// The authority as it appears in `Host`: a hostname in production,
@@ -68,19 +135,39 @@ pub struct Origins {
     pub compute: String,
 }
 
+/// What a `Host` header resolved to: which origin, and whose.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin {
+    pub role: Role,
+    /// The leading label, when there is one: `alice` in
+    /// `alice.artifacts.example.org`. `None` on the bare origin name and on
+    /// the gate, which is shared.
+    pub handle: Option<String>,
+}
+
 impl Origins {
-    /// Which origin this `Host` names, or nothing.
+    /// Which origin this `Host` names, and whose, or nothing.
     ///
-    /// Exact match, lowercased. A request for a name we do not serve is not
-    /// guessed at.
-    pub fn role_of(&self, host: &str) -> Option<Role> {
+    /// **A published URL has to stay resolvable forever**, which is why the
+    /// per-user shape is here from the first row rather than added later: a
+    /// path prefix (`/u/alice/b/…`) would have to become a hostname the day
+    /// notebooks need real isolation, and every URL published in between would
+    /// break. A hostname also *is* the isolation — origin is the only boundary
+    /// a browser enforces, and a path is not one.
+    ///
+    /// The gate is deliberately shared: it serves the API and server-rendered
+    /// forms, which execute nothing, so there is nothing for an origin to
+    /// separate.
+    pub fn role_of(&self, host: &str) -> Option<Origin> {
         let host = host.trim().to_ascii_lowercase();
         // A default port is allowed to be absent or present in `Host`, and both
         // spellings mean the same origin.
         let bare = host
             .strip_suffix(":443")
             .or_else(|| host.strip_suffix(":80"))
-            .unwrap_or(&host);
+            .unwrap_or(&host)
+            .to_string();
+
         for (candidate, role) in [
             (&self.gate, Role::Gate),
             (&self.artifacts, Role::Artifacts),
@@ -88,10 +175,33 @@ impl Origins {
         ] {
             let candidate = candidate.to_ascii_lowercase();
             if candidate == host || candidate == bare {
-                return Some(role);
+                return Some(Origin { role, handle: None });
+            }
+            // `<handle>.<origin>`, one label deep. Deeper is refused rather
+            // than walked: `a.b.artifacts.example.org` is not `a.b`'s, and
+            // treating it as `b`'s would let a name nobody owns serve
+            // somebody's content.
+            if role != Role::Gate {
+                if let Some(label) = bare
+                    .strip_suffix(&format!(".{candidate}"))
+                    .filter(|l| !l.is_empty() && !l.contains('.') && valid_handle(l).is_ok())
+                {
+                    return Some(Origin {
+                        role,
+                        handle: Some(label.to_string()),
+                    });
+                }
             }
         }
         None
+    }
+
+    /// A user's own hostname for a role.
+    pub fn host_for(&self, role: Role, handle: &str) -> String {
+        match role {
+            Role::Gate => self.gate.clone(),
+            _ => format!("{handle}.{}", self.authority(role)),
+        }
     }
 
     pub fn authority(&self, role: Role) -> &str {
@@ -252,6 +362,12 @@ impl Config {
         let scheme = if self.tls.is_some() { "https" } else { "http" };
         format!("{scheme}://{}", self.origins.authority(role))
     }
+
+    /// Where a specific user's artifacts live.
+    pub fn user_url(&self, role: Role, handle: &str) -> String {
+        let scheme = if self.tls.is_some() { "https" } else { "http" };
+        format!("{scheme}://{}", self.origins.host_for(role, handle))
+    }
 }
 
 #[cfg(test)]
@@ -267,17 +383,83 @@ mod tests {
         }
     }
 
+    fn bare(role: Role) -> Option<Origin> {
+        Some(Origin { role, handle: None })
+    }
+
+    fn owned(role: Role, handle: &str) -> Option<Origin> {
+        Some(Origin {
+            role,
+            handle: Some(handle.into()),
+        })
+    }
+
     /// There is no default origin, and that is the point: a name we do not
     /// serve gets nothing rather than whichever policy happens to be first.
     #[test]
     fn an_unknown_host_names_no_origin() {
         let o = origins();
-        assert_eq!(o.role_of("gate.example.org"), Some(Role::Gate));
-        assert_eq!(o.role_of("ART.example.org"), Some(Role::Artifacts));
-        assert_eq!(o.role_of("compute.example.org:443"), Some(Role::Compute));
+        assert_eq!(o.role_of("gate.example.org"), bare(Role::Gate));
+        assert_eq!(o.role_of("ART.example.org"), bare(Role::Artifacts));
+        assert_eq!(o.role_of("compute.example.org:443"), bare(Role::Compute));
         assert_eq!(o.role_of("example.org"), None);
         assert_eq!(o.role_of(""), None);
         assert_eq!(o.role_of("art.example.org.evil.test"), None);
+    }
+
+    /// The per-user shape is in the hostname from the first row, because a
+    /// published URL has to stay resolvable forever — moving from a path
+    /// prefix to a subdomain later would break every link published in
+    /// between, and a path is not an isolation boundary anyway.
+    #[test]
+    fn a_users_artifacts_live_on_their_own_name() {
+        let o = origins();
+        assert_eq!(
+            o.role_of("alice.art.example.org"),
+            owned(Role::Artifacts, "alice")
+        );
+        assert_eq!(
+            o.role_of("ALICE.compute.example.org:443"),
+            owned(Role::Compute, "alice")
+        );
+        assert_eq!(
+            o.host_for(Role::Artifacts, "alice"),
+            "alice.art.example.org"
+        );
+
+        // The gate is shared: it serves an API and server-rendered forms,
+        // which execute nothing, so there is nothing for an origin to separate.
+        assert_eq!(o.role_of("alice.gate.example.org"), None);
+
+        // Two labels deep is nobody's. Treating `a.b.art.example.org` as `b`'s
+        // would let a name nobody owns serve somebody's content.
+        assert_eq!(o.role_of("a.b.art.example.org"), None);
+        // A label that could not be a handle is not one.
+        assert_eq!(o.role_of("-nope.art.example.org"), None);
+        assert_eq!(o.role_of("www.art.example.org"), None);
+    }
+
+    /// A handle is a DNS label and a piece of somebody's identity. Both halves
+    /// of that show up here.
+    #[test]
+    fn handles_are_dns_labels_and_some_names_are_ours() {
+        for good in ["alice", "luke-chang", "lab42", "a"] {
+            valid_handle(good).unwrap_or_else(|e| panic!("{good}: {e}"));
+        }
+        for bad in [
+            "",
+            "Alice",       // a hostname is lowercase
+            "alice_chang", // legal in a bundle id, illegal in a hostname
+            "-alice",
+            "alice-",
+            "xn--80ak6aa92e", // punycode, which is not ours to hand out
+            "www",            // people assume this one is us
+            "abuse",          // and this one has to reach a human
+            "_acme-challenge",
+            &"a".repeat(64),
+        ] {
+            assert!(valid_handle(bad).is_err(), "`{bad}` was accepted");
+        }
     }
 
     /// The class decides the origin. A compute bundle served under the artifact
@@ -314,7 +496,7 @@ mod tests {
         let config = Config::dev(PathBuf::from("/tmp/x"), 8400);
         assert_eq!(
             config.origins.role_of("127.0.0.1:8402"),
-            Some(Role::Compute)
+            bare(Role::Compute)
         );
         assert_eq!(config.base_url(Role::Artifacts), "http://127.0.0.1:8401");
     }

@@ -2,9 +2,13 @@
 //! inside them.
 //!
 //! ```text
-//! <data>/bundles/<id>/<version>/index.html   immutable, written once
-//!                              /bundle.json  the manifest that arrived with it
+//! <data>/bundles/<user>/<id>/<version>/index.html   immutable, written once
+//!                                     /bundle.json  the manifest it arrived with
 //! ```
+//!
+//! Keyed by the user's **opaque id**, never by their handle: a handle can be
+//! retired or changed, and a rename that moved a hundred thousand files would
+//! be a rename nobody dares do.
 //!
 //! Two levels, exactly as at home, so a mirrored bundle and a served one have
 //! the same shape and a human debugging one is looking at the other. There is
@@ -39,8 +43,34 @@ impl Files {
         &self.root
     }
 
-    pub fn version_dir(&self, id: &str, version: u32) -> PathBuf {
-        self.root.join(id).join(version.to_string())
+    pub fn user_dir(&self, user_id: &str) -> PathBuf {
+        self.root.join(user_id)
+    }
+
+    pub fn version_dir(&self, user_id: &str, id: &str, version: u32) -> PathBuf {
+        self.user_dir(user_id).join(id).join(version.to_string())
+    }
+
+    /// Bytes this user is holding, for the quota check.
+    ///
+    /// Walked rather than tracked in a column: a counter and a filesystem
+    /// disagree eventually, and the disagreement is only ever discovered when
+    /// the disk is full. Publishes are rare enough that a walk is affordable.
+    pub fn user_bytes(&self, user_id: &str) -> u64 {
+        fn walk(dir: &Path) -> u64 {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return 0;
+            };
+            entries
+                .flatten()
+                .map(|entry| match entry.file_type() {
+                    Ok(t) if t.is_dir() => walk(&entry.path()),
+                    Ok(t) if t.is_file() => entry.metadata().map(|m| m.len()).unwrap_or(0),
+                    _ => 0,
+                })
+                .sum()
+        }
+        walk(&self.user_dir(user_id))
     }
 
     /// Write a version's files, once.
@@ -54,15 +84,24 @@ impl Files {
     /// cannot happen through the API (the ledger's primary key refuses it
     /// first), and if it ever did it would mean a published version was about
     /// to change underneath a URL that promised it could not.
-    pub fn install(&self, id: &str, version: u32, files: &[(String, Vec<u8>)]) -> Result<PathBuf> {
-        let target = self.version_dir(id, version);
+    pub fn install(
+        &self,
+        user_id: &str,
+        id: &str,
+        version: u32,
+        files: &[(String, Vec<u8>)],
+    ) -> Result<PathBuf> {
+        let target = self.version_dir(user_id, id, version);
         if target.exists() {
             anyhow::bail!(
                 "{} already exists; a version is written once and never rewritten",
                 target.display()
             );
         }
-        let staging = self.root.join(id).join(format!(".staging-{version}"));
+        let staging = self
+            .user_dir(user_id)
+            .join(id)
+            .join(format!(".staging-{version}"));
         let _ = std::fs::remove_dir_all(&staging);
         for (relative, bytes) in files {
             // Containment again, because a path that survived the unpacker is
@@ -100,8 +139,8 @@ impl Files {
     /// by the router. An empty path, or one naming a directory, resolves to
     /// that directory's `index.html` — a bundle is a page, not a listing, and
     /// there is deliberately no directory index.
-    pub fn resolve(&self, id: &str, version: u32, path: &str) -> Option<PathBuf> {
-        let base = self.version_dir(id, version);
+    pub fn resolve(&self, user_id: &str, id: &str, version: u32, path: &str) -> Option<PathBuf> {
+        let base = self.version_dir(user_id, id, version);
         let mut candidate = base.clone();
         for part in path.split('/') {
             if part.is_empty() || part == "." {
@@ -131,7 +170,7 @@ mod tests {
     fn scratch() -> (tempfile::TempDir, Files) {
         let dir = tempfile::tempdir().unwrap();
         let files = Files::new(dir.path().join("bundles")).unwrap();
-        let v1 = files.version_dir("brief", 1);
+        let v1 = files.version_dir("u1", "brief", 1);
         std::fs::create_dir_all(v1.join("assets")).unwrap();
         std::fs::write(v1.join("index.html"), "<h1>Monday</h1>").unwrap();
         std::fs::write(v1.join("assets/style.css"), "body{}").unwrap();
@@ -145,24 +184,30 @@ mod tests {
     fn a_bundle_serves_its_own_files_and_a_directory_means_its_index() {
         let (_dir, files) = scratch();
         assert!(files
-            .resolve("brief", 1, "")
+            .resolve("u1", "brief", 1, "")
             .unwrap()
             .ends_with("index.html"));
         assert!(files
-            .resolve("brief", 1, "/")
+            .resolve("u1", "brief", 1, "/")
             .unwrap()
             .ends_with("index.html"));
         assert!(files
-            .resolve("brief", 1, "assets/style.css")
+            .resolve("u1", "brief", 1, "assets/style.css")
             .unwrap()
             .ends_with("style.css"));
         assert!(files
-            .resolve("brief", 1, "sub")
+            .resolve("u1", "brief", 1, "sub")
             .unwrap()
             .ends_with("sub/index.html"));
-        assert!(files.resolve("brief", 1, "nope.html").is_none());
-        assert!(files.resolve("brief", 2, "").is_none(), "no such version");
-        assert!(files.resolve("other", 1, "").is_none(), "no such bundle");
+        assert!(files.resolve("u1", "brief", 1, "nope.html").is_none());
+        assert!(
+            files.resolve("u1", "brief", 2, "").is_none(),
+            "no such version"
+        );
+        assert!(
+            files.resolve("u1", "other", 1, "").is_none(),
+            "no such bundle"
+        );
     }
 
     /// The first thing anyone tries, in the spellings they try it in. The
@@ -178,7 +223,10 @@ mod tests {
             "..",
             "assets/../../../secret.txt",
         ] {
-            assert!(files.resolve("brief", 1, path).is_none(), "{path} resolved");
+            assert!(
+                files.resolve("u1", "brief", 1, path).is_none(),
+                "{path} resolved"
+            );
         }
         // Not vacuous: the file it was reaching for is really there.
         assert!(dir.path().join("secret.txt").is_file());
@@ -192,13 +240,16 @@ mod tests {
             ("index.html".to_string(), b"<h1>Monday</h1>".to_vec()),
             ("assets/app.js".to_string(), b"console.log(1)".to_vec()),
         ];
-        files.install("brief", 1, &content).unwrap();
+        files.install("u1", "brief", 1, &content).unwrap();
         assert_eq!(
-            std::fs::read_to_string(files.resolve("brief", 1, "").unwrap()).unwrap(),
+            std::fs::read_to_string(files.resolve("u1", "brief", 1, "").unwrap()).unwrap(),
             "<h1>Monday</h1>"
         );
 
-        let err = files.install("brief", 1, &content).unwrap_err().to_string();
+        let err = files
+            .install("u1", "brief", 1, &content)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("never rewritten"), "{err}");
     }
 
@@ -210,9 +261,9 @@ mod tests {
         let files = Files::new(dir.path().join("bundles")).unwrap();
         // A path that survived validation but would still write outside.
         let content = vec![("../escape.html".to_string(), b"x".to_vec())];
-        assert!(files.install("brief", 1, &content).is_err());
-        assert!(!files.version_dir("brief", 1).exists());
-        assert!(!files.root().join("brief/.staging-1").exists());
+        assert!(files.install("u1", "brief", 1, &content).is_err());
+        assert!(!files.version_dir("u1", "brief", 1).exists());
+        assert!(!files.root().join("u1/brief/.staging-1").exists());
     }
 
     /// A symlink planted inside a published bundle would otherwise serve bytes
@@ -221,9 +272,9 @@ mod tests {
     #[test]
     fn a_symlink_out_of_a_bundle_serves_nothing() {
         let (dir, files) = scratch();
-        let link = files.version_dir("brief", 1).join("escape.txt");
+        let link = files.version_dir("u1", "brief", 1).join("escape.txt");
         std::os::unix::fs::symlink(dir.path().join("secret.txt"), &link).unwrap();
         assert!(link.exists(), "the link is really there");
-        assert!(files.resolve("brief", 1, "escape.txt").is_none());
+        assert!(files.resolve("u1", "brief", 1, "escape.txt").is_none());
     }
 }
