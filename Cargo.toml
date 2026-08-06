@@ -1,5 +1,5 @@
 [workspace]
-members = ["mecha-manifest", "mecha-factory-publish"]
+members = ["mecha-manifest", "mecha-factory-publish", "mecha-factory"]
 resolver = "2"
 
 [workspace.package]
