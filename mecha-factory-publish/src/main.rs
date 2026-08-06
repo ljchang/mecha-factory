@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use mecha_factory_publish::{render, store::BundleStore};
+use mecha_factory_publish::{render, store::BundleStore, vendor};
 use mecha_manifest::Visibility;
 use std::path::PathBuf;
 
@@ -57,6 +57,10 @@ enum Command {
         #[arg(long)]
         no_alias: bool,
     },
+    /// Run the external-reference gate over a rendered directory without
+    /// publishing. The same check `publish` runs, so a bundle that passes here
+    /// is one that will publish.
+    Check { bundle: PathBuf },
     /// Point the share URL at a specific version.
     Alias { id: String, version: u32 },
     /// Point the share URL at nothing. Destroys no version.
@@ -87,6 +91,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Render { source, out, title } => {
             let rendered = render::report(&source, &out, title.as_deref())?;
+            // Run at render time too, so the cheap verb is where you find out.
+            // Discovering it at publish — the expensive one, the one that costs
+            // a review — would mean the review queue is where broken bundles
+            // surface.
+            vendor::gate_rendered(&rendered.dir, &source)?;
             println!("{} → {}", rendered.template, rendered.dir.display());
             println!("  title  {}", rendered.title);
             println!("  class  {}", rendered.class.as_str());
@@ -118,6 +127,10 @@ fn main() -> Result<()> {
                         .with_context(|| format!("--source {} does not exist", source.display()))?,
                 );
             }
+            // The gate, before anything is written. A version is immutable, so
+            // a bundle that reaches the store with an external reference in it
+            // is one that can only be superseded, never fixed.
+            vendor::gate(&bundle)?;
             let published = store.publish(
                 &id,
                 &bundle,
@@ -147,6 +160,23 @@ fn main() -> Result<()> {
                 println!("  alias  → v{}", published.version);
             }
             reach(&store, &id)?;
+        }
+
+        Command::Check { bundle } => {
+            let findings = vendor::scan(&bundle)?;
+            if findings.is_empty() {
+                println!("{} is self-contained", bundle.display());
+                return Ok(());
+            }
+            // Printed *and* returned as a failure: the exit code is what a
+            // script reads, and the list is what a person needs.
+            for finding in &findings {
+                println!("{finding}");
+            }
+            bail!(
+                "{} external reference(s) — this bundle would not publish",
+                findings.len()
+            );
         }
 
         Command::Alias { id, version } => {

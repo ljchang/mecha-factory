@@ -19,6 +19,8 @@
 
 pub mod render;
 pub mod store;
+pub mod vendor;
 
 pub use render::{report, Rendered};
 pub use store::{Alias, BundleStore, Published};
+pub use vendor::{gate, scan, Finding};

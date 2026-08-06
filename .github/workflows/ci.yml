@@ -64,12 +64,13 @@ jobs:
             name=$(basename "$manifest" .toml)
             cargo run -q --example render -- "$manifest" "out/$name"
           done
+      # The same gate a publish runs, not a grep that approximates it. A grep
+      # cannot tell a link a reader clicks from a resource the page fetches, and
+      # a second implementation of a security check is a second thing to get
+      # wrong.
       - name: Refuse an external reference
         run: |
           set -euo pipefail
-          # The one absolute URL allowed anywhere is a link a human clicks in an
-          # acknowledgment; a *loaded* resource off-origin is what fails.
-          if grep -rEn '(src|href)="https?://' out/ | grep -v 'rel="noopener'; then
-            echo "an emitted file loads something off-origin" >&2
-            exit 1
-          fi
+          for dir in out/*/; do
+            cargo run -q --bin factory-publish -- check "$dir"
+          done

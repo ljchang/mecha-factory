@@ -28,11 +28,11 @@ A factory is where machines are built and shipped from — and it is deliberatel
 | `mecha-manifest` | The versioned data contract. Request types and bundles, their JSON Schema, their HTML form, and the one validator both ends run. Pure, no I/O, no network. |
 | `mecha-factory-publish` | The home side. Renders bundles, versions them immutably, moves the one alias a share URL resolves through. Later it also holds the publish key and serves the MCP surface. |
 
-Planned, in order: the vendoring gate (every external reference named with its
-file and line, and a publish that *fails* rather than warns); the `notebook`
-template on `marimo export html-wasm`; the MCP surface; and `mecha-factory`
-itself — the server on the public box, which is the first thing here that
-creates a machine to patch forever.
+Planned, in order: the `notebook` template on `marimo export html-wasm`, and
+with it the fetching half of vendoring (from a pinned allowlist — marimo's six
+CDN references are known and version-pinned); the MCP surface; and
+`mecha-factory` itself — the server on the public box, which is the first thing
+here that creates a machine to patch forever.
 
 ## Try it
 
@@ -56,7 +56,22 @@ cargo run --bin factory-publish -- status morning-brief
 ```
 
 `render` is cheap and local; `publish` is the one that costs a human review, so
-they are separate verbs. Publishing identical bytes returns the existing version
+they are separate verbs. Both run the external-reference gate, and `check` runs
+it alone:
+
+```sh
+cargo run --bin factory-publish -- check /tmp/brief
+```
+
+**A publish fails on a surviving external reference — it does not warn.** A page
+that loads something off-origin breaks under the CSP, tells a third party who
+read it and when, and stops being permanent the moment somebody else's bucket
+changes. A *link* is not a resource: `<a href="https://…">` is fine and is never
+a finding; `<img src="https://…">` is the page reaching out on load, and is.
+Every finding names the file, the line, the URL and what made it a resource —
+and for a rendered bundle it also names the line in the **source**, because
+pointing someone at generated HTML is pointing them at a file they should not
+edit. Publishing identical bytes returns the existing version
 rather than minting a new one, which makes "did anything actually change?" a
 comparison rather than a guess. `alias` moves the share URL; `unpublish` points
 it at nothing and destroys no version.
