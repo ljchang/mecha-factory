@@ -67,6 +67,13 @@ pub enum Visibility {
     Public,
 }
 
+impl Visibility {
+    /// The default, and the one that is omitted when serialising.
+    pub fn is_private(&self) -> bool {
+        matches!(self, Visibility::Private)
+    }
+}
+
 /// The manifest written into every mirrored bundle version.
 ///
 /// `sources` is a contract with mecha rather than with the server:
@@ -90,7 +97,12 @@ pub struct BundleManifest {
     /// The template that rendered it.
     pub template: String,
     pub class: ContentClass,
-    #[serde(default)]
+    /// Recorded on the version, and **not** what gates a reader: the alias is.
+    /// Omitted from the JSON when it is the default, so a manifest that has
+    /// been stripped at a boundary makes no claim at all rather than a stale
+    /// one — a page served publicly whose own manifest says `private` is a
+    /// contradiction somebody has to spend time resolving.
+    #[serde(default, skip_serializing_if = "Visibility::is_private")]
     pub visibility: Visibility,
     /// The digest the version is addressed by.
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -21,7 +21,7 @@
 //!   This is the whole reason the content address lives in `mecha-manifest`:
 //!   home computed it before the POST, the server computes it after, and a
 //!   disagreement means the bytes are not the ones that were reviewed.
-//! - **`sources` never lands on the box.** The manifest's `sources` array is a
+//! - **Neither `sources` nor `visibility` lands on the box.** The manifest's `sources` array is a
 //!   contract with `mecha work clean` and holds *absolute paths inside the
 //!   user's home directory*. The stored `bundle.json` is served publicly, so
 //!   carrying that field across would publish the shape of a private machine —
@@ -179,6 +179,11 @@ pub fn unpack(body: &[u8], limits: &Limits) -> Result<Incoming, Rejected> {
 
     // Never stored, never served. See the module docs.
     manifest.sources.clear();
+    // Nor is the manifest's idea of who may read this. The alias row is what
+    // gates a reader, and it moves; a static file that claimed otherwise would
+    // be a public page whose own manifest says `private`, which is a
+    // contradiction somebody has to spend time resolving.
+    manifest.visibility = mecha_manifest::Visibility::Private;
     let rewritten = manifest.to_json();
     for (path, bytes) in files.iter_mut() {
         if path == mecha_manifest::MANIFEST_FILE {
@@ -268,6 +273,15 @@ mod tests {
         .to_json()
     }
 
+    fn stored_manifest(incoming: &Incoming) -> String {
+        incoming
+            .files
+            .iter()
+            .find(|(p, _)| p == "bundle.json")
+            .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
+            .expect("every accepted bundle carries one")
+    }
+
     fn bundle(gzip: bool, sources: Vec<std::path::PathBuf>) -> Vec<u8> {
         let content: Vec<(&str, &[u8])> = vec![
             ("index.html", b"<h1>Monday</h1>"),
@@ -315,13 +329,10 @@ mod tests {
         let home = std::path::PathBuf::from("/home/someone/.mecha/work/morning/2026-08-06.md");
         let incoming = unpack(&bundle(false, vec![home]), &Limits::default()).unwrap();
         assert!(incoming.manifest.sources.is_empty());
+        // Nor a visibility claim: the alias row decides, and it moves.
+        assert!(!stored_manifest(&incoming).contains("visibility"));
         // …and the copy that gets written and served is the rewritten one.
-        let stored = incoming
-            .files
-            .iter()
-            .find(|(p, _)| p == "bundle.json")
-            .map(|(_, b)| String::from_utf8_lossy(b).into_owned())
-            .unwrap();
+        let stored = stored_manifest(&incoming);
         assert!(!stored.contains("/home/someone"), "{stored}");
         assert!(stored.contains("\"id\": \"brief\""), "{stored}");
     }

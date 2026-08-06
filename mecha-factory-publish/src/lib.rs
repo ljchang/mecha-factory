@@ -20,6 +20,7 @@
 pub mod mcp;
 pub mod notebook;
 pub mod pyodide;
+pub mod remote;
 pub mod render;
 pub mod serve;
 pub mod store;

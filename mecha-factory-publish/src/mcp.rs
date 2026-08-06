@@ -124,6 +124,11 @@ fn tools() -> Vec<ToolSpec> {
                             "type": "array",
                             "items": {"type": "string"},
                             "description": "What this was rendered from. Recorded so retention never removes a published report's input."
+                        },
+                        "visibility": {
+                            "type": "string",
+                            "enum": ["public", "private"],
+                            "description": "Who may read it on the origin. Omitted keeps what this bundle already was; a bundle that has never been anything is private, and the origin serves a private bundle to nobody."
                         }
                     },
                     "required": ["id", "bundle"],
@@ -144,7 +149,12 @@ fn tools() -> Vec<ToolSpec> {
                     "type": "object",
                     "properties": {
                         "id": {"type": "string"},
-                        "version": {"type": "integer", "minimum": 1}
+                        "version": {"type": "integer", "minimum": 1},
+                        "visibility": {
+                            "type": "string",
+                            "enum": ["public", "private"],
+                            "description": "Who may read it on the origin. Omitted keeps what this bundle already was; a bundle that has never been anything is private, and the origin serves a private bundle to nobody."
+                        }
                     },
                     "required": ["id", "version"],
                     "additionalProperties": false
@@ -219,6 +229,20 @@ fn tools() -> Vec<ToolSpec> {
 /// nearest existing ancestor and the remainder is checked for traversal — the
 /// same shape as canonicalize-and-compare, minus the requirement that the leaf
 /// already be there.
+/// `visibility` off a tool call, or nothing.
+///
+/// An unrecognised value is an error rather than a fallback to private: a model
+/// that wrote `"visible"` meant something, and quietly doing the safe thing
+/// would leave it believing it had published to the world.
+fn visibility_arg(args: &Value) -> Result<Option<mecha_manifest::Visibility>> {
+    match args.get("visibility").and_then(Value::as_str) {
+        None => Ok(None),
+        Some("public") => Ok(Some(mecha_manifest::Visibility::Public)),
+        Some("private") => Ok(Some(mecha_manifest::Visibility::Private)),
+        Some(other) => anyhow::bail!("visibility `{other}` is not `public` or `private`"),
+    }
+}
+
 fn confined(root: &Path, supplied: &str) -> Result<PathBuf> {
     let candidate = {
         let p = PathBuf::from(supplied);
@@ -416,14 +440,43 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 sources,
                 &now,
             )?;
-            let visibility = store
-                .alias(&id)?
-                .map(|a| a.visibility)
-                .unwrap_or(mecha_manifest::Visibility::Private);
+            let visibility = visibility_arg(args)?.unwrap_or_else(|| {
+                store
+                    .alias(&id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.visibility)
+                    .unwrap_or(mecha_manifest::Visibility::Private)
+            });
             store.set_alias(&id, Some(published.version), visibility, &now)?;
+
+            // The box, if there is one. A failure here is reported rather than
+            // swallowed: the human released this from the outbox expecting it
+            // to reach the world, and "published" with nothing on the origin is
+            // the one outcome nobody would notice.
+            let reach = match crate::remote::mirror(
+                &store,
+                &id,
+                published.version,
+                Some(published.version),
+                visibility,
+            ) {
+                Ok(Some(url)) => format!("\nIt is live at {url}."),
+                Ok(None) => String::new(),
+                Err(e) => {
+                    anyhow::bail!(
+                        "{id} is published locally as version {} and the alias points at it, \
+                         but the origin did not take it: {e:#}\nNothing was lost. Retry with \
+                         `factory-publish push {id} --version {}`.",
+                        published.version,
+                        published.version
+                    )
+                }
+            };
+
             Ok(format!(
                 "{} is published as version {}{}.\nIt is at {}, and its share URL now \
-                 resolves to that version.",
+                 resolves to that version.{}",
                 id,
                 published.version,
                 if published.existing {
@@ -431,7 +484,8 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 } else {
                     ""
                 },
-                published.path.display()
+                published.path.display(),
+                reach
             ))
         }
         "bundle_alias" => {
@@ -442,20 +496,36 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 .ok_or_else(|| anyhow::anyhow!("`version` is required"))?
                 as u32;
             let store = store()?;
-            let visibility = store
-                .alias(&id)?
-                .map(|a| a.visibility)
-                .unwrap_or(mecha_manifest::Visibility::Private);
+            let visibility = visibility_arg(args)?.unwrap_or_else(|| {
+                store
+                    .alias(&id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.visibility)
+                    .unwrap_or(mecha_manifest::Visibility::Private)
+            });
             store.set_alias(&id, Some(version), visibility, &now)?;
+            let reach = match crate::remote::mirror_alias(&id, Some(version), visibility)? {
+                Some(url) => format!(" It is live at {url}."),
+                None => String::new(),
+            };
             Ok(format!(
-                "{id}'s share URL now resolves to version {version}."
+                "{id}'s share URL now resolves to version {version}.{reach}"
             ))
         }
         "bundle_unpublish" => {
             let id = string("id")?;
             let store = store()?;
-            let before = store.alias(&id)?.and_then(|a| a.version);
-            store.set_alias(&id, None, mecha_manifest::Visibility::Private, &now)?;
+            let existing = store.alias(&id)?;
+            let before = existing.as_ref().and_then(|a| a.version);
+            // Kept rather than flipped to private: see the CLI's `unpublish`.
+            // What a reader gets — "this has been taken down" versus "no such
+            // thing" — is decided here.
+            let visibility = existing
+                .map(|a| a.visibility)
+                .unwrap_or(mecha_manifest::Visibility::Private);
+            store.set_alias(&id, None, visibility, &now)?;
+            crate::remote::mirror_alias(&id, None, visibility)?;
             Ok(format!(
                 "{id}'s share URL no longer resolves{}. {} version(s) remain on disk — \
                  nothing was deleted, and it can be aliased again.",

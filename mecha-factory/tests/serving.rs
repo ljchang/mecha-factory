@@ -274,6 +274,24 @@ fn a_takedown_is_gone_everywhere_and_says_so() {
         assert_eq!(reply.status, 410, "{target}");
         assert!(reply.body.contains("taken down"), "{target}");
     }
+
+    // A bundle that was never public gets no such courtesy: taking it down
+    // answers exactly what a bundle that never existed answers, so nothing
+    // here is an oracle for what was once on this box.
+    publish(
+        &server,
+        "secret",
+        1,
+        ContentClass::Static,
+        Visibility::Private,
+    );
+    server
+        .db
+        .alias_set("secret", None, Visibility::Private, "t")
+        .unwrap();
+    let reply = get_as(server.artifacts, &host, "/b/secret/", None);
+    assert_eq!(reply.status, 404);
+    assert!(!reply.body.contains("taken down"));
 }
 
 /// The first thing anyone tries, against a server that really does have

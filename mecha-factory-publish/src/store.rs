@@ -25,8 +25,11 @@
 //! twice — staging takes no lock, deliberately, so a retried tool call stages
 //! twice — collapses to one version rather than to two identical ones.
 //!
-//! **There is no delete.** Taking something down moves the alias to nothing and
-//! flips the visibility flag; the versions stay. A delete verb would be the one
+//! **There is no delete.** Taking something down moves the alias to nothing;
+//! the versions stay, and the visibility is left as it was — a public bundle
+//! taken down answers "this has been taken down" to whoever followed the link,
+//! where flipping it to private would answer "no such thing" and make the
+//! honest page unreachable. A delete verb would be the one
 //! operation that could destroy the record, and everything else here is built
 //! so that nothing can.
 //!

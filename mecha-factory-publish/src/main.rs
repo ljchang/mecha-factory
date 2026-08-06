@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use mecha_factory_publish::{notebook, render, store::BundleStore, vendor};
+use mecha_factory_publish::{notebook, remote, render, store::BundleStore, vendor};
 use mecha_manifest::Visibility;
 use std::path::PathBuf;
 
@@ -56,6 +56,17 @@ enum Command {
         /// Publish the version without moving the share URL to it.
         #[arg(long)]
         no_alias: bool,
+        /// Store it locally and do not send it to the box, even though one is
+        /// configured. What you want when the box is down and you would rather
+        /// retry later with `push` than fail the publish.
+        #[arg(long)]
+        no_push: bool,
+        /// `public` or `private`. Omitted keeps whatever this bundle already
+        /// was, and a bundle that has never been anything is **private** — the
+        /// origin serves a private bundle to nobody, so the default of getting
+        /// this wrong points the safe way.
+        #[arg(long)]
+        visibility: Option<String>,
     },
     /// Render a marimo notebook as a `compute`-class bundle. Executes the
     /// notebook, so it is bounded by a timeout.
@@ -124,8 +135,30 @@ enum Command {
         #[arg(long = "vendored")]
         vendored: Vec<String>,
     },
+    /// Send a stored version to the box, and point the share URL at it.
+    ///
+    /// `publish` already does this when a remote is configured; this is the
+    /// retry, and it is safe to run twice — identical bytes return the version
+    /// the box already holds.
+    Push {
+        id: String,
+        /// Defaults to the version the local alias points at.
+        #[arg(long)]
+        version: Option<u32>,
+        /// Send the bytes without moving the share URL.
+        #[arg(long)]
+        no_alias: bool,
+    },
+    /// Ask the box whether it is up, and what it holds.
+    Remote,
     /// Point the share URL at a specific version.
-    Alias { id: String, version: u32 },
+    Alias {
+        id: String,
+        version: u32,
+        /// `public` or `private`. Omitted keeps what it was.
+        #[arg(long)]
+        visibility: Option<String>,
+    },
     /// Point the share URL at nothing. Destroys no version.
     Unpublish { id: String },
     /// What is published, and at which version.
@@ -163,9 +196,15 @@ fn main() -> Result<()> {
             println!("  title  {}", rendered.title);
             println!("  class  {}", rendered.class.as_str());
             println!("  open   {}", rendered.dir.join("index.html").display());
+            // The title is in the hint because `publish` cannot recover it:
+            // rendering and publishing are separate invocations by design, and
+            // a person following this line without it gets a report titled
+            // after its id.
             println!(
-                "\nLook at it, then publish it:\n  factory-publish publish <id> {} --source {}",
+                "\nLook at it, then publish it:\n  \
+                 factory-publish publish <id> {} --title {:?} --source {}",
                 rendered.dir.display(),
+                rendered.title,
                 source.display()
             );
         }
@@ -177,7 +216,10 @@ fn main() -> Result<()> {
             description,
             sources,
             no_alias,
+            no_push,
+            visibility,
         } => {
+            let requested = parse_visibility(visibility.as_deref())?;
             // The manifest a previous render left behind is the best source of
             // the title and class, and re-deriving them from flags would let a
             // publish disagree with what was rendered.
@@ -214,16 +256,100 @@ fn main() -> Result<()> {
             }
             println!("  digest {}", published.digest);
             println!("  path   {}", published.path.display());
-            if !no_alias {
-                let visibility = store
-                    .alias(&id)?
+            let visibility = requested.unwrap_or_else(|| {
+                store
+                    .alias(&id)
+                    .ok()
+                    .flatten()
                     .map(|a| a.visibility)
-                    .unwrap_or(Visibility::Private);
+                    .unwrap_or(Visibility::Private)
+            });
+            if !no_alias || requested.is_some() {
                 store.set_alias(&id, Some(published.version), visibility, &now)?;
                 println!("  alias  → v{}", published.version);
             }
+            if !no_push {
+                // Local first, always. The store is the record; the box is a
+                // copy of it that the world can read, and a push that fails
+                // leaves the record intact and retryable.
+                match remote::mirror(
+                    &store,
+                    &id,
+                    published.version,
+                    (!no_alias).then_some(published.version),
+                    visibility,
+                ) {
+                    Ok(Some(url)) => println!("  url    {url}"),
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("\nthe box did not take it: {e:#}");
+                        eprintln!(
+                            "It is published locally as v{}. Retry with:\n  \
+                             factory-publish push {id} --version {}",
+                            published.version, published.version
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
             reach(&store, &id)?;
         }
+
+        Command::Push {
+            id,
+            version,
+            no_alias,
+        } => {
+            let version = match version {
+                Some(version) => version,
+                None => store
+                    .alias(&id)?
+                    .and_then(|a| a.version)
+                    .or_else(|| store.versions(&id).ok().and_then(|v| v.last().copied()))
+                    .ok_or_else(|| anyhow::anyhow!("{id} has no versions locally"))?,
+            };
+            let visibility = store
+                .alias(&id)?
+                .map(|a| a.visibility)
+                .unwrap_or(Visibility::Private);
+            match remote::mirror(
+                &store,
+                &id,
+                version,
+                (!no_alias).then_some(version),
+                visibility,
+            )? {
+                Some(url) => {
+                    println!("{id} v{version} → {url}");
+                    if visibility == Visibility::Private {
+                        println!(
+                            "  It is private, so the origin serves it to nobody. \
+                             `factory-publish alias {id} {version}` after making it \
+                             public, or set the visibility on the box."
+                        );
+                    }
+                }
+                None => bail!(
+                    "no factory is configured. Write ~/.mecha/factory/config.toml with \
+                     `gate = \"https://…\"` and put a publish key in \
+                     ~/.mecha/factory/publish.key"
+                ),
+            }
+        }
+
+        Command::Remote => match remote::Remote::configured()? {
+            Some(remote) => {
+                let health = remote.health()?;
+                println!("gate      {}", remote.gate());
+                println!("status    {}", health["status"].as_str().unwrap_or("?"));
+                println!("version   {}", health["version"].as_str().unwrap_or("?"));
+                if let Some(bundles) = health["bundles"].as_i64() {
+                    println!("bundles   {bundles}");
+                    println!("queued    {}", health["queued"].as_i64().unwrap_or(0));
+                }
+            }
+            None => println!("no factory is configured (~/.mecha/factory/config.toml)"),
+        },
 
         Command::Notebook {
             source,
@@ -355,19 +481,46 @@ fn main() -> Result<()> {
             );
         }
 
-        Command::Alias { id, version } => {
-            let visibility = store
-                .alias(&id)?
-                .map(|a| a.visibility)
-                .unwrap_or(Visibility::Private);
+        Command::Alias {
+            id,
+            version,
+            visibility,
+        } => {
+            let visibility = parse_visibility(visibility.as_deref())?.unwrap_or_else(|| {
+                store
+                    .alias(&id)
+                    .ok()
+                    .flatten()
+                    .map(|a| a.visibility)
+                    .unwrap_or(Visibility::Private)
+            });
             store.set_alias(&id, Some(version), visibility, &now)?;
             println!("{id} → v{version}");
+            if let Some(url) = remote::mirror_alias(&id, Some(version), visibility)? {
+                println!("  url    {url}");
+            }
             reach(&store, &id)?;
         }
 
         Command::Unpublish { id } => {
-            let before = store.alias(&id)?.and_then(|a| a.version);
-            store.set_alias(&id, None, Visibility::Private, &now)?;
+            let existing = store.alias(&id)?;
+            let before = existing.as_ref().and_then(|a| a.version);
+            // The visibility is *kept*, not flipped to private, and that is
+            // what decides what a reader sees. A public bundle taken down
+            // answers 410 with "this has been taken down" — which is what
+            // somebody who followed a link that used to work needs. Flipping it
+            // would make every takedown answer 404 instead, so the honest page
+            // would exist and never be reachable, and a bundle that was never
+            // public would gain an existence oracle it does not have today.
+            let visibility = existing
+                .map(|a| a.visibility)
+                .unwrap_or(Visibility::Private);
+            store.set_alias(&id, None, visibility, &now)?;
+            // The box first would be wrong the other way round: if this fails
+            // half way, the state to be left in is "locally down, remotely up",
+            // which the next `unpublish` fixes — not "locally up, remotely
+            // down", which reads as done and is not.
+            remote::mirror_alias(&id, None, visibility)?;
             match before {
                 Some(v) => println!("{id}: the share URL no longer resolves (was v{v})"),
                 None => println!("{id}: already unpublished"),
@@ -459,20 +612,48 @@ fn main() -> Result<()> {
 /// the tailnet is the boundary, and `visibility` is recorded metadata that
 /// nothing yet enforces. A flag that reads as enforcement and is not would be
 /// exactly the wrong thing to leave unsaid.
+/// `public`, `private`, or nothing — where nothing means "leave it alone".
+///
+/// Parsed rather than taken as a boolean flag, because `--public` and its
+/// absence would make "make this private again" unsayable, and the one
+/// direction that must always be expressible is the one that takes something
+/// away from the world.
+fn parse_visibility(text: Option<&str>) -> Result<Option<Visibility>> {
+    match text {
+        None => Ok(None),
+        Some("public") => Ok(Some(Visibility::Public)),
+        Some("private") => Ok(Some(Visibility::Private)),
+        Some(other) => bail!("visibility `{other}` is not `public` or `private`"),
+    }
+}
+
+/// Who can actually read this, said out loud.
+///
+/// Visibility used to be recorded and unenforced, and this line said so. It is
+/// enforced now — the origin serves a private bundle to nobody, and answers
+/// exactly what it answers for a bundle that never existed — so what this
+/// prints depends on whether there is a box at all.
 fn reach(store: &BundleStore, id: &str) -> Result<()> {
     let visibility = store
         .alias(id)?
         .map(|a| a.visibility)
         .unwrap_or(Visibility::Private);
-    println!(
-        "  reach  whoever can read {} — recorded visibility is `{}`, which nothing \
-         enforces until there is a gate origin",
-        store.root().display(),
-        match visibility {
-            Visibility::Private => "private",
-            Visibility::Public => "public",
+    let remote = remote::Remote::configured().ok().flatten();
+    match (remote, visibility) {
+        (None, _) => println!(
+            "  reach  whoever can read {} — no factory is configured, so it is \
+             published locally and nowhere else",
+            store.root().display()
+        ),
+        (Some(_), Visibility::Private) => println!(
+            "  reach  nobody: it is on the box and marked private, which the origin \
+             enforces by serving it to no one. `factory-publish alias {id} <version>` \
+             after making it public."
+        ),
+        (Some(_), Visibility::Public) => {
+            println!("  reach  anyone with the link — it is public on the origin")
         }
-    );
+    }
     Ok(())
 }
 
