@@ -437,16 +437,39 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
 
     let index = get_host(server.artifacts, &host, "/b/switchable/v/", None);
     assert_eq!(index.status, 200, "{}", index.body);
+    assert!(index.body.contains("/view/switchable/1"), "{}", index.body);
     assert!(index.body.contains("/b/switchable/v/1/"), "{}", index.body);
     assert!(index.body.contains("/b/switchable/v/2/"), "{}", index.body);
     assert!(
-        index.body.contains("v1</a> \u{2014} what the share URL shows"),
+        index.body.contains("\u{2014} what the share URL shows"),
         "{}",
         index.body
     );
     assert_eq!(index.header("cache-control").unwrap(), "no-store");
 
-    // Private: the index answers exactly like a bundle that never existed.
+    // The framed viewer: chrome above the bundle, the bundle untouched in an
+    // iframe from its own immutable URL — which frame-ancestors 'self' now
+    // permits, while the viewer itself stays unframeable.
+    let viewer = get_host(server.artifacts, &host, "/view/switchable/2", None);
+    assert_eq!(viewer.status, 200, "{}", viewer.body);
+    assert!(
+        viewer.body.contains("<iframe src=\"/b/switchable/v/2/\""),
+        "{}",
+        viewer.body
+    );
+    assert!(viewer.body.contains("/view/switchable/1"), "the switcher");
+    let viewer_csp = viewer.header("content-security-policy").unwrap();
+    assert!(viewer_csp.contains("frame-src 'self'"), "{viewer_csp}");
+    assert!(viewer_csp.contains("frame-ancestors 'none'"), "{viewer_csp}");
+    let bundle = get_host(server.artifacts, &host, "/b/switchable/v/2/", None);
+    let bundle_csp = bundle.header("content-security-policy").unwrap();
+    assert!(
+        bundle_csp.contains("frame-ancestors 'self'"),
+        "{bundle_csp}"
+    );
+
+    // Private: index and viewer answer exactly like a bundle that never
+    // existed.
     server
         .db
         .alias_set(&server.user.id, "switchable", Some(1), Visibility::Private, "t")
@@ -455,4 +478,6 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
     let absent = get_host(server.artifacts, &host, "/b/no-such-bundle/v/", None);
     assert_eq!(hidden.status, 404);
     assert_eq!(hidden.body, absent.body);
+    let hidden_view = get_host(server.artifacts, &host, "/view/switchable/1", None);
+    assert_eq!(hidden_view.status, 404);
 }

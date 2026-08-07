@@ -190,6 +190,9 @@ pub fn router(app: Shared) -> Router {
         // scheme reserves and no bundle file can occupy.
         .route("/b/{id}/v", get(artifacts::versions_index))
         .route("/b/{id}/v/", get(artifacts::versions_index))
+        // The framed viewer: factory chrome above untouched bundle bytes,
+        // outside /b/ so no bundle content can occupy the path.
+        .route("/view/{id}/{version}", get(artifacts::viewer))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/{*path}", get(artifacts::version_file))

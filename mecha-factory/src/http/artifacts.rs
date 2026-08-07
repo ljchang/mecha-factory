@@ -136,6 +136,96 @@ pub async fn share(
     }
 }
 
+/// `/view/<id>/<version>` — the framed viewer: factory chrome above the
+/// bundle, which stays byte-for-byte what was published.
+///
+/// This is the answer to "can the header be separate from the artifact":
+/// yes, as a frame parent rather than an injection. The bundle loads in an
+/// `<iframe>` from its own immutable URL on this same origin — which
+/// `frame-ancestors 'self'` permits and every other origin is still refused
+/// — so nothing about the published bytes, their digest, or their own policy
+/// changes. The viewer carries its own CSP: it frames 'self', styles itself
+/// inline (it is a fixed template with only the escaped id interpolated),
+/// and loads nothing else. A top-level path outside `/b/`, so no bundle
+/// content can ever occupy it.
+pub async fn viewer(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((id, version)): Path<(String, u32)>,
+) -> Response {
+    if origin.role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
+        return missing();
+    }
+    let Some(user) = owner(&app, &origin) else {
+        return missing();
+    };
+    let live = match access(&app, &user.id, &id) {
+        Access::Nothing => return missing(),
+        Access::Gone => return gone(&id),
+        Access::Current(version) => version,
+    };
+    let versions = app.db.bundle_versions(&user.id, &id).unwrap_or_default();
+    if !versions.contains(&version) {
+        return missing();
+    }
+    let mut switcher = String::new();
+    for v in &versions {
+        if *v == version {
+            switcher.push_str(&format!("<strong>v{v}</strong> "));
+        } else {
+            switcher.push_str(&format!("<a href=\"/view/{id}/{v}\">v{v}</a> ", id = escape(&id)));
+        }
+    }
+    let live_note = if version == live {
+        " (what the share URL shows)"
+    } else {
+        ""
+    };
+    let body = format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{id} — v{version}</title>\n\
+         <style>\n\
+         body {{ margin: 0; display: flex; flex-direction: column; height: 100vh; \
+                 font-family: system-ui, sans-serif; }}\n\
+         header {{ display: flex; gap: 1rem; align-items: baseline; \
+                   padding: .625rem 1.25rem; border-bottom: 1px solid #ccc; \
+                   font-size: .875rem; }}\n\
+         header .grow {{ flex: 1; }}\n\
+         iframe {{ border: 0; flex: 1; width: 100%; }}\n\
+         </style></head>\n\
+         <body><header>\
+         <strong><code>{id}</code></strong>\
+         <span>{switcher}{live_note}</span>\
+         <span class=\"grow\"></span>\
+         <a href=\"/b/{id}/v/{version}/\">bare</a>\
+         <a href=\"/b/{id}/\">share URL</a>\
+         </header>\n\
+         <iframe src=\"/b/{id}/v/{version}/\" title=\"{id} v{version}\"></iframe>\
+         </body></html>\n",
+        id = escape(&id),
+    );
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+            // The viewer's own policy: frame this origin, style itself, load
+            // nothing else. Set here so the guard's class default does not
+            // apply — the viewer is chrome, not a bundle.
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "default-src 'none'; style-src 'unsafe-inline'; \
+                 frame-src 'self'; base-uri 'none'; form-action 'none'; \
+                 frame-ancestors 'none'"
+                    .to_string(),
+            ),
+            (header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 /// `/b/<id>/v/` — the version switcher: every version of a publicly served
 /// bundle, each at its immutable URL, with the live one named.
 ///
@@ -165,7 +255,8 @@ pub async fn versions_index(
     let mut items = String::new();
     for v in &versions {
         items.push_str(&format!(
-            "<li><a href=\"/b/{id}/v/{v}/\">v{v}</a>{}</li>\n",
+            "<li><a href=\"/view/{id}/{v}\">v{v}</a> \
+             (<a href=\"/b/{id}/v/{v}/\">bare</a>){}</li>\n",
             if *v == live {
                 " — what the share URL shows"
             } else {

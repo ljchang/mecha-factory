@@ -35,8 +35,13 @@
 //! - **`style-src 'unsafe-inline'` only on `compute`.** marimo's runtime sets
 //!   element styles; our own templates extract CSS to a file precisely so the
 //!   other two classes never need it.
-//! - **`frame-ancestors 'none'`** so a notebook cannot be framed by the gate,
-//!   and `form-action 'none'` because nothing in an artifact submits anywhere.
+//! - **`frame-ancestors 'self'`** so a notebook still cannot be framed by the
+//!   gate or by anyone else's origin — `'self'` is the artifact origin
+//!   itself, which is per-user, so the only page that may frame a bundle is
+//!   one the same origin serves. That is what lets the factory's viewer put
+//!   chrome *beside* immutable bytes instead of inside them, while every
+//!   cross-origin clickjacking protection `'none'` bought stays bought.
+//!   `form-action 'none'` because nothing in an artifact submits anywhere.
 
 use crate::ContentClass;
 
@@ -57,7 +62,7 @@ impl ContentClass {
                 // about a report is that nothing in it runs.
                 "script-src 'none'",
                 "connect-src 'none'",
-                "frame-ancestors 'none'",
+                "frame-ancestors 'self'",
                 "base-uri 'none'",
                 "form-action 'none'",
             ],
@@ -68,7 +73,7 @@ impl ContentClass {
                 "img-src 'self' data:",
                 "font-src 'self'",
                 "connect-src 'self'",
-                "frame-ancestors 'none'",
+                "frame-ancestors 'self'",
                 "base-uri 'none'",
                 "form-action 'none'",
             ],
@@ -84,7 +89,7 @@ impl ContentClass {
                 "connect-src 'self'",
                 "worker-src 'self' blob:",
                 "child-src 'self' blob:",
-                "frame-ancestors 'none'",
+                "frame-ancestors 'self'",
                 "base-uri 'none'",
                 "form-action 'none'",
             ],
@@ -237,7 +242,10 @@ mod tests {
                 csp.contains("connect-src 'none'") || csp.contains("connect-src 'self'"),
                 "{class:?} can reach off-origin: {csp}"
             );
-            assert!(csp.contains("frame-ancestors 'none'"), "{class:?}");
+            // 'self' and never 'none': the factory's own viewer on the same
+            // per-user origin may frame a bundle; the gate and every other
+            // origin still may not.
+            assert!(csp.contains("frame-ancestors 'self'"), "{class:?}");
             assert!(csp.contains("base-uri 'none'"), "{class:?}");
         }
     }
