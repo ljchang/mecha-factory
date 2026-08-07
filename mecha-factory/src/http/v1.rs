@@ -587,23 +587,47 @@ pub async fn drain(
         .drain(&user.id, query.since, app.config.limits.drain_batch)
     {
         Ok(rows) => {
-            let records: Vec<_> = rows
-                .iter()
-                .map(|row| {
-                    serde_json::json!({
-                        "seq": row.seq,
-                        "type": row.type_id,
-                        "state": row.state,
-                        "created_at": row.created_at,
-                        // Passed through as text rather than as parsed JSON:
-                        // the server validated its shape on the way in, and
-                        // re-serialising a stranger's record here would be this
-                        // box deciding what home reads. Home parses and
-                        // re-validates against the schema it uploaded.
-                        "payload": row.payload,
+            let mut records = Vec::with_capacity(rows.len());
+            for row in &rows {
+                // The attachments array is the box's own typed data — our
+                // measurements and our minted ids — so unlike the payload it
+                // is ordinary JSON. Home fetches each blob by id, verifies
+                // the digest, and only then acks.
+                let attachments = match app.db.attachments_for(&user.id, row.seq) {
+                    Ok(list) => list,
+                    Err(e) => {
+                        tracing::error!(error = %e, seq = row.seq, "listing attachments");
+                        return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                            .into_response();
+                    }
+                };
+                let attachments: Vec<_> = attachments
+                    .iter()
+                    .map(|a| {
+                        serde_json::json!({
+                            "id": a.id,
+                            "field": a.field,
+                            "filename": a.filename,
+                            "size": a.size,
+                            "sha256": a.sha256,
+                            "content_type": a.content_type,
+                        })
                     })
-                })
-                .collect();
+                    .collect();
+                records.push(serde_json::json!({
+                    "seq": row.seq,
+                    "type": row.type_id,
+                    "state": row.state,
+                    "created_at": row.created_at,
+                    // Passed through as text rather than as parsed JSON:
+                    // the server validated its shape on the way in, and
+                    // re-serialising a stranger's record here would be this
+                    // box deciding what home reads. Home parses and
+                    // re-validates against the schema it uploaded.
+                    "payload": row.payload,
+                    "attachments": attachments,
+                }));
+            }
             let next = rows.iter().map(|r| r.seq).max().unwrap_or(query.since);
             tracing::info!(count = records.len(), since = query.since, "drained");
             (
@@ -664,6 +688,53 @@ pub async fn ack(
         }
         Err(e) => {
             tracing::error!(error = %e, "acknowledging");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+/// `GET /v1/queue/attachments/{id}` — one uploaded file, exactly as it
+/// arrived.
+///
+/// `Scope::Drain`, like the queue itself: the blob belongs to the record.
+/// The lookup is user-scoped, so somebody else's id and a nonexistent one
+/// are the same 404 bytes. The contract on the other end: home fetches every
+/// blob a record names, verifies each digest against the drained metadata,
+/// and only then acks — the ack destroys the blobs along with the rows, so
+/// acking early is how a file is lost.
+pub async fn attachment(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match authorised(&app, &headers, Scope::Drain) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    let row = match app.db.attachment_get(&user.id, &id) {
+        Ok(Some(row)) => row,
+        Ok(None) => return Failure::json(StatusCode::NOT_FOUND, "not found").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "looking up an attachment");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    match std::fs::read(app.attachments.path(&user.id, &row.id)) {
+        Ok(bytes) => (
+            StatusCode::OK,
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            bytes,
+        )
+            .into_response(),
+        Err(e) => {
+            // A ledger row whose file is gone is an inconsistency on our
+            // side, never "not found": a 404 would teach home to skip this
+            // record forever, and the record is real.
+            tracing::error!(error = %e, id = %row.id, "an attachment row with no file");
             Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
         }
     }

@@ -411,6 +411,35 @@ fn a_file_arrives_only_after_verification_and_only_as_what_it_is() {
     // The token spent with the upload: the page is gone now.
     assert_eq!(server.get(server.gate, &location).status, 404);
 
+    // The blob route: drain-scoped, a pure read, and one 404 for someone
+    // else's id and a nonexistent one alike.
+    let blob_path = format!("/v1/queue/attachments/{}", rows[0].id);
+    for _ in 0..2 {
+        let fetched = Request::new("GET", &blob_path, server.gate.to_string())
+            .auth(&server.key(Scope::Drain))
+            .send(server.gate);
+        assert_eq!(fetched.status, 200);
+        assert_eq!(fetched.body.as_bytes(), b"%PDF-1.4 tiny");
+    }
+    let wrong_scope = Request::new("GET", &blob_path, server.gate.to_string())
+        .auth(&server.key(Scope::Publish))
+        .send(server.gate);
+    assert_ne!(wrong_scope.status, 200, "a publish key reads no queue blobs");
+    let invented = Request::new("GET", "/v1/queue/attachments/00000000", server.gate.to_string())
+        .auth(&server.key(Scope::Drain))
+        .send(server.gate);
+    assert_eq!(invented.status, 404);
+
+    // And the drain names the blob beside the record it belongs to.
+    let drained = Request::new("GET", "/v1/queue", server.gate.to_string())
+        .auth(&server.key(Scope::Drain))
+        .send(server.gate);
+    let atts = &drained.json()["records"][0]["attachments"];
+    assert_eq!(atts[0]["id"], rows[0].id.as_str());
+    assert_eq!(atts[0]["field"], "cv");
+    assert_eq!(atts[0]["filename"], "Ada CV.pdf");
+    assert_eq!(atts[0]["content_type"], "application/pdf");
+
     // And the ack takes the blob with the row.
     let ack = Request::new("POST", "/v1/queue/ack", server.gate.to_string())
         .auth(&server.key(Scope::Drain))

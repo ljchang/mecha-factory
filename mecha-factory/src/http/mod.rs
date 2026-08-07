@@ -113,6 +113,7 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/bundles/{id}/alias", post(v1::alias))
         .route("/v1/queue", get(v1::drain))
         .route("/v1/queue/ack", post(v1::ack))
+        .route("/v1/queue/attachments/{id}", get(v1::attachment))
         // Spending a pairing code. Unauthenticated — the code is the
         // credential — and rate-limited with the rest of the gate.
         .route("/v1/pair", post(v1::pair))
