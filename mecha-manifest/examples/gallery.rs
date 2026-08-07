@@ -95,6 +95,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // The contents, as data, for whatever frames these pages. The
+    // documentation site builds its theme picker from this rather than from a
+    // list of its own: a hardcoded list is how a third palette ships and
+    // appears nowhere, which is the property `BUILT_IN` exists to give.
+    fs::write(out.join("index.json"), contents_json(&entries)? + "\n")?;
     fs::write(out.join("index.html"), landing(&entries))?;
     fs::write(
         out.join("gallery.css"),
@@ -635,6 +640,39 @@ fn every_kind_is_shown(entries: &[Entry]) {
 // ---------------------------------------------------------------------------
 // The landing page
 // ---------------------------------------------------------------------------
+
+/// The gallery as a machine-readable index: which themes exist, which types,
+/// and which renderings each one has.
+///
+/// Emitted for the same reason the pages are generated rather than drawn. A
+/// documentation site that lists the themes itself is a second place the set
+/// of themes lives, and the second place is the one that goes stale — the
+/// third palette ships, appears in every generated page, and is offered by
+/// nothing.
+fn contents_json(entries: &[Entry]) -> Result<String, serde_json::Error> {
+    let themes: Vec<Value> = BUILT_IN_THEMES
+        .iter()
+        .map(|t| json!({ "name": t.name, "description": t.description }))
+        .collect();
+    let types: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            json!({
+                "id": entry.id,
+                "title": entry.request.title,
+                "blurb": entry.blurb,
+                "source": format!("source/{}.toml", entry.id),
+                "schema": format!("schema/{}.json", entry.id),
+                "renderings": entry
+                    .variants()
+                    .iter()
+                    .map(|v| json!({ "label": v.label(), "file": v.file_name(entry) }))
+                    .collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    serde_json::to_string_pretty(&json!({ "themes": themes, "types": types }))
+}
 
 /// A contents page, for opening the gallery from a file manager. The
 /// documentation site builds its own frame around these pages, so this one is

@@ -1,0 +1,153 @@
+{
+  "themes": [
+    {
+      "description": "The mecha palette. Dark-first, violet accent, amber for anything called out.",
+      "name": "nocturne"
+    },
+    {
+      "description": "Ink on paper. Light-first, restrained, no house colour.",
+      "name": "paper"
+    }
+  ],
+  "types": [
+    {
+      "blurb": "One field of every kind, plus acknowledgments.",
+      "id": "kinds",
+      "renderings": [
+        {
+          "file": "kinds.html",
+          "label": "the form"
+        },
+        {
+          "file": "kinds.errors.html",
+          "label": "rejected, with errors"
+        },
+        {
+          "file": "kinds.upload.html",
+          "label": "upload page"
+        }
+      ],
+      "schema": "schema/kinds.json",
+      "source": "source/kinds.toml",
+      "title": "Every field kind"
+    },
+    {
+      "blurb": "show_when, across the operators worth seeing.",
+      "id": "conditions",
+      "renderings": [
+        {
+          "file": "conditions.html",
+          "label": "the form"
+        }
+      ],
+      "schema": "schema/conditions.json",
+      "source": "source/conditions.toml",
+      "title": "Conditional fields"
+    },
+    {
+      "blurb": "A multi-step form, and one step that only sometimes exists.",
+      "id": "stepped",
+      "renderings": [
+        {
+          "file": "stepped.html",
+          "label": "the form"
+        },
+        {
+          "file": "stepped.step-who.html",
+          "label": "step: who"
+        },
+        {
+          "file": "stepped.step-what.html",
+          "label": "step: what"
+        },
+        {
+          "file": "stepped.step-travel.html",
+          "label": "step: travel"
+        }
+      ],
+      "schema": "schema/stepped.json",
+      "source": "source/stepped.toml",
+      "title": "A form in steps"
+    },
+    {
+      "blurb": "A shipped starter, rendered by the same path.",
+      "id": "lab-application",
+      "renderings": [
+        {
+          "file": "lab-application.html",
+          "label": "the form"
+        }
+      ],
+      "schema": "schema/lab-application.json",
+      "source": "source/lab-application.toml",
+      "title": "Apply to work in the lab"
+    },
+    {
+      "blurb": "A shipped starter, rendered by the same path.",
+      "id": "letter",
+      "renderings": [
+        {
+          "file": "letter.html",
+          "label": "the form"
+        },
+        {
+          "file": "letter.upload.html",
+          "label": "upload page"
+        },
+        {
+          "file": "letter.step-who.html",
+          "label": "step: who"
+        },
+        {
+          "file": "letter.step-what.html",
+          "label": "step: what"
+        },
+        {
+          "file": "letter.step-materials.html",
+          "label": "step: materials"
+        }
+      ],
+      "schema": "schema/letter.json",
+      "source": "source/letter.toml",
+      "title": "Request a letter of recommendation"
+    },
+    {
+      "blurb": "A shipped starter, rendered by the same path.",
+      "id": "meeting",
+      "renderings": [
+        {
+          "file": "meeting.html",
+          "label": "the form"
+        }
+      ],
+      "schema": "schema/meeting.json",
+      "source": "source/meeting.toml",
+      "title": "Request a meeting"
+    },
+    {
+      "blurb": "A shipped starter, rendered by the same path.",
+      "id": "speaking",
+      "renderings": [
+        {
+          "file": "speaking.html",
+          "label": "the form"
+        },
+        {
+          "file": "speaking.step-event.html",
+          "label": "step: event"
+        },
+        {
+          "file": "speaking.step-travel.html",
+          "label": "step: travel"
+        },
+        {
+          "file": "speaking.step-anything-else.html",
+          "label": "step: anything-else"
+        }
+      ],
+      "schema": "schema/speaking.json",
+      "source": "source/speaking.toml",
+      "title": "Invite a talk"
+    }
+  ]
+}
