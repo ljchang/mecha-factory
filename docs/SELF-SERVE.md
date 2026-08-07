@@ -79,6 +79,55 @@ than `release.key`. Which is the right shape: releasing is one narrow
 capability with two front doors, rather than something implied by holding any
 write key.
 
+### What "any MCP client" commits us to (reviewed 2026-08-07)
+
+Claude Code driving this server is not a hypothetical, so the plan was
+re-read against a client that has **no outbox, no trifecta interlock, and no
+frontdoor quarantine** — mecha's three safety layers, none of which travel
+with the MCP protocol. The architecture already holds, for reasons worth
+naming so nobody re-derives them: signup and account management are
+browser-and-email and involve no client at all; authentication lives in this
+server's key files, so the agent never sees a credential whoever it is; and
+the release gate lives on the credential scope, which is exactly the decision
+above. Three consequences are load-bearing for the clientless-safety story
+and should be treated as constraints, not defaults:
+
+- **`connect` mints publish and drain. Never release.** A paired agent
+  machine's worst case must stay "immutable versions nobody can read". The
+  code today will use a `release.key` from the MCP path when one is present
+  (`remote::mirror_alias` — under mecha that call is outbox-routed; under
+  Claude Code the only gate is the client's own tool prompt), so keeping
+  release keys off agent machines is *policy the pairing flow should state
+  out loud* — and `connect` should warn when it finds one already installed.
+- **The pairing confirmation cannot assume a human reads stdin.** An agent
+  can be the one running `connect`, and `echo y |` defeats a y/N prompt
+  without anybody seeing the handle named. The fix is the plan's own
+  principle made structural: the confirmation is **typing the handle**, not
+  `y` — interactively, the user types the handle they expect; non-TTY,
+  `--handle <expected>` is required. Mallory's code pairs to `mallory`, the
+  asserted handle does not match, and the connect fails with no judgment
+  call anywhere. (This also gives the agent-driven path its safe shape: the
+  user tells their agent "connect this machine to alice", and the assertion
+  travels with the command.)
+- **The queue's prose never crosses the MCP surface.** `drain` is
+  deliberately CLI-only today; the MCP tools are `bundle_*` and must stay
+  that way. mecha drains into `~/.mecha/requests/` where the frontdoor's
+  extractor quarantines free text before any run with tools sees it — a
+  Claude Code session has no such layer, so an MCP drain tool would hand a
+  stranger's prose straight to a privileged context. If another client ever
+  needs queue access over MCP, it gets the typed, non-prose fields
+  (`Record::for_privileged_run`'s shape) and nothing else; the prose stays
+  with clients that own a quarantine.
+
+One distribution note that gets more urgent with a second client:
+`cargo install mecha-factory-publish` (the crates.io split under "What we are
+not building") is how a Claude Code user arrives, since they have no reason
+to clone this repository. And one conscious limit, recorded rather than
+discovered: the key files live at fixed paths (`~/.mecha/factory/`), so a
+machine pairs to **one** handle at a time — fine for the invite-only phase,
+and the thing to revisit if one person ever operates several handles from
+one machine.
+
 ## Two interfaces, and they must not be one
 
 - **Tenant**: settings, the artifacts they own, making one public, connected
@@ -409,7 +458,7 @@ zone triggers neither.
      second line of defence.
 3. **Signup**: invite → magic link → handle claim. Reuses `intake.rs`.
 4. **Pairing**: the code, `factory-publish connect`, and the confirmation that
-   names the handle.
+   names the handle — typed back, not answered `y`, per the review above.
 5. **The tenant surface**: artifacts owned, make public, connected machines,
    `factory-publish disconnect`.
 6. **The operator surface**, which is the last thing still living on an SSH
