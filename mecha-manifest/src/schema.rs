@@ -138,6 +138,23 @@ fn field_schema(field: &Field) -> Value {
             s
         }
         FieldKind::Bool => json!({ "type": "boolean" }),
+        // The value is the box's measurements about the bytes, not the bytes
+        // — see `FileMeta` in validate.rs, which this mirrors.
+        FieldKind::File { max_bytes, accept } => json!({
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["filename", "size", "sha256", "content_type"],
+            "properties": {
+                "filename": { "type": "string", "maxLength": 255 },
+                "size": { "type": "integer", "minimum": 1, "maximum": max_bytes },
+                "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+                "content_type": {
+                    "type": "string",
+                    "enum": accept.iter().map(|t| t.mime()).collect::<Vec<_>>(),
+                },
+                "attachment_id": { "type": "string" },
+            },
+        }),
     };
 
     schema["title"] = json!(field.label);

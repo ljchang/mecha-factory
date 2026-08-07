@@ -73,10 +73,13 @@ pub use condition::{Condition, Operator};
 pub use csp::{gate_headers, Header};
 pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::FormOptions;
-pub use media::content_type;
-pub use request::{valid_id, Acknowledgment, Field, FieldKind, RequestType, Step};
+pub use media::{content_type, sniff, FileType};
+pub use request::{
+    valid_id, Acknowledgment, Field, FieldKind, RequestType, Step, MAX_FILE_BYTES_PER_FIELD,
+    MAX_FILE_BYTES_PER_TYPE,
+};
 pub use theme::{Palette, Theme, BUILT_IN as BUILT_IN_THEMES};
-pub use validate::{Submission, ValidationError};
+pub use validate::{FileMeta, Phase, Submission, ValidationError};
 
 /// Anything wrong with a manifest itself, as opposed to with a submission
 /// against it. Separate types on purpose: a bad manifest is our mistake and

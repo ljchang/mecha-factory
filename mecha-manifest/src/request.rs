@@ -273,6 +273,38 @@ pub enum FieldKind {
         max_choices: Option<usize>,
     },
     Bool,
+    /// An uploaded file — a CV on a letter request, an image on anything.
+    ///
+    /// The *value* of a file field is never the bytes: it is the typed
+    /// metadata object the box built after sniffing them ([`FileMeta`]),
+    /// validated by `coerce` like any other value. The bytes travel their own
+    /// path (blob store, drain fetch, a sibling directory at home) and never
+    /// enter a value, a prompt, or an agent workspace. The stranger's
+    /// filename rides inside the object until [`Submission::take_attachments`]
+    /// lifts it out — it is prose-class, and the field itself deliberately is
+    /// **not** free text, so the quarantine boundary is that function rather
+    /// than a string's position in a map.
+    ///
+    /// Uploads happen *after* email verification, so [`validate`] at
+    /// [`Phase::Submit`] refuses a file value outright and only
+    /// [`Phase::Complete`] requires one.
+    ///
+    /// [`FileMeta`]: crate::FileMeta
+    /// [`Submission::take_attachments`]: crate::Submission::take_attachments
+    /// [`validate`]: RequestType::validate_at
+    /// [`Phase::Submit`]: crate::Phase::Submit
+    /// [`Phase::Complete`]: crate::Phase::Complete
+    File {
+        /// Cap in bytes. Defaulted, capped by [`MAX_FILE_BYTES_PER_FIELD`],
+        /// and summed across the type against [`MAX_FILE_BYTES_PER_TYPE`] —
+        /// an unauthenticated upload with no ceiling is an unbounded write,
+        /// the same rule as `max_length` wearing a bigger unit.
+        #[serde(default = "default_file_cap")]
+        max_bytes: u64,
+        /// What the field takes, as sniffed magic — never as claimed mime or
+        /// filename extension. Must be non-empty.
+        accept: Vec<crate::media::FileType>,
+    },
 }
 
 fn default_email_cap() -> usize {
@@ -282,6 +314,17 @@ fn default_email_cap() -> usize {
 fn default_url_cap() -> usize {
     2048
 }
+
+fn default_file_cap() -> u64 {
+    8 * 1024 * 1024
+}
+
+/// The most one file field may allow. A manifest is tenant-supplied, so the
+/// ceiling is ours, not theirs — the box's disk is shared.
+pub const MAX_FILE_BYTES_PER_FIELD: u64 = 16 * 1024 * 1024;
+
+/// The most all of a type's file fields may allow together.
+pub const MAX_FILE_BYTES_PER_TYPE: u64 = 32 * 1024 * 1024;
 
 /// One option of a `select`. The value is ours; only the label is prose, and
 /// the label is ours too — a stranger picks, they do not supply.
@@ -407,6 +450,21 @@ impl RequestType {
                         }
                     }
                 }
+                FieldKind::File { max_bytes, accept } => {
+                    if accept.is_empty() {
+                        return Err(ManifestError::invalid(format!(
+                            "field `{}` is a file field accepting nothing",
+                            field.name
+                        )));
+                    }
+                    if *max_bytes == 0 || *max_bytes > MAX_FILE_BYTES_PER_FIELD {
+                        return Err(ManifestError::invalid(format!(
+                            "field `{}` allows {max_bytes} bytes; a file field \
+                             takes between 1 and {MAX_FILE_BYTES_PER_FIELD}",
+                            field.name
+                        )));
+                    }
+                }
                 _ => {}
             }
             if let Some(condition) = &field.show_when {
@@ -456,8 +514,44 @@ impl RequestType {
                 )));
             }
         }
+        // The per-type ceiling: each field's cap was checked above, but caps
+        // are what one upload may cost and the budget is what one *request*
+        // may cost, and only the second bounds the box's disk.
+        let budget = self.attachment_budget();
+        if budget > MAX_FILE_BYTES_PER_TYPE {
+            return Err(ManifestError::invalid(format!(
+                "`{}` allows {budget} attachment bytes across its file fields; \
+                 the ceiling per request type is {MAX_FILE_BYTES_PER_TYPE}",
+                self.id
+            )));
+        }
         check_references(self)?;
         Ok(())
+    }
+
+    /// The most attachment bytes one submission of this type may carry — the
+    /// sum of every file field's cap. What the box derives its upload route
+    /// limit from, so the number lives here where both ends can compute it.
+    pub fn attachment_budget(&self) -> u64 {
+        self.fields
+            .iter()
+            .map(|f| match &f.kind {
+                FieldKind::File { max_bytes, .. } => *max_bytes,
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// The file fields, in declared order.
+    pub fn file_fields(&self) -> impl Iterator<Item = &Field> {
+        self.fields
+            .iter()
+            .filter(|f| matches!(f.kind, FieldKind::File { .. }))
+    }
+
+    /// Whether a submission of this type goes through the upload step at all.
+    pub fn has_file_fields(&self) -> bool {
+        self.file_fields().next().is_some()
     }
 
     /// Whether this type can be served as a form at all.
@@ -548,6 +642,7 @@ fn allowed_keys(kind: &str) -> Option<&'static [&'static str]> {
         "select" => &["options"],
         "multi_select" => &["options", "max_choices"],
         "bool" => &[],
+        "file" => &["max_bytes", "accept"],
         _ => return None,
     })
 }
@@ -1082,6 +1177,141 @@ min="2026-13-01"
         }
         for bad in ["2026-1-1", "26-01-01", "2026-00-01", "2026-01-32", "", "x"] {
             assert!(!is_iso_date(bad), "{bad}");
+        }
+    }
+
+    /// Everything a manifest can get wrong about a file field, plus the two
+    /// derived properties: no length cap (bytes are not characters) and no
+    /// free-text flag (the value is our measurements, not their prose).
+    #[test]
+    fn file_fields_are_checked_at_load() {
+        let ok = RequestType::from_toml(
+            r#"
+id = "t"
+version = 1
+title = "t"
+[[fields]]
+name = "cv"
+label = "CV"
+kind = "file"
+accept = ["pdf", "jpg"]
+"#,
+        )
+        .unwrap();
+        let field = ok.field("cv").unwrap();
+        assert!(!field.is_free_text());
+        assert_eq!(field.max_length(), None);
+        assert_eq!(ok.attachment_budget(), 8 * 1024 * 1024, "the default cap");
+        assert!(ok.has_file_fields());
+
+        let cases = [
+            (
+                "empty accept",
+                r#"
+id="t"
+version=1
+title="t"
+[[fields]]
+name="cv"
+label="CV"
+kind="file"
+accept=[]
+"#,
+                "accepting nothing",
+            ),
+            (
+                "over the per-field ceiling",
+                r#"
+id="t"
+version=1
+title="t"
+[[fields]]
+name="cv"
+label="CV"
+kind="file"
+accept=["pdf"]
+max_bytes=999999999
+"#,
+                "between 1 and",
+            ),
+            (
+                "zero bytes",
+                r#"
+id="t"
+version=1
+title="t"
+[[fields]]
+name="cv"
+label="CV"
+kind="file"
+accept=["pdf"]
+max_bytes=0
+"#,
+                "between 1 and",
+            ),
+            (
+                "over the per-type budget",
+                r#"
+id="t"
+version=1
+title="t"
+[[fields]]
+name="a"
+label="A"
+kind="file"
+accept=["pdf"]
+max_bytes=16777216
+[[fields]]
+name="b"
+label="B"
+kind="file"
+accept=["pdf"]
+max_bytes=16777216
+[[fields]]
+name="c"
+label="C"
+kind="file"
+accept=["pdf"]
+max_bytes=1
+"#,
+                "ceiling per request type",
+            ),
+            (
+                "a key a file field does not take",
+                r#"
+id="t"
+version=1
+title="t"
+[[fields]]
+name="cv"
+label="CV"
+kind="file"
+accept=["pdf"]
+max_length=10
+"#,
+                "does not take",
+            ),
+            (
+                "a kind nobody reasoned about",
+                r#"
+id="t"
+version=1
+title="t"
+[[fields]]
+name="cv"
+label="CV"
+kind="file"
+accept=["docx"]
+"#,
+                "unknown variant",
+            ),
+        ];
+        for (what, toml, expected) in cases {
+            let err = RequestType::from_toml(toml).unwrap_err().to_string();
+            assert!(
+                err.contains(expected),
+                "{what}: expected {expected:?} in {err:?}"
+            );
         }
     }
 }

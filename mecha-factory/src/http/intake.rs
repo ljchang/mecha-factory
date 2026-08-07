@@ -147,6 +147,9 @@ fn render_form(
         values,
         errors: errors.to_vec(),
         step: None,
+        // The public form never carries a file input — uploads happen after
+        // verification, on their own page (see the upload flow).
+        file_inputs: false,
     });
     let status = if errors.is_empty() {
         StatusCode::OK

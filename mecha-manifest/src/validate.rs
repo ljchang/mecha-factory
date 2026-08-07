@@ -28,8 +28,47 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::media::FileType;
 use crate::request::is_iso_date;
 use crate::{Field, FieldKind, RequestType};
+
+/// Which moment a submission is being validated at.
+///
+/// Files are uploaded only after the requester verifies their email — the
+/// public submission form cannot carry them — so the one validator runs at
+/// two named moments rather than growing a second, slightly different copy
+/// at one end of the wire. The strict phase is the default everywhere a
+/// phase is not named: home re-validates drained records at `Complete`, and
+/// a drained record always carries finished values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Phase {
+    /// The form POST. A file value here is refused outright — nothing
+    /// unverified gets to hand the box bytes, or even the claim of bytes —
+    /// and a required file field is not yet due.
+    Submit,
+    /// Everything after upload: the box's completion transaction, the drain,
+    /// home's re-validation. File fields are ordinary required fields
+    /// carrying typed metadata.
+    #[default]
+    Complete,
+}
+
+/// The typed value of a file field: what the box measured about the bytes,
+/// never the bytes. `content_type` is derived from sniffed magic, so it is
+/// our claim; `filename` is the stranger's and is lifted out of the values by
+/// [`Submission::take_attachments`] before anything privileged reads them.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileMeta {
+    pub filename: String,
+    pub size: u64,
+    pub sha256: String,
+    pub content_type: String,
+    /// The box's minted blob id. Absent once the bytes live beside the
+    /// record at home rather than in the box's store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_id: Option<String>,
+}
 
 /// One thing wrong with a submission, addressed to the field it is about so a
 /// re-rendered form can put it beside the input.
@@ -86,14 +125,53 @@ impl Submission {
             })
             .collect()
     }
+
+    /// Lift every attachment's metadata out, removing the stranger's
+    /// `filename` from the values as it goes.
+    ///
+    /// This is the quarantine boundary for filenames, and it is a function on
+    /// purpose: the caller that wants filename-free typed values cannot get
+    /// them any other way, the same shape as `Record::for_privileged_run`.
+    /// A file field is not free text — its value is our measurements — but
+    /// the filename inside it is a string a stranger typed, so it travels
+    /// with the returned metas (for a sidecar, for a human) and never stays
+    /// behind in `values`.
+    pub fn take_attachments(&mut self, request_type: &RequestType) -> Vec<(String, FileMeta)> {
+        let mut out = Vec::new();
+        for field in request_type.file_fields() {
+            let Some(value) = self.values.get_mut(&field.name) else {
+                continue;
+            };
+            let Ok(meta) = serde_json::from_value::<FileMeta>(value.clone()) else {
+                // A validated submission cannot hold a malformed file value;
+                // an unvalidated one is not this function's business.
+                continue;
+            };
+            if let Some(object) = value.as_object_mut() {
+                object.remove("filename");
+            }
+            out.push((field.name.clone(), meta));
+        }
+        out
+    }
 }
 
 impl RequestType {
-    /// Validate a raw submission — a form POST body or a drained record.
+    /// Validate a raw submission — a form POST body or a drained record — at
+    /// the strict [`Phase::Complete`]. See [`RequestType::validate_at`].
+    pub fn validate(&self, raw: &Map<String, Value>) -> Result<Submission, Vec<ValidationError>> {
+        self.validate_at(raw, Phase::Complete)
+    }
+
+    /// Validate a raw submission at a named moment.
     ///
     /// Every error is collected. Values are coerced to their declared types, so
     /// what comes out is what everything downstream reads.
-    pub fn validate(&self, raw: &Map<String, Value>) -> Result<Submission, Vec<ValidationError>> {
+    pub fn validate_at(
+        &self,
+        raw: &Map<String, Value>,
+        phase: Phase,
+    ) -> Result<Submission, Vec<ValidationError>> {
         let mut errors = Vec::new();
         let mut values = Map::new();
 
@@ -104,6 +182,18 @@ impl RequestType {
         let visible_names: Vec<&str> = visible.iter().map(|f| f.name.as_str()).collect();
 
         for field in &visible {
+            // Files are not due at submit time, and are not *accepted* at
+            // submit time either: a urlencoded string aimed at a file field is
+            // someone probing, not someone attaching.
+            if phase == Phase::Submit && matches!(field.kind, FieldKind::File { .. }) {
+                if raw.contains_key(&field.name) {
+                    errors.push(ValidationError::new(
+                        &field.name,
+                        "files are uploaded after your email is verified",
+                    ));
+                }
+                continue;
+            }
             match raw.get(&field.name) {
                 None => {
                     if field.required {
@@ -332,6 +422,43 @@ fn coerce(field: &Field, value: &Value) -> Result<Value, String> {
             }
             _ => Err("this has to be yes or no".into()),
         },
+        FieldKind::File { max_bytes, accept } => {
+            // The value is the box's measurements, shaped as FileMeta. A
+            // string here is "this has to be a file" — a urlencoded POST
+            // cannot fake an object, so the error is for a probe, not a typo.
+            let meta: FileMeta = serde_json::from_value(value.clone())
+                .map_err(|_| "this has to be an uploaded file")?;
+            if meta.size == 0 {
+                return Err("this file is empty".into());
+            }
+            if meta.size > *max_bytes {
+                return Err(format!(
+                    "this file is {} bytes; the limit is {max_bytes}",
+                    meta.size
+                ));
+            }
+            let hex = meta.sha256.strip_prefix("sha256:").unwrap_or("");
+            if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+                return Err("this file's digest is malformed".into());
+            }
+            let sniffed = FileType::from_mime(&meta.content_type)
+                .ok_or("this file is not a kind this field takes")?;
+            if !accept.contains(&sniffed) {
+                let offered: Vec<&str> = accept.iter().map(|t| t.extension()).collect();
+                return Err(format!("this field takes: {}", offered.join(", ")));
+            }
+            if meta.filename.trim().is_empty() {
+                return Err("this file has no name".into());
+            }
+            capped(&meta.filename, 255)?;
+            if meta.filename.contains(['/', '\\', '\0']) {
+                return Err("this file's name contains a path separator".into());
+            }
+            // Re-serialise rather than echoing: deny_unknown_fields already
+            // refused stray keys, and this fixes the key order so two ends
+            // serialising the same meta produce the same bytes.
+            Ok(serde_json::to_value(&meta).expect("FileMeta serialises"))
+        }
     }
 }
 
@@ -625,5 +752,131 @@ max_length = 5
         ] {
             assert!(!plausible_email(bad), "{bad}");
         }
+    }
+
+    /// A minimal type with a required file field, for the phase and coercion
+    /// tests below.
+    fn with_cv() -> RequestType {
+        RequestType::from_toml(
+            r#"
+id = "letterish"
+version = 1
+title = "A letter"
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "cv"
+label = "Your CV"
+kind = "file"
+accept = ["pdf"]
+max_bytes = 1048576
+required = true
+"#,
+        )
+        .unwrap()
+    }
+
+    fn cv_meta() -> Value {
+        json!({
+            "filename": "cv.pdf",
+            "size": 20_000,
+            "sha256": format!("sha256:{}", "ab".repeat(32)),
+            "content_type": "application/pdf",
+        })
+    }
+
+    /// At submit time a file field is neither due nor accepted: a required
+    /// one missing is fine, and a value aimed at one is refused — a
+    /// urlencoded probe, not an attachment.
+    #[test]
+    fn a_file_field_is_refused_at_submit_and_required_at_complete() {
+        let t = with_cv();
+        let mut raw = Map::new();
+        raw.insert("requester_email".into(), json!("a@b.co"));
+
+        assert!(t.validate_at(&raw, Phase::Submit).is_ok());
+
+        let errors = t.validate_at(&raw, Phase::Complete).unwrap_err();
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].field, "cv");
+        assert!(errors[0].message.contains("required"));
+
+        raw.insert("cv".into(), json!("../../etc/passwd"));
+        let errors = t.validate_at(&raw, Phase::Submit).unwrap_err();
+        assert!(errors[0].message.contains("after your email is verified"));
+
+        // The unphased spelling is the strict one, so the end that forgets to
+        // name a phase gets Complete, never Submit.
+        raw.remove("cv");
+        assert!(t.validate(&raw).is_err());
+    }
+
+    #[test]
+    fn a_file_value_is_measurements_and_every_lie_in_them_is_refused() {
+        let t = with_cv();
+        let mut raw = Map::new();
+        raw.insert("requester_email".into(), json!("a@b.co"));
+        raw.insert("cv".into(), cv_meta());
+        let submission = t.validate(&raw).expect("a well-formed meta passes");
+        assert_eq!(submission.values["cv"]["size"], json!(20_000));
+
+        let refused = [
+            ("size", json!(0), "empty"),
+            ("size", json!(2_000_000), "limit"),
+            ("sha256", json!("sha256:short"), "digest"),
+            ("sha256", json!("ab".repeat(32)), "digest"), // no prefix
+            ("content_type", json!("image/png"), "takes: pdf"),
+            ("content_type", json!("application/zip"), "not a kind"),
+            ("filename", json!(""), "no name"),
+            ("filename", json!("a/b.pdf"), "path separator"),
+        ];
+        for (key, bad, expected) in refused {
+            let mut m = cv_meta();
+            m[key] = bad;
+            let mut raw = raw.clone();
+            raw.insert("cv".into(), m);
+            let errors = t.validate(&raw).unwrap_err();
+            assert!(
+                errors[0].message.contains(expected),
+                "{key}: expected `{expected}` in `{}`",
+                errors[0].message
+            );
+        }
+
+        // A stray key is refused too — deny_unknown_fields, so a smuggled
+        // field cannot ride inside a file object.
+        let mut m = cv_meta();
+        m["path"] = json!("/etc/passwd");
+        raw.insert("cv".into(), m);
+        assert!(t.validate(&raw).is_err());
+    }
+
+    /// The filename is a stranger's string, so the only way to typed values
+    /// is through the function that removes it.
+    #[test]
+    fn take_attachments_lifts_the_filename_out() {
+        let t = with_cv();
+        let mut raw = Map::new();
+        raw.insert("requester_email".into(), json!("a@b.co"));
+        raw.insert("cv".into(), cv_meta());
+        let mut submission = t.validate(&raw).unwrap();
+
+        let attachments = submission.take_attachments(&t);
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].0, "cv");
+        assert_eq!(attachments[0].1.filename, "cv.pdf");
+
+        let value = &submission.values["cv"];
+        assert!(value.get("filename").is_none(), "lifted out, not copied");
+        assert_eq!(value["sha256"], cv_meta()["sha256"], "the rest stays");
+
+        // And a file field never enters the free-text sweep: its value is an
+        // object, and the field kind is not prose.
+        assert!(submission.free_text(&t).iter().all(|(name, _)| *name != "cv"));
     }
 }

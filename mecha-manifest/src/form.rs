@@ -67,6 +67,13 @@ pub struct FormOptions {
     /// values and adds no rules, so this changes how a form looks and never
     /// how it behaves. See [`crate::theme`].
     pub theme: crate::Theme,
+    /// Whether file fields render as real inputs.
+    ///
+    /// `false` — the public submission form — renders a file field as a note
+    /// saying the upload comes after email verification, and the `<form>`
+    /// stays urlencoded. `true` is the post-verification upload page, the one
+    /// place a file input exists, and the one place `enctype` is emitted.
+    pub file_inputs: bool,
 }
 
 impl Default for FormOptions {
@@ -79,6 +86,7 @@ impl Default for FormOptions {
             step: None,
             assets: String::new(),
             theme: crate::theme::NOCTURNE,
+            file_inputs: false,
         }
     }
 }
@@ -143,8 +151,17 @@ impl RequestType {
         // it is a boolean attribute, so *any* value means present, and writing
         // it out to say "please do validate" turns the entire HTML5 constraint
         // layer off. Found by opening the page rather than by reading the code.
+        //
+        // `enctype` only on the upload page: the public submission form has no
+        // file inputs, so emitting it there would change every existing form's
+        // bytes to say something false about what it carries.
+        let enctype = if options.file_inputs && self.has_file_fields() {
+            " enctype=\"multipart/form-data\""
+        } else {
+            ""
+        };
         body.push_str(&format!(
-            "<form method=\"post\" action=\"{}\">\n",
+            "<form method=\"post\" action=\"{}\"{enctype}>\n",
             escape_text(&options.action)
         ));
         if let Some(token) = &options.token {
@@ -350,6 +367,38 @@ impl RequestType {
                     "<input type=\"checkbox\" id=\"{name}\" name=\"{name}\" \
                      value=\"true\"{checked}{invalid}{described_by}>"
                 )
+            }
+            // Its own arm on purpose: the catch-all below ends in
+            // `unreachable!`, and a kind that is not a scalar input must never
+            // be allowed to fall toward it.
+            FieldKind::File { max_bytes, accept } => {
+                let kinds: Vec<&str> = accept.iter().map(|t| t.extension()).collect();
+                let megabytes = max_bytes.div_ceil(1024 * 1024);
+                if options.file_inputs {
+                    let tokens: Vec<&str> = accept
+                        .iter()
+                        .flat_map(|t| t.accept_tokens().iter().copied())
+                        .collect();
+                    format!(
+                        "<input type=\"file\" id=\"{name}\" name=\"{name}\" \
+                         accept=\"{}\"{required}{invalid}{described_by}>\n\
+                         <p class=\"file-limits\">{} — up to {megabytes} MB</p>",
+                        escape_text(&tokens.join(",")),
+                        escape_text(&kinds.join(", "))
+                    )
+                } else {
+                    // The submission form carries no file input at all — a
+                    // note in the control's place, so the requester knows the
+                    // ask is coming without being offered a control that
+                    // would not be accepted. (`label for` pointing at a <p>
+                    // is inert, which is fine: there is nothing to focus.)
+                    format!(
+                        "<p class=\"file-note\" id=\"{name}\">You'll be asked to attach \
+                         this ({}, up to {megabytes} MB) after verifying your email \
+                         address.</p>",
+                        escape_text(&kinds.join(", "))
+                    )
+                }
             }
             other => {
                 let (input_type, attributes) = match other {
@@ -673,6 +722,48 @@ input[type=number], input[type=tel], select, textarea {
 textarea { min-height: 7rem; resize: vertical; line-height: 1.6; }
 
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: .7; }
+
+input[type=file] {
+  display: block;
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+}
+
+input[type=file]::file-selector-button {
+  font: inherit;
+  font-size: 0.875rem;
+  color: var(--text);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.375rem 0.75rem;
+  margin-right: 0.75rem;
+  cursor: pointer;
+}
+
+.file-limits {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  margin: 0.375rem 0 0;
+}
+
+/* The submission form's stand-in for a file input: the upload comes after
+   verification, and this is where the form says so. */
+.file-note {
+  color: var(--muted);
+  font-size: 0.875rem;
+  padding: 0.625rem 0.75rem;
+  background: var(--surface);
+  border: 1px dashed var(--line);
+  border-radius: var(--radius);
+  margin: 0;
+}
 
 /* The chevron is drawn here rather than left to the platform, because a
    native select arrow is the one control that makes a styled form look
@@ -1122,5 +1213,66 @@ fields = ["b"]
         let html = t.form(&options).html;
         assert!(html.contains(r#"id="step-two""#));
         assert!(!html.contains(r#"id="step-one""#));
+    }
+
+    /// A file field renders as a note on the submission form and as an input
+    /// only on the upload page — and `enctype` follows the input, so the
+    /// public form's bytes never claim to carry what they cannot.
+    #[test]
+    fn a_file_field_is_a_note_until_the_upload_page() {
+        let t = RequestType::from_toml(
+            r#"
+id = "t"
+version = 1
+title = "t"
+[[fields]]
+name = "cv"
+label = "Your CV"
+kind = "file"
+accept = ["pdf", "jpg"]
+required = true
+"#,
+        )
+        .unwrap();
+
+        let submission = t.form(&FormOptions::default()).html;
+        assert!(submission.contains("file-note"));
+        assert!(submission.contains("after verifying your email"));
+        assert!(!submission.contains(r#"type="file""#));
+        assert!(!submission.contains("enctype"));
+
+        let upload = t
+            .form(&FormOptions {
+                file_inputs: true,
+                ..FormOptions::default()
+            })
+            .html;
+        assert!(upload.contains(r#"type="file""#));
+        assert!(upload.contains(r#"enctype="multipart/form-data""#));
+        assert!(upload.contains(r#"accept=".pdf,application/pdf,.jpg,.jpeg,image/jpeg""#));
+        assert!(upload.contains("up to 8 MB"));
+
+        // A type with no file fields is byte-identical whichever mode renders
+        // it: `file_inputs` must change nothing it does not own.
+        let plain = RequestType::from_toml(
+            r#"
+id = "p"
+version = 1
+title = "p"
+[[fields]]
+name = "email"
+label = "Email"
+kind = "email"
+"#,
+        )
+        .unwrap();
+        let a = plain.form(&FormOptions::default()).html;
+        let b = plain
+            .form(&FormOptions {
+                file_inputs: true,
+                ..FormOptions::default()
+            })
+            .html;
+        assert_eq!(a, b);
     }
 }
