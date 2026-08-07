@@ -148,6 +148,18 @@ pub fn router(app: Shared) -> Router {
         )
         .route("/f/{handle}/{type_id}/{name}", get(intake::asset))
         .route("/f/{handle}/{type_id}/c/{token}", get(intake::confirm))
+        // The upload step, for types with file fields. The only multipart
+        // route in the binary, and the second route to raise the 2 MB body
+        // default — to the configured submission ceiling, with the type's own
+        // attachment budget enforced beneath it in the handler.
+        .route(
+            "/f/{handle}/{type_id}/u/{token}",
+            get(intake::upload_page)
+                .post(intake::upload)
+                .layer(axum::extract::DefaultBodyLimit::max(
+                    app.config.limits.max_submission_bytes as usize,
+                )),
+        )
         // Claiming a handle from an invite. Gate-only like the forms, and for
         // the same reason: server-rendered HTML that executes nothing.
         .route("/signup/{token}", get(signup::form).post(signup::submit))

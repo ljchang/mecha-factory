@@ -81,6 +81,23 @@ impl Store {
         }
     }
 
+    /// Bytes still free on the filesystem the store writes to.
+    ///
+    /// What the upload handler compares against `min_free_bytes`: a refusal
+    /// while there is still headroom beats the whole box discovering a full
+    /// disk. The one libc call in the crate.
+    pub fn free_bytes(&self) -> Result<u64> {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(self.root.as_os_str().as_bytes())
+            .context("store path holds a NUL")?;
+        let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::statvfs(path.as_ptr(), &mut stat) };
+        anyhow::ensure!(rc == 0, "statvfs on {} failed", self.root.display());
+        // f_bavail: what an unprivileged writer can actually use, which is
+        // the honest number — root's reserve is not ours to spend.
+        Ok(stat.f_bavail as u64 * stat.f_frsize as u64)
+    }
+
     /// Remove files no ledger row claims, older than the grace window.
     ///
     /// This is what lets every other file deletion be best-effort-after-

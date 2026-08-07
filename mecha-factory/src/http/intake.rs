@@ -238,7 +238,9 @@ pub async fn submit(
     };
 
     let raw = form_values(&body);
-    let submission = match request_type.validate(&raw) {
+    // Phase::Submit: file fields are neither due nor accepted here — the
+    // upload step comes after the email is verified.
+    let submission = match request_type.validate_at(&raw, mecha_manifest::Phase::Submit) {
         Ok(submission) => submission,
         // Their own form back, with the errors on it. This is the only thing
         // the response varies on, deliberately.
@@ -365,48 +367,96 @@ pub async fn confirm(
     // Looked up by the hash of what was presented, so the stored value is a
     // verifier rather than a link somebody could replay off the disk.
     //
-    // Straight to the queue for now, even for types with file fields: the
-    // upload page is the next stage of this feature, and routing rows to
-    // `awaiting_upload` before it exists would strand them.
+    // A type with file fields goes through the upload step instead of
+    // straight to the queue. The upload token is minted here — the verify
+    // token is spent by this very click, and reusing it would make the link
+    // in the email replayable.
     let hash = crate::intake::hash_token(&token);
-    let verified = match app.db.submission_verify(
-        &user.id,
-        &hash,
-        &crate::db::now(),
-        crate::db::VerifyNext::Queued,
-    ) {
+    let upload_token = request_type
+        .has_file_fields()
+        .then(crate::intake::mint_token);
+    let next = match &upload_token {
+        None => crate::db::VerifyNext::Queued,
+        Some(t) => crate::db::VerifyNext::AwaitingUpload {
+            upload_hash: crate::intake::hash_token(t),
+            upload_expires: crate::db::hours_from_now(UPLOAD_EXPIRES_HOURS),
+        },
+    };
+    let verified = match app.db.submission_verify(&user.id, &hash, &crate::db::now(), next) {
         Ok(Some(row)) => row,
         Ok(None) => {
             // One page for expired, already-used, and never-existed. Which of
             // the three it was is not a stranger's business, and a "this link
             // was already used" would confirm to whoever forwarded it that
             // somebody clicked.
-            return page(
-                StatusCode::NOT_FOUND,
-                shell(
-                    "That link has expired",
-                    "<h1>That link has expired</h1><p>Confirmation links work \
-                     once and for a limited time. Submitting the form again \
-                     will send a new one.</p>",
-                    &format!("/f/{handle}/{type_id}/"),
-                ),
-            );
+            return expired_link(&handle, &type_id);
         }
         Err(e) => {
             tracing::error!(error = %e, "verifying a submission");
             return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     };
-    tracing::info!(handle = %user.handle, %type_id, seq = verified.seq, "verified and queued");
+    tracing::info!(handle = %user.handle, %type_id, seq = verified.seq, "verified");
 
     let values: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&verified.payload).unwrap_or_default();
+
+    if let Some(token) = upload_token {
+        // Only file fields *visible under the submitted values* are asked
+        // for: a conditional file field whose condition failed at submit time
+        // is not a thing this requester was ever offered. If none are
+        // visible, the row completes immediately through the same transaction
+        // an upload would use — one path to `queued`, not two.
+        let any_visible = request_type
+            .visible_fields(&values)
+            .into_iter()
+            .any(|f| matches!(f.kind, mecha_manifest::FieldKind::File { .. }));
+        if any_visible {
+            // A redirect rather than a page: the confirm token is spent, so
+            // the URL the browser lands on has to be one that can be
+            // reloaded. The upload token is in the location, hashed at rest,
+            // exactly like the confirm token was.
+            return (
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, format!("/f/{handle}/{type_id}/u/{token}"))],
+            )
+                .into_response();
+        }
+        let completed = app.db.upload_complete(
+            &user.id,
+            &crate::intake::hash_token(&token),
+            &crate::db::now(),
+            &verified.payload,
+            &[],
+        );
+        match completed {
+            Ok(Some(_)) => {}
+            Ok(None) => return nothing_here(),
+            Err(e) => {
+                tracing::error!(error = %e, "completing a fileless upload step");
+                return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                    .into_response();
+            }
+        }
+    }
+    tracing::info!(handle = %user.handle, %type_id, seq = verified.seq, "queued");
+    confirmation_page(&request_type, &handle, &type_id, &values)
+}
+
+/// The thank-you page, shown when a request actually reaches the queue —
+/// after the click for plain types, after the upload for types with files.
+fn confirmation_page(
+    request_type: &RequestType,
+    handle: &str,
+    type_id: &str,
+    values: &serde_json::Map<String, serde_json::Value>,
+) -> Response {
     let body = match &request_type.confirmation {
         Some(confirmation) => {
             let mut html = format!(
                 "<h1>{}</h1>\n<p>{}</p>\n",
                 mecha_manifest::escape_text(&confirmation.heading),
-                mecha_manifest::escape_text(confirmation.render(&values).trim())
+                mecha_manifest::escape_text(confirmation.render(values).trim())
             );
             if let Some(within) = &confirmation.expect_reply_within {
                 html.push_str(&format!(
@@ -428,6 +478,314 @@ pub async fn confirm(
             &format!("/f/{handle}/{type_id}/"),
         ),
     )
+}
+
+/// One page for an expired, already-used, and never-existed link alike.
+fn expired_link(handle: &str, type_id: &str) -> Response {
+    page(
+        StatusCode::NOT_FOUND,
+        shell(
+            "That link has expired",
+            "<h1>That link has expired</h1><p>Confirmation links work \
+             once and for a limited time. Submitting the form again \
+             will send a new one.</p>",
+            &format!("/f/{handle}/{type_id}/"),
+        ),
+    )
+}
+
+/// How long a verified requester has to attach their files. Generous like the
+/// verification window: the person already proved their address, and a CV is
+/// sometimes on the other machine.
+const UPLOAD_EXPIRES_HOURS: u32 = 48;
+
+/// Resolve an upload token to its pending row, or the one expired page.
+/// (The `Err` is boxed on clippy's advice — a `Response` is large, and this
+/// returns through two hot handlers.)
+fn upload_target(
+    app: &Shared,
+    handle: &str,
+    type_id: &str,
+    token: &str,
+) -> Result<(UserRow, RequestType, crate::db::QueueRow, String), Box<Response>> {
+    let Some((user, request_type)) = resolve(app, handle, type_id) else {
+        return Err(Box::new(nothing_here()));
+    };
+    let hash = crate::intake::hash_token(token);
+    match app.db.upload_pending(&user.id, &hash, &crate::db::now()) {
+        Ok(Some(row)) => Ok((user, request_type, row, hash)),
+        Ok(None) => Err(Box::new(expired_link(handle, type_id))),
+        Err(e) => {
+            tracing::error!(error = %e, "looking up an upload token");
+            Err(Box::new(
+                Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+            ))
+        }
+    }
+}
+
+fn render_upload_form(
+    request_type: &RequestType,
+    handle: &str,
+    type_id: &str,
+    token: &str,
+    theme: &str,
+    values: serde_json::Map<String, serde_json::Value>,
+    errors: &[mecha_manifest::ValidationError],
+) -> Response {
+    let rendered = request_type.upload_form(&FormOptions {
+        action: format!("/f/{handle}/{type_id}/u/{token}"),
+        assets: format!("/f/{handle}/{type_id}/"),
+        theme: mecha_manifest::Theme::by_name(theme),
+        token: None,
+        values,
+        errors: errors.to_vec(),
+        step: None,
+        file_inputs: true,
+    });
+    let status = if errors.is_empty() {
+        StatusCode::OK
+    } else {
+        StatusCode::BAD_REQUEST
+    };
+    page(status, rendered.html)
+}
+
+/// `GET /f/<handle>/<type>/u/<token>` — the upload page. A pure read, so it
+/// survives a reload; only a successful POST spends the token.
+pub async fn upload_page(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, type_id, token)): Path<(String, String, String)>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let (_, request_type, row, _) = match upload_target(&app, &handle, &type_id, &token) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    let values = serde_json::from_str(&row.payload).unwrap_or_default();
+    render_upload_form(
+        &request_type,
+        &handle,
+        &type_id,
+        &token,
+        &app.config.theme,
+        values,
+        &[],
+    )
+}
+
+/// `POST /f/<handle>/<type>/u/<token>` — the files arrive, and the request
+/// finally reaches the queue.
+///
+/// The only multipart handler in the binary. The claimed Content-Type and the
+/// filename's extension are advisory throughout: the sniffed magic decides
+/// what a file is, and the validator refuses what the field does not accept.
+/// Order-independent over parts, because nothing here needs cross-part state
+/// until validation — which runs once, over the stored values and the new
+/// file metadata together, at Phase::Complete.
+pub async fn upload(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
+    Path((handle, type_id, token)): Path<(String, String, String)>,
+    mut multipart: axum::extract::Multipart,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let (user, request_type, row, hash) = match upload_target(&app, &handle, &type_id, &token) {
+        Ok(found) => found,
+        Err(response) => return *response,
+    };
+    let stored: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&row.payload).unwrap_or_default();
+
+    // A box that cannot afford the bytes says so now, loudly and temporarily,
+    // rather than discovering a full disk under the ledger later.
+    match app.attachments.free_bytes() {
+        Ok(free) if free < app.config.limits.min_free_bytes => {
+            tracing::warn!(free, "upload refused: disk headroom");
+            return Failure::text(StatusCode::SERVICE_UNAVAILABLE, "unavailable").into_response();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "reading disk headroom");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    }
+
+    // Read every part. Only file fields exist on this form, so any other
+    // part name is a probe, not a mistake worth a gentle error.
+    let mut files: Vec<(String, String, Vec<u8>)> = Vec::new();
+    let mut received: u64 = 0;
+    loop {
+        let field = match multipart.next_field().await {
+            Ok(Some(field)) => field,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::debug!(error = %e, "unreadable multipart");
+                return Failure::text(StatusCode::BAD_REQUEST, "unreadable upload")
+                    .into_response();
+            }
+        };
+        let Some(name) = field.name().map(str::to_string) else {
+            return Failure::text(StatusCode::BAD_REQUEST, "unnamed part").into_response();
+        };
+        let is_file_field = request_type
+            .field(&name)
+            .is_some_and(|f| matches!(f.kind, mecha_manifest::FieldKind::File { .. }));
+        if !is_file_field {
+            return Failure::text(StatusCode::BAD_REQUEST, "not a field of this page")
+                .into_response();
+        }
+        let filename = field.file_name().unwrap_or_default().to_string();
+        let bytes = match field.bytes().await {
+            Ok(bytes) => bytes,
+            // The route-level body limit surfaces here as a read error.
+            Err(_) => {
+                return Failure::text(StatusCode::PAYLOAD_TOO_LARGE, "too large").into_response()
+            }
+        };
+        if filename.is_empty() && bytes.is_empty() {
+            // An untouched file input: the browser sends an empty part. This
+            // is what declining an optional attachment looks like.
+            continue;
+        }
+        received += bytes.len() as u64;
+        files.push((name, filename, bytes.to_vec()));
+    }
+
+    // Budgets on what actually arrived, before anything lands on disk. The
+    // type's own budget bounds one request; the per-address budget bounds a
+    // verified address that turns hostile. Counted even when validation
+    // fails below — the bandwidth was spent either way.
+    if received > request_type.attachment_budget() {
+        return Failure::text(StatusCode::PAYLOAD_TOO_LARGE, "too large").into_response();
+    }
+    let ip_hash = crate::intake::hash_token(&peer.ip().to_string());
+    let today = crate::db::today();
+    match app.db.upload_bytes_today(&ip_hash, &today) {
+        Ok(already) if already.saturating_add(received as i64)
+            > app.config.limits.daily_upload_bytes_per_ip as i64 =>
+        {
+            tracing::warn!("upload refused by the daily byte budget");
+            return page(
+                StatusCode::TOO_MANY_REQUESTS,
+                shell(
+                    "Too many",
+                    "<h1>Too much for today</h1><p>Please try again tomorrow.</p>",
+                    &format!("/f/{handle}/{type_id}/"),
+                ),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "reading the upload budget");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    }
+    if received > 0 {
+        if let Err(e) = app.db.upload_bytes_add(&ip_hash, &today, received as i64) {
+            tracing::error!(error = %e, "recording upload bytes");
+        }
+    }
+
+    // Measure the bytes, and let the one validator judge the measurements: a
+    // sniff that recognises nothing becomes a content type no field accepts,
+    // so mime spoofing and honest wrong-kind files fail through one path.
+    let mut merged = stored.clone();
+    let mut pending: Vec<(String, mecha_manifest::FileMeta, Vec<u8>)> = Vec::new();
+    for (name, filename, bytes) in files {
+        use sha2::Digest;
+        let content_type = mecha_manifest::sniff(&bytes)
+            .map(|t| t.mime().to_string())
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let meta = mecha_manifest::FileMeta {
+            filename,
+            size: bytes.len() as u64,
+            sha256: format!("sha256:{:x}", sha2::Sha256::digest(&bytes)),
+            content_type,
+            attachment_id: Some(crate::attachments::Store::mint_id()),
+        };
+        merged.insert(
+            name.clone(),
+            serde_json::to_value(&meta).expect("FileMeta serialises"),
+        );
+        pending.push((name, meta, bytes));
+    }
+    let submission = match request_type.validate_at(&merged, mecha_manifest::Phase::Complete) {
+        Ok(submission) => submission,
+        Err(errors) => {
+            // Their page back, errors beside the inputs, the token still
+            // live: no blob was written, so nothing orphans and nothing is
+            // half-spent. The browser cannot repopulate a file input, so the
+            // files must be chosen again — the price of never holding
+            // unvalidated bytes.
+            return render_upload_form(
+                &request_type,
+                &handle,
+                &type_id,
+                &token,
+                &app.config.theme,
+                stored,
+                &errors,
+            );
+        }
+    };
+
+    // Blobs first, then the one transaction. A crash between the two leaves
+    // files the orphan sweep reclaims — never a queued row missing its bytes.
+    let now = crate::db::now();
+    let mut rows = Vec::new();
+    for (field_name, meta, bytes) in &pending {
+        let id = meta.attachment_id.clone().expect("minted above");
+        if let Err(e) = app.attachments.write(&user.id, &id, bytes) {
+            tracing::error!(error = %e, "writing an attachment");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+        rows.push(crate::db::AttachmentRow {
+            id,
+            user_id: user.id.clone(),
+            seq: row.seq,
+            field: field_name.clone(),
+            filename: meta.filename.clone(),
+            content_type: meta.content_type.clone(),
+            size: meta.size as i64,
+            sha256: meta.sha256.clone(),
+            created_at: now.clone(),
+        });
+    }
+    let payload = match serde_json::to_string(&submission.values) {
+        Ok(payload) => payload,
+        Err(e) => {
+            tracing::error!(error = %e, "serialising a completed submission");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    match app.db.upload_complete(&user.id, &hash, &now, &payload, &rows) {
+        Ok(Some(seq)) => {
+            tracing::info!(handle = %user.handle, %type_id, seq, files = rows.len(), "queued");
+            confirmation_page(&request_type, &handle, &type_id, &submission.values)
+        }
+        Ok(None) => {
+            // Raced by its own expiry or a second tab that won. The blobs
+            // just written belong to nothing; take them back out.
+            for row in &rows {
+                app.attachments.delete(&user.id, &row.id);
+            }
+            expired_link(&handle, &type_id)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "completing an upload");
+            for row in &rows {
+                app.attachments.delete(&user.id, &row.id);
+            }
+            Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
 }
 
 /// `a=1&b=hello%20there` → a map of strings.

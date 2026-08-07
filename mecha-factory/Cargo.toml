@@ -32,7 +32,15 @@ path = "src/main.rs"
 [dependencies]
 mecha-manifest = { path = "../mecha-manifest", version = "0.1.0" }
 anyhow.workspace = true
-axum = "0.8"
+# `multipart` for the one route that takes a file — the post-verification
+# upload page. A hand-rolled multipart parser on an unauthenticated endpoint
+# is the opposite of this list's temperament; `multer` underneath is the
+# boring, fuzzed option.
+axum = { version = "0.8", features = ["multipart"] }
+# `statvfs`, for refusing uploads when the disk is nearly full. The one libc
+# call in the crate; a crash-safe refusal beats a full disk taking down the
+# ledger beside it.
+libc = "0.2"
 chrono.workspace = true
 clap.workspace = true
 serde.workspace = true

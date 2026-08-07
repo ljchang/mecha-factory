@@ -267,3 +267,207 @@ max_length = 100
         404
     );
 }
+
+// ---- the upload step ------------------------------------------------------
+
+/// A letter-ish type with one required file field, servable.
+fn upload_letterish(server: &Server) {
+    let toml = r#"
+id = "letterish"
+version = 1
+title = "Request a letter"
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "cv"
+label = "Your CV"
+kind = "file"
+accept = ["pdf"]
+max_bytes = 1048576
+required = true
+
+[verification]
+field = "requester_email"
+"#;
+    let reply = Request::new("PUT", "/v1/types/letterish", server.gate.to_string())
+        .auth(&server.key(Scope::Release))
+        .body(toml)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+}
+
+fn multipart(boundary: &str, parts: &[(&str, &str, &[u8])]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (name, filename, bytes) in parts {
+        out.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; \
+                 name=\"{name}\"; filename=\"{filename}\"\r\n\
+                 Content-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(bytes);
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
+    out
+}
+
+fn post_upload(server: &Server, location: &str, parts: &[(&str, &str, &[u8])]) -> common::Reply {
+    let body = multipart("testboundary", parts);
+    Request::new("POST", location, server.gate.to_string())
+        .header(
+            "Content-Type",
+            "multipart/form-data; boundary=testboundary",
+        )
+        .body(body)
+        .send(server.gate)
+}
+
+/// The whole verified-only upload arc: the public form carries no file input,
+/// the click redirects to a reloadable upload page, the sniffed bytes decide,
+/// and only the completed row reaches the queue — with its blob in the ledger
+/// and on disk.
+#[test]
+fn a_file_arrives_only_after_verification_and_only_as_what_it_is() {
+    let server = start();
+    upload_letterish(&server);
+
+    // The public form: a note where the input would be, and no enctype.
+    let form = server.get(server.gate, "/f/alice/letterish");
+    assert_eq!(form.status, 200);
+    assert!(form.body.contains("after verifying your email"), "{}", form.body);
+    assert!(!form.body.contains("type=\"file\""), "{}", form.body);
+
+    // A urlencoded value aimed at the file field is a probe, refused.
+    let probe = Request::new("POST", "/f/alice/letterish", server.gate.to_string())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("requester_email=ada%40example.org&cv=hello")
+        .send(server.gate);
+    assert_eq!(probe.status, 400, "{}", probe.body);
+
+    // Submit without the file: fine at this phase.
+    let reply = Request::new("POST", "/f/alice/letterish", server.gate.to_string())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("requester_email=ada%40example.org")
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    // The click: not queued yet — redirected to the upload page.
+    let token = server.verification_token();
+    let confirm = server.get(server.gate, &format!("/f/alice/letterish/c/{token}"));
+    assert_eq!(confirm.status, 303, "{}", confirm.body);
+    let location = confirm.header("location").expect("a redirect names where");
+    assert!(location.contains("/u/"), "{location}");
+    assert_eq!(server.db.queue_depth(None).unwrap(), 0, "not yet queued");
+
+    // The upload page is a pure read: reloadable, with a real file input.
+    for _ in 0..2 {
+        let page = server.get(server.gate, &location);
+        assert_eq!(page.status, 200, "{}", page.body);
+        assert!(page.body.contains("type=\"file\""), "{}", page.body);
+        assert!(page.body.contains("multipart/form-data"), "{}", page.body);
+    }
+
+    // A PNG pretending to be a PDF: the magic decides, the field refuses,
+    // nothing is written, and the token survives to try again.
+    let png = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0];
+    let spoofed = post_upload(&server, &location, &[("cv", "cv.pdf", &png)]);
+    assert_eq!(spoofed.status, 400, "{}", spoofed.body);
+    assert!(spoofed.body.contains("takes: pdf"), "{}", spoofed.body);
+    assert_eq!(server.db.queue_depth(None).unwrap(), 0);
+    assert_eq!(server.get(server.gate, &location).status, 200, "still live");
+
+    // The real thing.
+    let done = post_upload(&server, &location, &[("cv", "Ada CV.pdf", b"%PDF-1.4 tiny")]);
+    assert_eq!(done.status, 200, "{}", done.body);
+    assert_eq!(server.db.queue_depth(None).unwrap(), 1);
+
+    // The row's payload carries the measurements and not the bytes; the
+    // ledger carries the blob; the blob is on disk and matches its digest.
+    let drained = Request::new("GET", "/v1/queue", server.gate.to_string())
+        .auth(&server.key(Scope::Drain))
+        .send(server.gate);
+    let records = drained.json();
+    let payload = records["records"][0]["payload"].as_str().unwrap();
+    assert!(payload.contains("sha256:"), "{payload}");
+    assert!(payload.contains("application/pdf"), "{payload}");
+    let seq = records["records"][0]["seq"].as_i64().unwrap();
+
+    let user = server.db.user_by_handle("alice").unwrap().unwrap();
+    let rows = server.db.attachments_for(&user.id, seq).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].filename, "Ada CV.pdf");
+    assert_eq!(rows[0].content_type, "application/pdf");
+    let blob = server.dir.path().join("attachments").join(&user.id).join(&rows[0].id);
+    assert_eq!(std::fs::read(&blob).unwrap(), b"%PDF-1.4 tiny");
+
+    // The token spent with the upload: the page is gone now.
+    assert_eq!(server.get(server.gate, &location).status, 404);
+
+    // And the ack takes the blob with the row.
+    let ack = Request::new("POST", "/v1/queue/ack", server.gate.to_string())
+        .auth(&server.key(Scope::Drain))
+        .body(format!(r#"{{"seqs":[{seq}]}}"#))
+        .send(server.gate);
+    assert_eq!(ack.status, 200, "{}", ack.body);
+    assert!(!blob.exists(), "an acknowledged row's file goes with it");
+}
+
+/// An optional attachment is declined by submitting nothing — absence is the
+/// decline, so there is no skip verb to drift from the validator.
+#[test]
+fn an_optional_file_can_be_declined_by_uploading_nothing() {
+    let server = start();
+    let toml = r#"
+id = "optionalish"
+version = 1
+title = "Optional attachment"
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "materials"
+label = "Anything useful"
+kind = "file"
+accept = ["pdf", "png"]
+
+[verification]
+field = "requester_email"
+"#;
+    let reply = Request::new("PUT", "/v1/types/optionalish", server.gate.to_string())
+        .auth(&server.key(Scope::Release))
+        .body(toml)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    Request::new("POST", "/f/alice/optionalish", server.gate.to_string())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("requester_email=ada%40example.org")
+        .send(server.gate);
+    let token = server.verification_token();
+    let confirm = server.get(server.gate, &format!("/f/alice/optionalish/c/{token}"));
+    assert_eq!(confirm.status, 303);
+    let location = confirm.header("location").unwrap();
+
+    // The browser sends an empty part for an untouched file input.
+    let done = post_upload(&server, &location, &[("materials", "", b"")]);
+    assert_eq!(done.status, 200, "{}", done.body);
+    assert_eq!(server.db.queue_depth(None).unwrap(), 1);
+    let user = server.db.user_by_handle("alice").unwrap().unwrap();
+    let drained = Request::new("GET", "/v1/queue", server.gate.to_string())
+        .auth(&server.key(Scope::Drain))
+        .send(server.gate);
+    let seq = drained.json()["records"][0]["seq"].as_i64().unwrap();
+    assert!(server.db.attachments_for(&user.id, seq).unwrap().is_empty());
+}

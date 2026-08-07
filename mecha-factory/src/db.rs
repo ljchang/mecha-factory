@@ -1353,6 +1353,27 @@ impl Db {
         })
     }
 
+    /// The row an upload token belongs to, if it is still spendable — a pure
+    /// read, so the upload page can be reloaded without consuming anything.
+    pub fn upload_pending(
+        &self,
+        user_id: &str,
+        upload_hash: &str,
+        now: &str,
+    ) -> Result<Option<QueueRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT seq, user_id, type_id, state, payload, created_at FROM queue \
+                     WHERE user_id = ?1 AND upload_hash = ?2 AND state = 'awaiting_upload' \
+                     AND upload_expires > ?3",
+                    params![user_id, upload_hash, now],
+                    queue_row,
+                )
+                .optional()?)
+        })
+    }
+
     /// Verified rows whose upload window closed with no files. Deleted like
     /// unverified rows, for the same reason — and they hold no blobs by
     /// construction, since blobs are written only in [`upload_complete`]'s

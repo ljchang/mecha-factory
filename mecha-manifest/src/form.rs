@@ -233,6 +233,90 @@ impl RequestType {
         }
     }
 
+    /// The post-verification upload page: the file fields and nothing else.
+    ///
+    /// A whole document like [`RequestType::form`], but rendering only the
+    /// file fields *visible under the submitted values* (`options.values` —
+    /// a conditional file field whose condition failed at submit time must
+    /// not be asked for now), with `file_inputs` forced on and no condition
+    /// script: every visibility question was already answered by values that
+    /// are no longer editable. Submitting with nothing chosen is how an
+    /// optional attachment is declined — absence is the decline, so there is
+    /// no separate skip verb to get out of sync with the validator.
+    pub fn upload_form(&self, options: &FormOptions) -> FormPage {
+        let options = FormOptions {
+            file_inputs: true,
+            ..options.clone()
+        };
+        let visible: Vec<&Field> = self
+            .visible_fields(&options.values)
+            .into_iter()
+            .filter(|f| matches!(f.kind, FieldKind::File { .. }))
+            .collect();
+        let any_required = visible.iter().any(|f| f.required);
+
+        let mut body = String::new();
+        body.push_str(&format!(
+            "<h1>{}</h1>\n<p class=\"intro\">Your email address is verified. {}</p>\n",
+            escape_text(&self.title),
+            if any_required {
+                "One more step: attach what the request asks for."
+            } else {
+                "If you have files to attach, add them here — or finish without."
+            }
+        ));
+
+        if !options.errors.is_empty() {
+            body.push_str(
+                "<div class=\"errors\" role=\"alert\"><p>Some answers need attention:</p><ul>\n",
+            );
+            for error in &options.errors {
+                let label = self
+                    .field(&error.field)
+                    .map(|f| f.label.as_str())
+                    .unwrap_or(error.field.as_str());
+                body.push_str(&format!(
+                    "<li><a href=\"#{}\">{}</a>: {}</li>\n",
+                    escape_text(&error.field),
+                    escape_text(label),
+                    escape_text(&error.message)
+                ));
+            }
+            body.push_str("</ul></div>\n");
+        }
+
+        body.push_str(&format!(
+            "<form method=\"post\" action=\"{}\" enctype=\"multipart/form-data\">\n",
+            escape_text(&options.action)
+        ));
+        for field in &visible {
+            body.push_str(&self.render_field(field, &options));
+        }
+        body.push_str(&format!(
+            "<button type=\"submit\">{}</button>\n</form>\n",
+            if any_required { "Upload and finish" } else { "Finish" }
+        ));
+
+        let html = format!(
+            "<!doctype html>\n<html lang=\"en\">\n<head>\n\
+             <meta charset=\"utf-8\">\n\
+             <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+             <title>{}</title>\n\
+             {}\n\
+             <link rel=\"stylesheet\" href=\"{}form.css\">\n\
+             </head>\n<body>\n<main>\n{}</main>\n</body>\n</html>\n",
+            escape_text(&self.title),
+            crate::brand::FAVICON_LINK,
+            escape_text(&options.assets),
+            body
+        );
+        FormPage {
+            html,
+            script: FORM_JS,
+            style: format!("{}{}", options.theme.css(), FORM_STRUCTURE),
+        }
+    }
+
     /// Every `show_when` in the type, keyed by what it governs. One source of
     /// rules for the browser and the server.
     fn condition_map(&self) -> serde_json::Map<String, serde_json::Value> {
