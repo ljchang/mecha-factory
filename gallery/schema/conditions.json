@@ -1,0 +1,64 @@
+{
+  "$id": "mecha-factory:request/conditions/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Change the format, tick the box, put a big number in attendance — the fields below react. The server re-evaluates every one of these rules on submit.",
+  "properties": {
+    "email_address": {
+      "format": "email",
+      "maxLength": 254,
+      "title": "Your email",
+      "type": "string"
+    },
+    "format": {
+      "enum": [
+        "in_person",
+        "remote",
+        "hybrid"
+      ],
+      "title": "How will it run?",
+      "type": "string"
+    },
+    "headcount": {
+      "maximum": 5000,
+      "minimum": 1,
+      "title": "Expected attendance",
+      "type": "integer"
+    },
+    "overflow_plan": {
+      "description": "op = \"gt\". A non-numeric value on either side does not hold, rather than erroring.",
+      "maxLength": 600,
+      "title": "Overflow plan",
+      "type": "string"
+    },
+    "travel_budget": {
+      "description": "op = \"is_true\", not \"present\" — an unticked checkbox is present and false, so `present` would show this whatever the answer.",
+      "minimum": 0,
+      "title": "Budget, in dollars",
+      "type": "integer"
+    },
+    "travel_covered": {
+      "description": "op = \"ne\".",
+      "title": "Travel is covered",
+      "type": "boolean"
+    },
+    "venue": {
+      "description": "op = \"in\". Required only when shown: the browser did not show it, so the server cannot insist on it.",
+      "maxLength": 160,
+      "title": "Where",
+      "type": "string"
+    },
+    "venue_notes": {
+      "description": "op = \"present\" means submitted and not empty. An empty string is absent, or every optional field would satisfy its own dependants.",
+      "maxLength": 600,
+      "title": "Anything about the venue",
+      "type": "string"
+    }
+  },
+  "required": [
+    "email_address",
+    "format"
+  ],
+  "title": "Conditional fields",
+  "type": "object"
+}

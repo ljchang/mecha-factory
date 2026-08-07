@@ -1,0 +1,71 @@
+{
+  "$id": "mecha-factory:request/meeting/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A few questions so I can answer without a thread.",
+  "properties": {
+    "affiliation": {
+      "maxLength": 160,
+      "title": "Where you're writing from",
+      "type": "string"
+    },
+    "duration_minutes": {
+      "maximum": 120,
+      "minimum": 15,
+      "title": "How long you think you need",
+      "type": "integer"
+    },
+    "preferred_by": {
+      "description": "Leave blank if there isn't one.",
+      "format": "date",
+      "title": "Is there a date you need this before?",
+      "type": "string"
+    },
+    "purpose": {
+      "enum": [
+        "advising",
+        "collaboration",
+        "press",
+        "other"
+      ],
+      "title": "What the meeting is about",
+      "type": "string"
+    },
+    "purpose_detail": {
+      "description": "Two or three sentences is plenty.",
+      "maxLength": 1200,
+      "title": "Say a little more",
+      "type": "string"
+    },
+    "remote_ok": {
+      "title": "A video call works for me",
+      "type": "boolean"
+    },
+    "requester_email": {
+      "description": "I'll send a confirmation link here before anything reaches me.",
+      "format": "email",
+      "maxLength": 254,
+      "title": "Your email",
+      "type": "string"
+    },
+    "requester_name": {
+      "maxLength": 120,
+      "title": "Your name",
+      "type": "string"
+    },
+    "understands_request": {
+      "const": true,
+      "description": null,
+      "title": "I understand this is a request, not a booking, and may be declined.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "requester_name",
+    "requester_email",
+    "purpose",
+    "understands_request"
+  ],
+  "title": "Request a meeting",
+  "type": "object"
+}

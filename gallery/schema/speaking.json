@@ -1,0 +1,93 @@
+{
+  "$id": "mecha-factory:request/speaking/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "What I need to know to answer yes or no quickly.",
+  "properties": {
+    "audience_size": {
+      "maximum": 100000,
+      "minimum": 1,
+      "title": "Roughly how many people",
+      "type": "integer"
+    },
+    "event_date": {
+      "description": "If it's a range, the day you'd want me.",
+      "format": "date",
+      "title": "Date",
+      "type": "string"
+    },
+    "event_name": {
+      "maxLength": 200,
+      "title": "The event",
+      "type": "string"
+    },
+    "format": {
+      "enum": [
+        "in_person",
+        "remote",
+        "hybrid"
+      ],
+      "title": "Format",
+      "type": "string"
+    },
+    "notes": {
+      "maxLength": 2000,
+      "title": "Anything else",
+      "type": "string"
+    },
+    "organisation": {
+      "maxLength": 160,
+      "title": "Who's hosting",
+      "type": "string"
+    },
+    "requester_email": {
+      "format": "email",
+      "maxLength": 254,
+      "title": "Your email",
+      "type": "string"
+    },
+    "requester_name": {
+      "maxLength": 120,
+      "title": "Your name",
+      "type": "string"
+    },
+    "talk_kind": {
+      "enum": [
+        "keynote",
+        "seminar",
+        "panel",
+        "workshop"
+      ],
+      "title": "What kind of talk",
+      "type": "string"
+    },
+    "travel_covered": {
+      "title": "Travel and accommodation are covered",
+      "type": "boolean"
+    },
+    "travel_notes": {
+      "description": "What's covered, how it's reimbursed, and how long you'd need me on site.",
+      "maxLength": 1000,
+      "title": "Anything about travel I should know",
+      "type": "string"
+    },
+    "understands_request": {
+      "const": true,
+      "description": null,
+      "title": "I understand this is an invitation, not a confirmed booking.",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "requester_name",
+    "requester_email",
+    "organisation",
+    "event_name",
+    "event_date",
+    "format",
+    "talk_kind",
+    "understands_request"
+  ],
+  "title": "Invite a talk",
+  "type": "object"
+}

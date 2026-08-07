@@ -74,3 +74,29 @@ jobs:
           for dir in out/*/; do
             cargo run -q --bin factory-publish -- check "$dir"
           done
+
+      # `gallery/` is committed, and it is a golden file for the renderer.
+      # Regenerating it here and refusing a diff is what stops the docs site
+      # from showing forms that no longer look like the ones we serve — and a
+      # change to `form.rs` or a theme arriving as a reviewable diff of the
+      # rendered HTML is the review you want on a form generator anyway.
+      - name: Regenerate the gallery
+        run: cargo run -q --example gallery -- gallery
+      # `git status --porcelain`, not `git diff`: a diff is blind to an
+      # untracked file, and the change most likely to add one is a new theme —
+      # exactly the case where the docs site would otherwise never learn the
+      # palette exists.
+      - name: The committed gallery is current
+        run: |
+          set -euo pipefail
+          changed=$(git status --porcelain -- gallery)
+          if [ -n "$changed" ]; then
+            echo "::error::gallery/ is stale. Run: cargo run --example gallery -- gallery"
+            echo "$changed"
+            exit 1
+          fi
+      # The whole tree, subdirectories and all: a gallery page is embedded in
+      # an <iframe> on the documentation site, so an external reference here
+      # would be one on a page we publish.
+      - name: The gallery is self-contained
+        run: cargo run -q --bin factory-publish -- check gallery

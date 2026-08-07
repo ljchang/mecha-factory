@@ -447,35 +447,39 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
     );
     assert_eq!(index.header("cache-control").unwrap(), "no-store");
 
-    // The framed viewer: chrome above the bundle, the bundle untouched in an
-    // iframe from its own immutable URL — which frame-ancestors 'self' now
-    // permits, while the viewer itself stays unframeable.
+    // The artifact-origin viewer spelling redirects to the one real viewer
+    // on the gate — where the session lives — under the same one-answer rule.
     let viewer = get_host(server.artifacts, &host, "/view/switchable/2", None);
-    assert_eq!(viewer.status, 200, "{}", viewer.body);
-    assert!(
-        viewer.body.contains("src=\"/b/switchable/v/2/\""),
-        "{}",
-        viewer.body
+    assert_eq!(viewer.status, 302, "{}", viewer.body);
+    let target = viewer.header("location").unwrap();
+    assert!(target.ends_with("/view/alice/switchable/2"), "{target}");
+
+    // The gate viewer: real chrome, the bundle framed cross-origin from its
+    // immutable URL, anonymous gets the sign-in corner and no controls.
+    let gate_view = get_host(
+        server.gate,
+        &server.gate.to_string(),
+        "/view/alice/switchable/2",
+        None,
     );
-    assert!(viewer.body.contains("/view/switchable/1"), "the switcher");
-    let viewer_csp = viewer.header("content-security-policy").unwrap();
-    assert!(viewer_csp.contains("frame-src 'self'"), "{viewer_csp}");
-    assert!(viewer_csp.contains("frame-ancestors 'none'"), "{viewer_csp}");
-    // The site chrome rides the viewer: the mark, the version dropdown, and
-    // assets served from this origin at dotted names no bundle id can take.
-    assert!(viewer.body.contains("class=\"site\""), "{}", viewer.body);
-    assert!(viewer.body.contains("account-menu"), "{}", viewer.body);
-    assert!(viewer.body.contains("/view/form.css"), "{}", viewer.body);
-    let css = get_host(server.artifacts, &host, "/view/form.css", None);
-    assert_eq!(css.status, 200);
-    assert!(css.body.contains("header.site"), "the shared stylesheet");
-    let js = get_host(server.artifacts, &host, "/view/menu.js", None);
-    assert_eq!(js.status, 200);
-    assert!(js.body.contains("account-menu"));
+    assert_eq!(gate_view.status, 200, "{}", gate_view.body);
+    assert!(
+        gate_view.body.contains("/b/switchable/v/2/"),
+        "{}",
+        gate_view.body
+    );
+    assert!(gate_view.body.contains("<summary>Sign in</summary>"));
+    assert!(!gate_view.body.contains("<summary>Manage</summary>"));
+    assert!(gate_view.body.contains("/view/alice/switchable/1"), "switcher");
+    let view_csp = gate_view.header("content-security-policy").unwrap();
+    assert!(view_csp.contains("frame-src http://"), "{view_csp}");
+    assert!(view_csp.contains("frame-ancestors 'none'"), "{view_csp}");
+
+    // And the bundle now names the gate as its one extra permitted framer.
     let bundle = get_host(server.artifacts, &host, "/b/switchable/v/2/", None);
     let bundle_csp = bundle.header("content-security-policy").unwrap();
     assert!(
-        bundle_csp.contains("frame-ancestors 'self'"),
+        bundle_csp.contains("frame-ancestors 'self' http://"),
         "{bundle_csp}"
     );
 

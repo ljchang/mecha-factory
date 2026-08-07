@@ -1,0 +1,81 @@
+# Multi-step, which is server-side: one page per step, a POST between them.
+#
+# That is what makes it work with JavaScript off and survive a closed tab —
+# a draft is a row on the box keyed by the capability token in the URL, not
+# state in a browser somebody closed.
+#
+# Fields are declared once, in order, and a step references them by name. The
+# system this borrows from keeps `fields`, `requiredFields`, `hiddenFields` and
+# `conditionalFields` as four parallel lists, which can disagree; a name in
+# both `requiredFields` and `hiddenFields` is a form nobody can submit. Here a
+# field owns both facts, so there is nowhere for the contradiction to live.
+
+id = "stepped"
+version = 1
+title = "A form in steps"
+description = "Three steps, the last of which only exists for some answers."
+
+[verification]
+field = "email_address"
+
+[[fields]]
+name = "requester_name"
+label = "Your name"
+kind = "text"
+max_length = 120
+required = true
+
+[[fields]]
+name = "email_address"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "format"
+label = "How will it run?"
+kind = "select"
+required = true
+options = [
+  { value = "in_person", label = "In person" },
+  { value = "remote", label = "Remote" },
+  { value = "hybrid", label = "Hybrid" },
+]
+
+[[fields]]
+name = "summary"
+label = "What are you asking for?"
+kind = "long_text"
+max_length = 1200
+required = true
+
+[[fields]]
+name = "travel_covered"
+label = "Travel is covered"
+kind = "bool"
+
+[[fields]]
+name = "travel_notes"
+label = "Anything about the travel"
+kind = "long_text"
+max_length = 600
+
+[[steps]]
+id = "who"
+title = "Who you are"
+fields = ["requester_name", "email_address"]
+
+[[steps]]
+id = "what"
+title = "What you're asking"
+description = "Enough to answer yes or no without a second exchange."
+fields = ["format", "summary"]
+
+# A whole step, skipped. A field on a hidden step is not required, however it
+# is declared, and a record carrying a field the browser never showed is a
+# record that differs from what was submitted.
+[[steps]]
+id = "travel"
+title = "Travel"
+fields = ["travel_covered", "travel_notes"]
+show_when = { field = "format", op = "not_in", value = ["remote"] }

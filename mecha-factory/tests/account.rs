@@ -344,3 +344,87 @@ fn the_header_knows_who_it_is_for() {
     assert!(!missing.body.contains("header class=\"site\""), "{}", missing.body);
     assert!(!missing.body.contains("form.css"));
 }
+
+/// The gate viewer wears the session: owner sees the Manage menu and the
+/// account dropdown; its controls post the same release endpoint and come
+/// back to the viewer; a return address that is not a viewer path is
+/// ignored rather than followed.
+#[test]
+fn the_viewer_knows_its_owner_and_its_controls_return_there() {
+    let server = common::start();
+    let session = signed_in(&server);
+    server
+        .db
+        .bundle_insert(&mecha_factory::db::BundleRow {
+            user_id: server.user.id.clone(),
+            id: "brief".into(),
+            version: 1,
+            digest: "d".into(),
+            class: mecha_manifest::ContentClass::Static,
+            title: "A briefing".into(),
+            description: None,
+            template: "report".into(),
+            published_at: None,
+            received_at: mecha_factory::db::now(),
+            withheld_at: None,
+            withheld_reason: None,
+        })
+        .unwrap();
+    server
+        .db
+        .alias_set(
+            &server.user.id,
+            "brief",
+            Some(1),
+            mecha_manifest::Visibility::Public,
+            "t",
+        )
+        .unwrap();
+
+    // Signed in, on your own bundle: handle in the corner, Manage present.
+    let page = get(&server, "/view/alice/brief/1", Some(&session));
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("<summary>alice</summary>"), "{}", page.body);
+    assert!(page.body.contains("<summary>Manage</summary>"));
+    assert!(page.body.contains("Take down"));
+    assert!(page.body.contains("name=\"return\""));
+
+    // Anonymous on the same page: sign-in corner, no controls at all.
+    let anon = get(&server, "/view/alice/brief/1", None);
+    assert_eq!(anon.status, 200);
+    assert!(anon.body.contains("<summary>Sign in</summary>"));
+    assert!(!anon.body.contains("Manage"));
+
+    // A control posts, the alias moves, and you land back on the viewer.
+    let csrf = csrf_of(&server, &session);
+    let back = post(
+        &server,
+        "/account/release",
+        &format!("csrf={csrf}&id=brief&visibility=private&version=1&return=/view/alice/brief/1"),
+        Some(&session),
+    );
+    assert_eq!(back.status, 303, "{}", back.body);
+    assert_eq!(back.header("location").unwrap(), "/view/alice/brief/1");
+    assert_eq!(
+        server
+            .db
+            .alias(&server.user.id, "brief")
+            .unwrap()
+            .unwrap()
+            .visibility,
+        mecha_manifest::Visibility::Private
+    );
+
+    // Private now: the owner still gets the viewer; a stranger gets nothing.
+    assert_eq!(get(&server, "/view/alice/brief/1", Some(&session)).status, 200);
+    assert_eq!(get(&server, "/view/alice/brief/1", None).status, 404);
+
+    // A return address outside /view/ is not followed.
+    let elsewhere = post(
+        &server,
+        "/account/release",
+        &format!("csrf={csrf}&id=brief&visibility=public&version=1&return=https://evil.example/"),
+        Some(&session),
+    );
+    assert_eq!(elsewhere.status, 200, "rendered the page, followed nothing");
+}

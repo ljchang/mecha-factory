@@ -555,7 +555,18 @@ pub async fn release(
         return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
             .into_response();
     }
-    tracing::info!(handle = %user.handle, %id, ?version, ?visibility, "released from the account page");
+    tracing::info!(handle = %user.handle, %id, ?version, ?visibility, "released from a session");
+    // The viewer's controls come back to the viewer. Only a viewer path is
+    // honoured — a relative one with no scheme and no authority — so the
+    // field can never become an open redirect.
+    let back = field("return");
+    if back.starts_with("/view/") && !back.starts_with("//") {
+        return (
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, back)],
+        )
+            .into_response();
+    }
     render_overview(&app, &token, &user)
 }
 

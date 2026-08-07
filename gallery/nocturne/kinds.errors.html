@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Every field kind</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Cstyle%3Epath%7Bfill:%235d5294%7D@media(prefers-color-scheme:dark)%7Bpath%7Bfill:%23b5abfc%7D%7D%3C/style%3E%3Cpath%20d='M0%200h24l8%2010%208-10h24v20H0z'/%3E%3Cpath%20d='M0%2024h16v16H0zM48%2024h16v16H48zM0%2044h16v20H0zM48%2044h16v20H48z'/%3E%3Cpath%20d='M16%2044v20h12zM48%2044v20H36z'/%3E%3Cpath%20d='M20%2028h24v8H20z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="form.css">
+</head>
+<body>
+<header class="site"><a class="mark" href="/" aria-label="mecha"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 63 54" width="28" height="24" fill="currentColor" role="img" aria-label="mecha"><path d="M0 0h24l7.5 8.5L39 0h24v16H0z"></path><path d="M0 20h14v15H0zM49 20h14v15H49zM0 39h14v15H0zM49 39h14v15H49z"></path><path d="M14 39v15h13.24zM49 39v15H35.76z"></path><path d="M21 24h21v7H21z"></path></svg></a></header>
+<main>
+<h1>Every field kind</h1>
+<p class="intro">One of each. This page is a rendering gallery: the browser validates natively, and submitting goes nowhere.</p>
+<div class="errors" role="alert"><p>Some answers need attention:</p><ul>
+<li><a href="#accurate">What I have written here is accurate.</a>: this has to be acknowledged before submitting</li>
+<li><a href="#email_address">Email</a>: this does not look like an email address</li>
+<li><a href="#format">Select</a>: this has to be one of: in_person, remote, hybrid</li>
+<li><a href="#headcount">Integer</a>: this cannot be more than 500</li>
+<li><a href="#long_answer">Long text</a>: this is 960 characters; the limit is 600</li>
+<li><a href="#preferred_date">Date</a>: this cannot be earlier than 2026-01-01</li>
+<li><a href="#reading">URL</a>: this has to be an http or https address</li>
+<li><a href="#retention">I understand this request is kept for 30 days.</a>: this has to be acknowledged before submitting</li>
+<li><a href="#short_text">Text</a>: this is required</li>
+<li><a href="#supporting_document">File</a>: files are uploaded after your email is verified</li>
+<li><a href="#topics">Multi-select</a>: choose at most 2</li>
+</ul></div>
+<form method="post" action="#">
+<div class="field" data-field="short_text">
+<label for="short_text">Text <span class="req" aria-hidden="true">*</span></label>
+<p class="help" id="short_text-help">One line. max_length is required on every text field — these forms sit on an unauthenticated endpoint, and an uncapped field is an unbounded write.</p>
+<input type="text" id="short_text" name="short_text" maxlength="120" value="" required aria-invalid="true" aria-describedby="short_text-help short_text-error">
+<p class="error" id="short_text-error">this is required</p>
+</div>
+<div class="field" data-field="reference_code">
+<label for="reference_code">Text, with a pattern</label>
+<p class="help" id="reference_code-help">Two letters, a hyphen, four digits — NH-0301. The pattern rides on the input and the browser enforces it; the server enforces the cap and the type, never the regex.</p>
+<input type="text" id="reference_code" name="reference_code" maxlength="16" pattern="^[A-Z]{2}-[0-9]{4}$" value="nh-301" aria-describedby="reference_code-help">
+</div>
+<div class="field" data-field="long_answer">
+<label for="long_answer">Long text</label>
+<p class="help" id="long_answer-help">Many lines, same cap rule. Free text, which is what the front door quarantines: a privileged run sees the extraction of this, never the prose.</p>
+<textarea id="long_answer" name="long_answer" maxlength="600" rows="6" aria-invalid="true" aria-describedby="long_answer-help long_answer-error">Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. Every one of these answers is wrong on purpose. </textarea>
+<p class="error" id="long_answer-error">this is 960 characters; the limit is 600</p>
+</div>
+<div class="field" data-field="email_address">
+<label for="email_address">Email <span class="req" aria-hidden="true">*</span></label>
+<p class="help" id="email_address-help">Capped at 254 by default, the practical maximum for an address. [verification] names this field, which is why it has to be required.</p>
+<input type="email" id="email_address" name="email_address" maxlength="254" value="not-an-address" required aria-invalid="true" aria-describedby="email_address-help email_address-error">
+<p class="error" id="email_address-error">this does not look like an email address</p>
+</div>
+<div class="field" data-field="reading">
+<label for="reading">URL</label>
+<p class="help" id="reading-help">Data to show, never a thing to fetch. Nothing in this crate resolves one, and nothing downstream should — a form field is not a reason to make an outbound request to an address a stranger chose.</p>
+<input type="url" id="reading" name="reading" maxlength="2048" value="javascript:alert(1)" aria-invalid="true" aria-describedby="reading-help reading-error">
+<p class="error" id="reading-error">this has to be an http or https address</p>
+</div>
+<div class="field" data-field="preferred_date">
+<label for="preferred_date">Date</label>
+<p class="help" id="preferred_date-help">YYYY-MM-DD, inclusive bounds. Literal dates rather than offsets: an offset would have to be resolved against a clock, and the browser&#39;s clock is not the server&#39;s.</p>
+<input type="date" id="preferred_date" name="preferred_date" min="2026-01-01" max="2026-12-31" value="2019-06-01" aria-invalid="true" aria-describedby="preferred_date-help preferred_date-error">
+<p class="error" id="preferred_date-error">this cannot be earlier than 2026-01-01</p>
+</div>
+<div class="field" data-field="headcount">
+<label for="headcount">Integer</label>
+<p class="help" id="headcount-help">Inclusive bounds, enforced at both ends.</p>
+<input type="number" id="headcount" name="headcount" step="1" min="1" max="500" value="5000" aria-invalid="true" aria-describedby="headcount-help headcount-error">
+<p class="error" id="headcount-error">this cannot be more than 500</p>
+</div>
+<div class="field" data-field="format">
+<label for="format">Select <span class="req" aria-hidden="true">*</span></label>
+<p class="help" id="format-help">One of ours. Nothing a stranger types can change which value this carries, which is what keeps the kind of a request out of their hands.</p>
+<select id="format" name="format" required aria-invalid="true" aria-describedby="format-help format-error">
+<option value="">Choose…</option>
+<option value="in_person">In person</option>
+<option value="remote">Remote</option>
+<option value="hybrid">Hybrid</option>
+</select>
+<p class="error" id="format-error">this has to be one of: in_person, remote, hybrid</p>
+</div>
+<div class="field" data-field="topics">
+<label for="topics">Multi-select</label>
+<p class="help" id="topics-help">Several of ours, up to max_choices. Renders as checkboxes rather than a multiple &lt;select&gt;, which nobody has ever operated correctly on a phone.</p>
+<div class="choices">
+<label class="choice"><input type="checkbox" name="topics" value="memory" checked> Agent memory</label>
+<label class="choice"><input type="checkbox" name="topics" value="sandboxing" checked> Sandboxing</label>
+<label class="choice"><input type="checkbox" name="topics" value="evaluation" checked> Evaluation</label>
+<label class="choice"><input type="checkbox" name="topics" value="provenance"> Provenance</label>
+</div>
+<p class="error" id="topics-error">choose at most 2</p>
+</div>
+<div class="field" data-field="first_time">
+<label for="first_time">Checkbox</label>
+<p class="help" id="first_time-help">A single boolean. Distinct from an acknowledgment, which is always required and carries something to read first.</p>
+<input type="checkbox" id="first_time" name="first_time" value="true" aria-describedby="first_time-help">
+</div>
+<div class="field" data-field="supporting_document">
+<label for="supporting_document">File</label>
+<p class="help" id="supporting_document-help">On the public form this renders as a note rather than an input: uploads happen after the address is verified, so the upload page is the one place a file input exists.</p>
+<p class="file-note" id="supporting_document">You'll be asked to attach this (pdf, png, up to 4 MB) after verifying your email address.</p>
+<p class="error" id="supporting_document-error">files are uploaded after your email is verified</p>
+</div>
+<div class="field ack" data-field="accurate">
+<label for="accurate"><input type="checkbox" id="accurate" name="accurate" value="true" required aria-invalid="true" aria-describedby="accurate-error"> What I have written here is accurate.</label>
+<p class="error" id="accurate-error">this has to be acknowledged before submitting</p>
+</div>
+<div class="field ack" data-field="retention">
+<label for="retention"><input type="checkbox" id="retention" name="retention" value="true" required aria-invalid="true" aria-describedby="retention-error"> I understand this request is kept for 30 days.</label>
+<p class="help">Retention is declared by the request type, not negotiated per submission.</p>
+<p class="error" id="retention-error">this has to be acknowledged before submitting</p>
+</div>
+<button type="submit">Submit</button>
+</form>
+<script type="application/json" id="conditions">{}</script>
+<script src="form.js" defer></script>
+</main>
+</body>
+</html>

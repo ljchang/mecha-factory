@@ -1,0 +1,90 @@
+# A starter. See meeting.toml for what these are and are not.
+#
+# The highest-volume type, and the one where a deterministic decline rule is
+# worth the most: a request that fails on season or capacity never becomes a
+# thread at all. Those rules are the deployment's, not the manifest's — what
+# belongs here is the *shape* the rule reads.
+
+id = "lab-application"
+version = 1
+title = "Apply to work in the lab"
+description = "For students and researchers asking about a position."
+retain_days = 365
+
+[[fields]]
+name = "requester_name"
+label = "Your name"
+kind = "text"
+max_length = 120
+required = true
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "stage"
+label = "Where you are"
+kind = "select"
+required = true
+options = [
+  { value = "undergraduate", label = "Undergraduate" },
+  { value = "masters", label = "Master's student" },
+  { value = "phd", label = "PhD applicant or student" },
+  { value = "postdoc", label = "Postdoctoral" },
+  { value = "other", label = "Something else" },
+]
+
+[[fields]]
+name = "current_institution"
+label = "Where you are now"
+kind = "text"
+max_length = 160
+required = true
+
+[[fields]]
+name = "start_by"
+label = "When you'd want to start"
+kind = "date"
+required = true
+
+[[fields]]
+name = "funding"
+label = "Funding"
+kind = "select"
+required = true
+options = [
+  { value = "have_own", label = "I have my own funding" },
+  { value = "applying", label = "I'm applying for funding" },
+  { value = "need", label = "I'd need funding" },
+  { value = "unsure", label = "I'm not sure yet" },
+]
+
+[[fields]]
+name = "funding_detail"
+label = "Which funding"
+help = "The scheme and its deadline, if there is one."
+kind = "long_text"
+max_length = 600
+required = true
+show_when = { field = "funding", op = "in", value = ["have_own", "applying"] }
+
+[[fields]]
+name = "interests"
+label = "What you want to work on"
+help = "What you'd want to do here specifically, rather than a summary of the lab."
+kind = "long_text"
+max_length = 2000
+required = true
+
+[[fields]]
+name = "materials_url"
+label = "A link to your CV"
+kind = "url"
+
+[[acknowledgments]]
+id = "read_the_page"
+label = "I've read what the lab currently works on."
+description = "A message that could have been sent to anyone usually gets a reply that could have been written by anyone."

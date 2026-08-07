@@ -1,0 +1,733 @@
+//! The component gallery: every field kind, every state, in every built-in
+//! theme, rendered by the renderer that serves the real forms.
+//!
+//! ```sh
+//! cargo run --example gallery -- /tmp/gallery
+//! xdg-open /tmp/gallery/index.html
+//! ```
+//!
+//! **Generated, never drawn.** A gallery of hand-written HTML is a lie the
+//! first time `form.rs` changes, and a lie about what a form looks like is the
+//! most convincing kind — nobody diffs a screenshot. So every page here comes
+//! out of [`RequestType::form`] and [`RequestType::upload_form`], from manifests
+//! written in the same TOML a tenant writes, and the same bytes are what the
+//! documentation site embeds.
+//!
+//! Two things keep it honest as the crate moves:
+//!
+//! - [`kind_tag`] matches `FieldKind` **exhaustively**, so a new variant stops
+//!   this example compiling. The fix is three lines away from the arm you just
+//!   added, and [`every_kind_is_shown`] fails until a real field of that kind
+//!   exists in `KINDS`. A gallery missing a kind is worse than no gallery,
+//!   because it reads as a complete list.
+//! - Themes come from [`BUILT_IN_THEMES`], so a third palette appears
+//!   everywhere for free. That is the claim `theme.rs` makes — tokens, never
+//!   rules — and this is the evidence for it: if switching a theme leaks a
+//!   colour the structural sheet should not own, it is visible here.
+//!
+//! The error states are **produced by the validator**, not typed out. A gallery
+//! showing invented error text would document a form nobody is ever served.
+
+use mecha_manifest::{escape_text, FieldKind, FormOptions, Phase, RequestType, Theme};
+use mecha_manifest::{BUILT_IN_THEMES, MAX_FILE_BYTES_PER_TYPE};
+use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let out: PathBuf = std::env::args()
+        .nth(1)
+        .ok_or("usage: gallery <output-dir>")?
+        .into();
+
+    let entries = entries()?;
+    every_kind_is_shown(&entries);
+
+    fs::create_dir_all(out.join("source"))?;
+    fs::create_dir_all(out.join("schema"))?;
+    for entry in &entries {
+        // The manifest text verbatim, comments and all — the documentation
+        // shows "what you write" beside "what it renders", and a re-serialised
+        // copy would drop exactly the comments that explain the choice.
+        fs::write(
+            out.join("source").join(format!("{}.toml", entry.id)),
+            &entry.toml,
+        )?;
+        fs::write(
+            out.join("schema").join(format!("{}.json", entry.id)),
+            serde_json::to_string_pretty(&entry.request.json_schema())? + "\n",
+        )?;
+    }
+
+    let mut pages = 0usize;
+    for theme in BUILT_IN_THEMES {
+        let dir = out.join(theme.name);
+        fs::create_dir_all(&dir)?;
+        let mut assets_written = false;
+        for entry in &entries {
+            for variant in entry.variants() {
+                let options = FormOptions {
+                    // Inert on purpose. The gallery is static, so nothing here
+                    // posts anywhere; what a submit click does demonstrate is
+                    // the HTML5 constraint layer, which refuses to navigate
+                    // while a required field is empty.
+                    action: "#".into(),
+                    // Relative to the page's own directory, which is where the
+                    // theme's stylesheet is written.
+                    assets: String::new(),
+                    theme,
+                    ..variant.options(entry)
+                };
+                let page = match variant {
+                    Variant::Upload => entry.request.upload_form(&options),
+                    _ => entry.request.form(&options),
+                };
+                fs::write(dir.join(variant.file_name(entry)), &page.html)?;
+                pages += 1;
+                if !assets_written {
+                    for (name, contents) in page.assets() {
+                        fs::write(dir.join(name), contents)?;
+                    }
+                    assets_written = true;
+                }
+            }
+        }
+    }
+
+    fs::write(out.join("index.html"), landing(&entries))?;
+    fs::write(
+        out.join("gallery.css"),
+        format!("{}{LANDING_CSS}", Theme::default().css()),
+    )?;
+
+    println!("gallery → {}", out.display());
+    println!(
+        "  {} types × {} themes = {pages} pages, {} field kinds covered",
+        entries.len(),
+        BUILT_IN_THEMES.len(),
+        ALL_KINDS.len()
+    );
+    println!("  open {}", out.join("index.html").display());
+    Ok(())
+}
+
+/// One request type in the gallery, and the text it was written as.
+struct Entry {
+    id: String,
+    /// What this type is here to show, in one line, for the landing page.
+    blurb: &'static str,
+    toml: String,
+    request: RequestType,
+    /// A deliberately bad submission, when this type demonstrates error states.
+    /// Validated rather than asserted: the messages on the page are the ones a
+    /// real submitter would read.
+    bad_submission: Option<Map<String, Value>>,
+}
+
+/// A rendering of one type. Every variant is a state the served forms actually
+/// reach — none of it is a mode invented for the gallery.
+enum Variant {
+    /// The public submission form.
+    Plain,
+    /// The same form, re-served with a rejected submission on it.
+    Errors,
+    /// The post-verification upload page: the one place a file input exists.
+    Upload,
+    /// One page of a multi-step form, which is how a step is really served.
+    Step(String),
+}
+
+impl Entry {
+    fn variants(&self) -> Vec<Variant> {
+        let mut out = vec![Variant::Plain];
+        if self.bad_submission.is_some() {
+            out.push(Variant::Errors);
+        }
+        if self.request.has_file_fields() {
+            out.push(Variant::Upload);
+        }
+        // Derived from the manifest rather than listed, so a starter that grows
+        // a step grows a page.
+        out.extend(
+            self.request
+                .steps
+                .iter()
+                .map(|step| Variant::Step(step.id.clone())),
+        );
+        out
+    }
+}
+
+impl Variant {
+    fn file_name(&self, entry: &Entry) -> String {
+        match self {
+            Variant::Plain => format!("{}.html", entry.id),
+            Variant::Errors => format!("{}.errors.html", entry.id),
+            Variant::Upload => format!("{}.upload.html", entry.id),
+            Variant::Step(id) => format!("{}.step-{id}.html", entry.id),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            Variant::Plain => "the form".into(),
+            Variant::Errors => "rejected, with errors".into(),
+            Variant::Upload => "upload page".into(),
+            Variant::Step(id) => format!("step: {id}"),
+        }
+    }
+
+    /// The parts of [`FormOptions`] this variant owns. The caller fills in the
+    /// theme and the asset prefix, which are the same for every page.
+    fn options(&self, entry: &Entry) -> FormOptions {
+        match self {
+            Variant::Plain | Variant::Upload => FormOptions::default(),
+            Variant::Step(id) => FormOptions {
+                step: Some(id.clone()),
+                ..FormOptions::default()
+            },
+            Variant::Errors => {
+                let raw = entry
+                    .bad_submission
+                    .clone()
+                    .expect("an errors variant exists only where a bad submission does");
+                // `Submit`, not `Complete`: this is the public form POST, where
+                // a file value is refused outright rather than required.
+                let errors = entry
+                    .request
+                    .validate_at(&raw, Phase::Submit)
+                    .err()
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "`{}`'s bad submission validates cleanly, so the errors page \
+                             would render no errors — fix the sample, not the assertion",
+                            entry.id
+                        )
+                    });
+                FormOptions {
+                    // The submitter's own answers, handed back to them. Which
+                    // is also the one interpolation in this crate that carries
+                    // stranger-supplied text, so the gallery exercises it.
+                    values: raw,
+                    errors,
+                    ..FormOptions::default()
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The manifests
+// ---------------------------------------------------------------------------
+
+fn entries() -> Result<Vec<Entry>, Box<dyn std::error::Error>> {
+    let mut out = vec![
+        Entry {
+            id: "kinds".into(),
+            blurb: "One field of every kind, plus acknowledgments.",
+            toml: KINDS.into(),
+            request: RequestType::from_toml(KINDS)?,
+            bad_submission: Some(bad_kinds_submission()),
+        },
+        Entry {
+            id: "conditions".into(),
+            blurb: "show_when, across the operators worth seeing.",
+            toml: CONDITIONS.into(),
+            request: RequestType::from_toml(CONDITIONS)?,
+            bad_submission: None,
+        },
+        Entry {
+            id: "stepped".into(),
+            blurb: "A multi-step form, and one step that only sometimes exists.",
+            toml: STEPPED.into(),
+            request: RequestType::from_toml(STEPPED)?,
+            bad_submission: None,
+        },
+    ];
+
+    // The shipped starters, rendered by the same path. These are the ones
+    // somebody will actually copy, so seeing them is worth more than seeing a
+    // synthetic type — and a starter that stopped rendering would show up here.
+    let types = Path::new(env!("CARGO_MANIFEST_DIR")).join("types");
+    let mut starters: Vec<PathBuf> = fs::read_dir(&types)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .collect();
+    starters.sort();
+    for path in starters {
+        let toml = fs::read_to_string(&path)?;
+        let request = RequestType::from_toml(&toml)?;
+        out.push(Entry {
+            id: request.id.clone(),
+            blurb: "A shipped starter, rendered by the same path.",
+            toml,
+            request,
+            bad_submission: None,
+        });
+    }
+    Ok(out)
+}
+
+/// A submission wrong in as many distinct ways as the validator has answers
+/// for. Deliberately not exhaustive of the error space — it is a page someone
+/// reads, and thirty messages would demonstrate nothing thirteen do not.
+fn bad_kinds_submission() -> Map<String, Value> {
+    // Over `long_answer`'s 600-character cap, which is the error worth showing:
+    // it is the one every request type has, on the field a stranger writes into.
+    let long = "Every one of these answers is wrong on purpose. ".repeat(20);
+    json!({
+        // `short_text` is required and simply absent.
+        "reference_code": "nh-301",
+        "long_answer": long,
+        "email_address": "not-an-address",
+        "reading": "javascript:alert(1)",
+        "preferred_date": "2019-06-01",
+        "headcount": 5000,
+        "format": "carrier-pigeon",
+        "topics": ["memory", "sandboxing", "evaluation"],
+        // A urlencoded string aimed at a file field is somebody probing.
+        "supporting_document": "cv.pdf",
+        // `accurate` and `retention` are unticked, which is how a checkbox is
+        // absent — a browser submits nothing for one.
+    })
+    .as_object()
+    .expect("a json! object is an object")
+    .clone()
+}
+
+const KINDS: &str = r##"# Every field kind the manifest defines, in one type.
+#
+# This is the gallery's specimen, not a starter — copy `speaking.toml` if you
+# are writing a real request type. What it is good for is seeing what each
+# `kind` renders as, and what each one enforces.
+
+id = "kinds"
+version = 1
+title = "Every field kind"
+description = "One of each. This page is a rendering gallery: the browser validates natively, and submitting goes nowhere."
+retain_days = 30
+
+[verification]
+field = "email_address"
+
+[[fields]]
+name = "short_text"
+label = "Text"
+kind = "text"
+max_length = 120
+required = true
+help = "One line. max_length is required on every text field — these forms sit on an unauthenticated endpoint, and an uncapped field is an unbounded write."
+
+[[fields]]
+name = "reference_code"
+label = "Text, with a pattern"
+kind = "text"
+max_length = 16
+pattern = "^[A-Z]{2}-[0-9]{4}$"
+help = "Two letters, a hyphen, four digits — NH-0301. The pattern rides on the input and the browser enforces it; the server enforces the cap and the type, never the regex."
+
+[[fields]]
+name = "long_answer"
+label = "Long text"
+kind = "long_text"
+max_length = 600
+help = "Many lines, same cap rule. Free text, which is what the front door quarantines: a privileged run sees the extraction of this, never the prose."
+
+[[fields]]
+name = "email_address"
+label = "Email"
+kind = "email"
+required = true
+help = "Capped at 254 by default, the practical maximum for an address. [verification] names this field, which is why it has to be required."
+
+[[fields]]
+name = "reading"
+label = "URL"
+kind = "url"
+help = "Data to show, never a thing to fetch. Nothing in this crate resolves one, and nothing downstream should — a form field is not a reason to make an outbound request to an address a stranger chose."
+
+[[fields]]
+name = "preferred_date"
+label = "Date"
+kind = "date"
+min = "2026-01-01"
+max = "2026-12-31"
+help = "YYYY-MM-DD, inclusive bounds. Literal dates rather than offsets: an offset would have to be resolved against a clock, and the browser's clock is not the server's."
+
+[[fields]]
+name = "headcount"
+label = "Integer"
+kind = "integer"
+min = 1
+max = 500
+help = "Inclusive bounds, enforced at both ends."
+
+[[fields]]
+name = "format"
+label = "Select"
+kind = "select"
+required = true
+help = "One of ours. Nothing a stranger types can change which value this carries, which is what keeps the kind of a request out of their hands."
+options = [
+  { value = "in_person", label = "In person" },
+  { value = "remote", label = "Remote" },
+  { value = "hybrid", label = "Hybrid" },
+]
+
+[[fields]]
+name = "topics"
+label = "Multi-select"
+kind = "multi_select"
+max_choices = 2
+help = "Several of ours, up to max_choices. Renders as checkboxes rather than a multiple <select>, which nobody has ever operated correctly on a phone."
+options = [
+  { value = "memory", label = "Agent memory" },
+  { value = "sandboxing", label = "Sandboxing" },
+  { value = "evaluation", label = "Evaluation" },
+  { value = "provenance", label = "Provenance" },
+]
+
+[[fields]]
+name = "first_time"
+label = "Checkbox"
+kind = "bool"
+help = "A single boolean. Distinct from an acknowledgment, which is always required and carries something to read first."
+
+[[fields]]
+name = "supporting_document"
+label = "File"
+kind = "file"
+max_bytes = 4194304
+accept = ["pdf", "png"]
+help = "On the public form this renders as a note rather than an input: uploads happen after the address is verified, so the upload page is the one place a file input exists."
+
+[[acknowledgments]]
+id = "accurate"
+label = "What I have written here is accurate."
+
+[[acknowledgments]]
+id = "retention"
+label = "I understand this request is kept for 30 days."
+description = "Retention is declared by the request type, not negotiated per submission."
+"##;
+
+const CONDITIONS: &str = r##"# `show_when`, and the evaluator that reads it.
+#
+# The browser hides a field and the server enforces both halves — a hidden
+# field is never required and is never accepted. With JavaScript off every
+# conditional field is simply shown, which is the safe direction: a visible
+# optional field is a question you can ignore, where a hidden required one is
+# a form that cannot be submitted and does not say why.
+
+id = "conditions"
+version = 1
+title = "Conditional fields"
+description = "Change the format, tick the box, put a big number in attendance — the fields below react. The server re-evaluates every one of these rules on submit."
+
+[verification]
+field = "email_address"
+
+[[fields]]
+name = "email_address"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "format"
+label = "How will it run?"
+kind = "select"
+required = true
+options = [
+  { value = "in_person", label = "In person" },
+  { value = "remote", label = "Remote" },
+  { value = "hybrid", label = "Hybrid" },
+]
+
+[[fields]]
+name = "venue"
+label = "Where"
+kind = "text"
+max_length = 160
+required = true
+show_when = { field = "format", op = "in", value = ["in_person", "hybrid"] }
+help = "op = \"in\". Required only when shown: the browser did not show it, so the server cannot insist on it."
+
+[[fields]]
+name = "travel_covered"
+label = "Travel is covered"
+kind = "bool"
+show_when = { field = "format", op = "ne", value = "remote" }
+help = "op = \"ne\"."
+
+[[fields]]
+name = "travel_budget"
+label = "Budget, in dollars"
+kind = "integer"
+min = 0
+show_when = { field = "travel_covered", op = "is_true" }
+help = "op = \"is_true\", not \"present\" — an unticked checkbox is present and false, so `present` would show this whatever the answer."
+
+[[fields]]
+name = "headcount"
+label = "Expected attendance"
+kind = "integer"
+min = 1
+max = 5000
+
+[[fields]]
+name = "overflow_plan"
+label = "Overflow plan"
+kind = "long_text"
+max_length = 600
+show_when = { field = "headcount", op = "gt", value = 200 }
+help = "op = \"gt\". A non-numeric value on either side does not hold, rather than erroring."
+
+[[fields]]
+name = "venue_notes"
+label = "Anything about the venue"
+kind = "long_text"
+max_length = 600
+show_when = { field = "venue", op = "present" }
+help = "op = \"present\" means submitted and not empty. An empty string is absent, or every optional field would satisfy its own dependants."
+"##;
+
+const STEPPED: &str = r##"# Multi-step, which is server-side: one page per step, a POST between them.
+#
+# That is what makes it work with JavaScript off and survive a closed tab —
+# a draft is a row on the box keyed by the capability token in the URL, not
+# state in a browser somebody closed.
+#
+# Fields are declared once, in order, and a step references them by name. The
+# system this borrows from keeps `fields`, `requiredFields`, `hiddenFields` and
+# `conditionalFields` as four parallel lists, which can disagree; a name in
+# both `requiredFields` and `hiddenFields` is a form nobody can submit. Here a
+# field owns both facts, so there is nowhere for the contradiction to live.
+
+id = "stepped"
+version = 1
+title = "A form in steps"
+description = "Three steps, the last of which only exists for some answers."
+
+[verification]
+field = "email_address"
+
+[[fields]]
+name = "requester_name"
+label = "Your name"
+kind = "text"
+max_length = 120
+required = true
+
+[[fields]]
+name = "email_address"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "format"
+label = "How will it run?"
+kind = "select"
+required = true
+options = [
+  { value = "in_person", label = "In person" },
+  { value = "remote", label = "Remote" },
+  { value = "hybrid", label = "Hybrid" },
+]
+
+[[fields]]
+name = "summary"
+label = "What are you asking for?"
+kind = "long_text"
+max_length = 1200
+required = true
+
+[[fields]]
+name = "travel_covered"
+label = "Travel is covered"
+kind = "bool"
+
+[[fields]]
+name = "travel_notes"
+label = "Anything about the travel"
+kind = "long_text"
+max_length = 600
+
+[[steps]]
+id = "who"
+title = "Who you are"
+fields = ["requester_name", "email_address"]
+
+[[steps]]
+id = "what"
+title = "What you're asking"
+description = "Enough to answer yes or no without a second exchange."
+fields = ["format", "summary"]
+
+# A whole step, skipped. A field on a hidden step is not required, however it
+# is declared, and a record carrying a field the browser never showed is a
+# record that differs from what was submitted.
+[[steps]]
+id = "travel"
+title = "Travel"
+fields = ["travel_covered", "travel_notes"]
+show_when = { field = "format", op = "not_in", value = ["remote"] }
+"##;
+
+// ---------------------------------------------------------------------------
+// Coverage
+// ---------------------------------------------------------------------------
+
+/// Every `FieldKind`, as the tag its TOML spells it with.
+///
+/// **Exhaustive on purpose.** Adding a variant to `FieldKind` stops this
+/// example compiling, and the fix is to add the arm here, the tag to
+/// [`ALL_KINDS`] directly below, and a real field of that kind to `KINDS`.
+/// Three edits sounds like friction until you consider the alternative: a
+/// gallery that is missing a kind reads as a complete list of them.
+fn kind_tag(kind: &FieldKind) -> &'static str {
+    match kind {
+        FieldKind::Text { .. } => "text",
+        FieldKind::LongText { .. } => "long_text",
+        FieldKind::Email { .. } => "email",
+        FieldKind::Url { .. } => "url",
+        FieldKind::Date { .. } => "date",
+        FieldKind::Integer { .. } => "integer",
+        FieldKind::Select { .. } => "select",
+        FieldKind::MultiSelect { .. } => "multi_select",
+        FieldKind::Bool => "bool",
+        FieldKind::File { .. } => "file",
+    }
+}
+
+/// The arms of [`kind_tag`], as data. Kept adjacent to it so the pair is hard
+/// to update by half.
+const ALL_KINDS: &[&str] = &[
+    "text",
+    "long_text",
+    "email",
+    "url",
+    "date",
+    "integer",
+    "select",
+    "multi_select",
+    "bool",
+    "file",
+];
+
+fn every_kind_is_shown(entries: &[Entry]) {
+    let shown: BTreeSet<&str> = entries
+        .iter()
+        .flat_map(|e| e.request.fields.iter())
+        .map(|f| kind_tag(&f.kind))
+        .collect();
+    let missing: Vec<&&str> = ALL_KINDS.iter().filter(|k| !shown.contains(**k)).collect();
+    assert!(
+        missing.is_empty(),
+        "the gallery renders no field of kind {missing:?} — add one to `KINDS`, \
+         or the gallery documents a smaller manifest format than the one that ships"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The landing page
+// ---------------------------------------------------------------------------
+
+/// A contents page, for opening the gallery from a file manager. The
+/// documentation site builds its own frame around these pages, so this one is
+/// deliberately plain: it exists so `cargo run --example gallery` is a thing
+/// you can look at without a static server or a docs build.
+fn landing(entries: &[Entry]) -> String {
+    let mut body = String::new();
+    body.push_str(
+        "<h1>Component gallery</h1>\n<p class=\"intro\">Generated by \
+         <code>cargo run --example gallery</code>. Every page below is produced by the \
+         renderer that serves the real forms, from a manifest in <code>source/</code>. \
+         The forms validate natively in your browser and submit nowhere.</p>\n",
+    );
+
+    for entry in entries {
+        body.push_str(&format!(
+            "<section>\n<h2>{}</h2>\n<p class=\"blurb\">{}</p>\n\
+             <p class=\"files\"><a href=\"source/{}.toml\">manifest</a> · \
+             <a href=\"schema/{}.json\">JSON Schema</a></p>\n",
+            escape_text(&entry.request.title),
+            escape_text(entry.blurb),
+            escape_text(&entry.id),
+            escape_text(&entry.id),
+        ));
+        for theme in BUILT_IN_THEMES {
+            body.push_str(&format!(
+                "<p class=\"theme\"><span class=\"name\">{}</span> ",
+                escape_text(theme.name)
+            ));
+            let links: Vec<String> = entry
+                .variants()
+                .iter()
+                .map(|variant| {
+                    format!(
+                        "<a href=\"{}/{}\">{}</a>",
+                        escape_text(theme.name),
+                        escape_text(&variant.file_name(entry)),
+                        escape_text(&variant.label())
+                    )
+                })
+                .collect();
+            body.push_str(&links.join(" · "));
+            body.push_str("</p>\n");
+        }
+        body.push_str("</section>\n");
+    }
+
+    body.push_str(&format!(
+        "<p class=\"foot\">{} field kinds · {} themes · file fields cap at \
+         {} MB per request type.</p>\n",
+        ALL_KINDS.len(),
+        BUILT_IN_THEMES.len(),
+        MAX_FILE_BYTES_PER_TYPE / (1024 * 1024),
+    ));
+
+    format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n\
+         <meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>mecha-factory · component gallery</title>\n\
+         {}\n\
+         <link rel=\"stylesheet\" href=\"gallery.css\">\n\
+         </head>\n<body>\n{}<main>\n{body}</main>\n</body>\n</html>\n",
+        mecha_manifest::FAVICON_LINK,
+        mecha_manifest::site_header(),
+    )
+}
+
+/// Structure for the contents page only, reading the same tokens a theme
+/// emits. It hardcodes no colour, for the same reason the form's sheet does
+/// not: a second place colours live is a second place they drift.
+const LANDING_CSS: &str = r#"
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--text);
+  font-family: var(--font-sans); line-height: 1.55;
+}
+header.site { padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); }
+header.site svg { display: block; height: 22px; width: auto; }
+main { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+h1 { font-size: 1.75rem; margin: 0 0 0.5rem; }
+h2 { font-size: 1.0625rem; font-family: var(--font-mono); font-weight: 600; margin: 0 0 0.25rem; }
+p { margin: 0 0 0.5rem; }
+.intro { color: var(--muted); margin-bottom: 2.5rem; }
+.blurb { color: var(--muted); font-size: 0.9375rem; }
+code { font-family: var(--font-mono); font-size: 0.9em; }
+section { padding: 1.25rem 0; border-top: 1px solid var(--line); }
+.files, .theme { font-size: 0.875rem; }
+.theme .name {
+  display: inline-block; min-width: 6rem; color: var(--muted);
+  font-family: var(--font-mono); font-size: 0.8125rem;
+}
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: var(--radius); }
+.foot { margin-top: 2.5rem; color: var(--muted); font-size: 0.8125rem; }
+"#;

@@ -103,8 +103,33 @@ impl ContentClass {
     /// looks at and which submits nothing anywhere. The gate serves forms, and
     /// a form has to POST. See [`gate_headers`].
     pub fn headers(&self) -> Vec<Header> {
+        self.headers_framed_by(None)
+    }
+
+    /// The same headers, with one extra permitted frame ancestor — the gate,
+    /// whose signed-in viewer frames a bundle to put the owner's chrome
+    /// beside it.
+    ///
+    /// This deliberately revises an older rule that read "so a notebook
+    /// cannot be framed by the gate". What that rule actually protected is
+    /// preserved by the browser regardless of this directive: a framed
+    /// bundle keeps its own origin, so its scripts still cannot reach the
+    /// gate's DOM, cookies or session — cross-origin iframe isolation is not
+    /// ours to grant or revoke. What the directive governs is UI redressing,
+    /// and the only pages the extra ancestor admits are the gate's own,
+    /// which tenants cannot author. Every other origin on the web stays
+    /// refused. The parameter is an origin, not a boolean, because the gate's
+    /// name is deployment configuration this crate must not guess.
+    pub fn headers_framed_by(&self, gate: Option<&str>) -> Vec<Header> {
+        let csp = match gate {
+            None => self.csp(),
+            Some(origin) => self.csp().replace(
+                "frame-ancestors 'self'",
+                &format!("frame-ancestors 'self' {origin}"),
+            ),
+        };
         let mut out = vec![
-            ("Content-Security-Policy", self.csp()),
+            ("Content-Security-Policy", csp),
             ("X-Content-Type-Options", "nosniff".into()),
             ("Referrer-Policy", "no-referrer".into()),
             // A published artifact is immutable at its version URL, so a

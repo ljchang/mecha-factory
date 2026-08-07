@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Apply to work in the lab</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Cstyle%3Epath%7Bfill:%235d5294%7D@media(prefers-color-scheme:dark)%7Bpath%7Bfill:%23b5abfc%7D%7D%3C/style%3E%3Cpath%20d='M0%200h24l8%2010%208-10h24v20H0z'/%3E%3Cpath%20d='M0%2024h16v16H0zM48%2024h16v16H48zM0%2044h16v20H0zM48%2044h16v20H48z'/%3E%3Cpath%20d='M16%2044v20h12zM48%2044v20H36z'/%3E%3Cpath%20d='M20%2028h24v8H20z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="form.css">
+</head>
+<body>
+<header class="site"><a class="mark" href="/" aria-label="mecha"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 63 54" width="28" height="24" fill="currentColor" role="img" aria-label="mecha"><path d="M0 0h24l7.5 8.5L39 0h24v16H0z"></path><path d="M0 20h14v15H0zM49 20h14v15H49zM0 39h14v15H0zM49 39h14v15H49z"></path><path d="M14 39v15h13.24zM49 39v15H35.76z"></path><path d="M21 24h21v7H21z"></path></svg></a></header>
+<main>
+<h1>Apply to work in the lab</h1>
+<p class="intro">For students and researchers asking about a position.</p>
+<form method="post" action="#">
+<div class="field" data-field="requester_name">
+<label for="requester_name">Your name <span class="req" aria-hidden="true">*</span></label>
+<input type="text" id="requester_name" name="requester_name" maxlength="120" value="" required>
+</div>
+<div class="field" data-field="requester_email">
+<label for="requester_email">Your email <span class="req" aria-hidden="true">*</span></label>
+<input type="email" id="requester_email" name="requester_email" maxlength="254" value="" required>
+</div>
+<div class="field" data-field="stage">
+<label for="stage">Where you are <span class="req" aria-hidden="true">*</span></label>
+<select id="stage" name="stage" required>
+<option value="">Choose…</option>
+<option value="undergraduate">Undergraduate</option>
+<option value="masters">Master&#39;s student</option>
+<option value="phd">PhD applicant or student</option>
+<option value="postdoc">Postdoctoral</option>
+<option value="other">Something else</option>
+</select>
+</div>
+<div class="field" data-field="current_institution">
+<label for="current_institution">Where you are now <span class="req" aria-hidden="true">*</span></label>
+<input type="text" id="current_institution" name="current_institution" maxlength="160" value="" required>
+</div>
+<div class="field" data-field="start_by">
+<label for="start_by">When you&#39;d want to start <span class="req" aria-hidden="true">*</span></label>
+<input type="date" id="start_by" name="start_by" value="" required>
+</div>
+<div class="field" data-field="funding">
+<label for="funding">Funding <span class="req" aria-hidden="true">*</span></label>
+<select id="funding" name="funding" required>
+<option value="">Choose…</option>
+<option value="have_own">I have my own funding</option>
+<option value="applying">I&#39;m applying for funding</option>
+<option value="need">I&#39;d need funding</option>
+<option value="unsure">I&#39;m not sure yet</option>
+</select>
+</div>
+<div class="field" data-field="funding_detail" data-conditional="true">
+<label for="funding_detail">Which funding <span class="req" aria-hidden="true">*</span></label>
+<p class="help" id="funding_detail-help">The scheme and its deadline, if there is one.</p>
+<textarea id="funding_detail" name="funding_detail" maxlength="600" rows="6" required aria-describedby="funding_detail-help"></textarea>
+</div>
+<div class="field" data-field="interests">
+<label for="interests">What you want to work on <span class="req" aria-hidden="true">*</span></label>
+<p class="help" id="interests-help">What you&#39;d want to do here specifically, rather than a summary of the lab.</p>
+<textarea id="interests" name="interests" maxlength="2000" rows="6" required aria-describedby="interests-help"></textarea>
+</div>
+<div class="field" data-field="materials_url">
+<label for="materials_url">A link to your CV</label>
+<input type="url" id="materials_url" name="materials_url" maxlength="2048" value="">
+</div>
+<div class="field ack" data-field="read_the_page">
+<label for="read_the_page"><input type="checkbox" id="read_the_page" name="read_the_page" value="true" required> I&#39;ve read what the lab currently works on.</label>
+<p class="help">A message that could have been sent to anyone usually gets a reply that could have been written by anyone.</p>
+</div>
+<button type="submit">Submit</button>
+</form>
+<script type="application/json" id="conditions">{"field:funding_detail":{"field":"funding","op":"in","value":["have_own","applying"]}}</script>
+<script src="form.js" defer></script>
+</main>
+</body>
+</html>

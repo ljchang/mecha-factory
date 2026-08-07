@@ -1,0 +1,75 @@
+/* theme: nocturne — The mecha palette. Dark-first, violet accent, amber for anything called out. */
+:root {
+  color-scheme: light dark;
+  --font-sans: Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --radius: 8px;
+  --ground: #ffffff;
+  --surface: #f7f7fa;
+  --text: #1a1a22;
+  --muted: #5a5a68;
+  --line: #dcdce4;
+  --accent: #5d5294;
+  --on-accent: #ffffff;
+  --ring: #9184d9;
+  --signal: #96601f;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ground: #12141f;
+    --surface: #161826;
+    --text: #e9e9ed;
+    --muted: #9a9aa8;
+    --line: #2b2741;
+    --accent: #b5abfc;
+    --on-accent: #12141f;
+    --ring: #9184d9;
+    --signal: #e8a24a;
+  }
+}
+:root[data-theme="light"] {
+  --ground: #ffffff;
+  --surface: #f7f7fa;
+  --text: #1a1a22;
+  --muted: #5a5a68;
+  --line: #dcdce4;
+  --accent: #5d5294;
+  --on-accent: #ffffff;
+  --ring: #9184d9;
+  --signal: #96601f;
+}
+:root[data-theme="dark"] {
+  --ground: #12141f;
+  --surface: #161826;
+  --text: #e9e9ed;
+  --muted: #9a9aa8;
+  --line: #2b2741;
+  --accent: #b5abfc;
+  --on-accent: #12141f;
+  --ring: #9184d9;
+  --signal: #e8a24a;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--ground); color: var(--text);
+  font-family: var(--font-sans); line-height: 1.55;
+}
+header.site { padding: 1rem 1.5rem; border-bottom: 1px solid var(--line); }
+header.site svg { display: block; height: 22px; width: auto; }
+main { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+h1 { font-size: 1.75rem; margin: 0 0 0.5rem; }
+h2 { font-size: 1.0625rem; font-family: var(--font-mono); font-weight: 600; margin: 0 0 0.25rem; }
+p { margin: 0 0 0.5rem; }
+.intro { color: var(--muted); margin-bottom: 2.5rem; }
+.blurb { color: var(--muted); font-size: 0.9375rem; }
+code { font-family: var(--font-mono); font-size: 0.9em; }
+section { padding: 1.25rem 0; border-top: 1px solid var(--line); }
+.files, .theme { font-size: 0.875rem; }
+.theme .name {
+  display: inline-block; min-width: 6rem; color: var(--muted);
+  font-family: var(--font-mono); font-size: 0.8125rem;
+}
+a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; border-radius: var(--radius); }
+.foot { margin-top: 2.5rem; color: var(--muted); font-size: 0.8125rem; }

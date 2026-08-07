@@ -72,7 +72,7 @@ pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};
 pub use csp::{gate_headers, Header};
 pub use digest::{digest_files, MANIFEST_FILE};
-pub use form::{site_header, FormOptions};
+pub use form::{site_header, FormOptions, FormPage};
 pub use media::{content_type, sniff, FileType};
 pub use request::{
     valid_id, Acknowledgment, Field, FieldKind, RequestType, Step, MAX_FILE_BYTES_PER_FIELD,

@@ -1,0 +1,86 @@
+{
+  "$id": "mecha-factory:request/lab-application/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "For students and researchers asking about a position.",
+  "properties": {
+    "current_institution": {
+      "maxLength": 160,
+      "title": "Where you are now",
+      "type": "string"
+    },
+    "funding": {
+      "enum": [
+        "have_own",
+        "applying",
+        "need",
+        "unsure"
+      ],
+      "title": "Funding",
+      "type": "string"
+    },
+    "funding_detail": {
+      "description": "The scheme and its deadline, if there is one.",
+      "maxLength": 600,
+      "title": "Which funding",
+      "type": "string"
+    },
+    "interests": {
+      "description": "What you'd want to do here specifically, rather than a summary of the lab.",
+      "maxLength": 2000,
+      "title": "What you want to work on",
+      "type": "string"
+    },
+    "materials_url": {
+      "format": "uri",
+      "maxLength": 2048,
+      "title": "A link to your CV",
+      "type": "string"
+    },
+    "read_the_page": {
+      "const": true,
+      "description": "A message that could have been sent to anyone usually gets a reply that could have been written by anyone.",
+      "title": "I've read what the lab currently works on.",
+      "type": "boolean"
+    },
+    "requester_email": {
+      "format": "email",
+      "maxLength": 254,
+      "title": "Your email",
+      "type": "string"
+    },
+    "requester_name": {
+      "maxLength": 120,
+      "title": "Your name",
+      "type": "string"
+    },
+    "stage": {
+      "enum": [
+        "undergraduate",
+        "masters",
+        "phd",
+        "postdoc",
+        "other"
+      ],
+      "title": "Where you are",
+      "type": "string"
+    },
+    "start_by": {
+      "format": "date",
+      "title": "When you'd want to start",
+      "type": "string"
+    }
+  },
+  "required": [
+    "requester_name",
+    "requester_email",
+    "stage",
+    "current_institution",
+    "start_by",
+    "funding",
+    "interests",
+    "read_the_page"
+  ],
+  "title": "Apply to work in the lab",
+  "type": "object"
+}

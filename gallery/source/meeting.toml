@@ -1,0 +1,94 @@
+# A starter, not a policy. Copy it, edit the fields, and the form, both
+# validators, the JSON Schema and the tool declaration regenerate.
+#
+# Nothing here encodes anyone's actual availability or decision rules — those
+# live in a deployment's own copy, never in a public repository.
+
+id = "meeting"
+version = 1
+title = "Request a meeting"
+description = "A few questions so I can answer without a thread."
+retain_days = 365
+
+[[fields]]
+name = "requester_name"
+label = "Your name"
+kind = "text"
+max_length = 120
+required = true
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+help = "I'll send a confirmation link here before anything reaches me."
+kind = "email"
+required = true
+
+[[fields]]
+name = "affiliation"
+label = "Where you're writing from"
+kind = "text"
+max_length = 160
+
+[[fields]]
+name = "purpose"
+label = "What the meeting is about"
+kind = "select"
+required = true
+options = [
+  { value = "advising", label = "Advising or mentoring" },
+  { value = "collaboration", label = "A possible collaboration" },
+  { value = "press", label = "Press or an interview" },
+  { value = "other", label = "Something else" },
+]
+
+# The reason a `select` carries most of the weight: nothing a stranger types
+# can change what kind of thing their request is. The free text below is read
+# by a human and by a quarantined extraction pass, never by a privileged one.
+[[fields]]
+name = "purpose_detail"
+label = "Say a little more"
+help = "Two or three sentences is plenty."
+kind = "long_text"
+max_length = 1200
+required = true
+show_when = { field = "purpose", op = "eq", value = "other" }
+
+[[fields]]
+name = "preferred_by"
+label = "Is there a date you need this before?"
+help = "Leave blank if there isn't one."
+kind = "date"
+
+[[fields]]
+name = "duration_minutes"
+label = "How long you think you need"
+kind = "integer"
+min = 15
+max = 120
+
+[[fields]]
+name = "remote_ok"
+label = "A video call works for me"
+kind = "bool"
+
+[[acknowledgments]]
+id = "understands_request"
+label = "I understand this is a request, not a booking, and may be declined."
+
+# What stands between an unauthenticated form and a queue that costs a triage
+# run per stranger. The field is named rather than guessed: this form has one
+# email field today, and the day it has two, "the first one" would send a
+# stranger's link to somebody who never asked for it.
+[verification]
+field = "requester_email"
+expires_hours = 48
+
+# What they see once they have clicked the link. Templated here, never composed
+# live — anything a submitter sees synchronously has to be computable by the
+# origin alone, or the form stops working the moment its agent is away.
+[confirmation]
+heading = "Thanks — that's in the queue"
+body = """
+Your request about {purpose} is confirmed, and it will be read by a person.
+"""

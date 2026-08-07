@@ -118,33 +118,47 @@ impl Chrome {
             } => format!(
                 "<header class=\"site\">\
                  <a class=\"mark\" href=\"/account\" aria-label=\"mecha\">{logo}</a>\
-                 <details class=\"account-menu\">\
-                 <summary>{handle}</summary>\
-                 <div class=\"menu\">\
-                 <p>{email}</p>\
-                 <nav><a href=\"/account#artifacts\">Artifacts</a>\
-                 <a href=\"/account#machines\">Machines</a>{docs}</nav>\
-                 <form method=\"post\" action=\"/account/pair\">\
-                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-                 <button type=\"submit\">Connect a machine</button></form>\
-                 <form method=\"post\" action=\"/account/signout\">\
-                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-                 <button type=\"submit\">Sign out</button></form>\
-                 </div></details></header>\n",
+                 <div class=\"site-right\">{dropdown}</div></header>\n",
                 logo = mecha_manifest::LOGO_MONO_SVG,
-                handle = mecha_manifest::escape_text(handle),
-                email = mecha_manifest::escape_text(email),
-                csrf = mecha_manifest::escape_text(csrf),
-                docs = match docs_url {
-                    Some(url) => format!(
-                        "<a href=\"{}\">Docs</a>",
-                        mecha_manifest::escape_text(url)
-                    ),
-                    None => String::new(),
-                },
+                dropdown = account_dropdown(handle, email, csrf, docs_url.as_deref()),
             ),
         }
     }
+}
+
+/// The signed-in dropdown, on its own so the gate's viewer can wear the same
+/// one beside its version menu.
+pub(crate) fn account_dropdown(
+    handle: &str,
+    email: &str,
+    csrf: &str,
+    docs_url: Option<&str>,
+) -> String {
+    format!(
+        "<details class=\"account-menu\">\
+         <summary>{handle}</summary>\
+         <div class=\"menu\">\
+         <p>{email}</p>\
+         <nav><a href=\"/account#artifacts\">Artifacts</a>\
+         <a href=\"/account#machines\">Machines</a>{docs}</nav>\
+         <form method=\"post\" action=\"/account/pair\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <button type=\"submit\">Connect a machine</button></form>\
+         <form method=\"post\" action=\"/account/signout\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <button type=\"submit\">Sign out</button></form>\
+         </div></details>",
+        handle = mecha_manifest::escape_text(handle),
+        email = mecha_manifest::escape_text(email),
+        csrf = mecha_manifest::escape_text(csrf),
+        docs = match docs_url {
+            Some(url) => format!(
+                "<a href=\"{}\">Docs</a>",
+                mecha_manifest::escape_text(url)
+            ),
+            None => String::new(),
+        },
+    )
 }
 
 /// The wrapper every non-form page uses.

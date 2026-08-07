@@ -1,0 +1,145 @@
+{
+  "$id": "mecha-factory:request/kinds/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "One of each. This page is a rendering gallery: the browser validates natively, and submitting goes nowhere.",
+  "properties": {
+    "accurate": {
+      "const": true,
+      "description": null,
+      "title": "What I have written here is accurate.",
+      "type": "boolean"
+    },
+    "email_address": {
+      "description": "Capped at 254 by default, the practical maximum for an address. [verification] names this field, which is why it has to be required.",
+      "format": "email",
+      "maxLength": 254,
+      "title": "Email",
+      "type": "string"
+    },
+    "first_time": {
+      "description": "A single boolean. Distinct from an acknowledgment, which is always required and carries something to read first.",
+      "title": "Checkbox",
+      "type": "boolean"
+    },
+    "format": {
+      "description": "One of ours. Nothing a stranger types can change which value this carries, which is what keeps the kind of a request out of their hands.",
+      "enum": [
+        "in_person",
+        "remote",
+        "hybrid"
+      ],
+      "title": "Select",
+      "type": "string"
+    },
+    "headcount": {
+      "description": "Inclusive bounds, enforced at both ends.",
+      "maximum": 500,
+      "minimum": 1,
+      "title": "Integer",
+      "type": "integer"
+    },
+    "long_answer": {
+      "description": "Many lines, same cap rule. Free text, which is what the front door quarantines: a privileged run sees the extraction of this, never the prose.",
+      "maxLength": 600,
+      "title": "Long text",
+      "type": "string"
+    },
+    "preferred_date": {
+      "description": "YYYY-MM-DD, inclusive bounds. Literal dates rather than offsets: an offset would have to be resolved against a clock, and the browser's clock is not the server's.",
+      "format": "date",
+      "formatMaximum": "2026-12-31",
+      "formatMinimum": "2026-01-01",
+      "title": "Date",
+      "type": "string"
+    },
+    "reading": {
+      "description": "Data to show, never a thing to fetch. Nothing in this crate resolves one, and nothing downstream should — a form field is not a reason to make an outbound request to an address a stranger chose.",
+      "format": "uri",
+      "maxLength": 2048,
+      "title": "URL",
+      "type": "string"
+    },
+    "reference_code": {
+      "description": "Two letters, a hyphen, four digits — NH-0301. The pattern rides on the input and the browser enforces it; the server enforces the cap and the type, never the regex.",
+      "maxLength": 16,
+      "pattern": "^[A-Z]{2}-[0-9]{4}$",
+      "title": "Text, with a pattern",
+      "type": "string"
+    },
+    "retention": {
+      "const": true,
+      "description": "Retention is declared by the request type, not negotiated per submission.",
+      "title": "I understand this request is kept for 30 days.",
+      "type": "boolean"
+    },
+    "short_text": {
+      "description": "One line. max_length is required on every text field — these forms sit on an unauthenticated endpoint, and an uncapped field is an unbounded write.",
+      "maxLength": 120,
+      "title": "Text",
+      "type": "string"
+    },
+    "supporting_document": {
+      "additionalProperties": false,
+      "description": "On the public form this renders as a note rather than an input: uploads happen after the address is verified, so the upload page is the one place a file input exists.",
+      "properties": {
+        "attachment_id": {
+          "type": "string"
+        },
+        "content_type": {
+          "enum": [
+            "application/pdf",
+            "image/png"
+          ],
+          "type": "string"
+        },
+        "filename": {
+          "maxLength": 255,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "size": {
+          "maximum": 4194304,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "filename",
+        "size",
+        "sha256",
+        "content_type"
+      ],
+      "title": "File",
+      "type": "object"
+    },
+    "topics": {
+      "description": "Several of ours, up to max_choices. Renders as checkboxes rather than a multiple <select>, which nobody has ever operated correctly on a phone.",
+      "items": {
+        "enum": [
+          "memory",
+          "sandboxing",
+          "evaluation",
+          "provenance"
+        ],
+        "type": "string"
+      },
+      "maxItems": 2,
+      "title": "Multi-select",
+      "type": "array",
+      "uniqueItems": true
+    }
+  },
+  "required": [
+    "short_text",
+    "email_address",
+    "format",
+    "accurate",
+    "retention"
+  ],
+  "title": "Every field kind",
+  "type": "object"
+}

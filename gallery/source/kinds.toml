@@ -1,0 +1,114 @@
+# Every field kind the manifest defines, in one type.
+#
+# This is the gallery's specimen, not a starter — copy `speaking.toml` if you
+# are writing a real request type. What it is good for is seeing what each
+# `kind` renders as, and what each one enforces.
+
+id = "kinds"
+version = 1
+title = "Every field kind"
+description = "One of each. This page is a rendering gallery: the browser validates natively, and submitting goes nowhere."
+retain_days = 30
+
+[verification]
+field = "email_address"
+
+[[fields]]
+name = "short_text"
+label = "Text"
+kind = "text"
+max_length = 120
+required = true
+help = "One line. max_length is required on every text field — these forms sit on an unauthenticated endpoint, and an uncapped field is an unbounded write."
+
+[[fields]]
+name = "reference_code"
+label = "Text, with a pattern"
+kind = "text"
+max_length = 16
+pattern = "^[A-Z]{2}-[0-9]{4}$"
+help = "Two letters, a hyphen, four digits — NH-0301. The pattern rides on the input and the browser enforces it; the server enforces the cap and the type, never the regex."
+
+[[fields]]
+name = "long_answer"
+label = "Long text"
+kind = "long_text"
+max_length = 600
+help = "Many lines, same cap rule. Free text, which is what the front door quarantines: a privileged run sees the extraction of this, never the prose."
+
+[[fields]]
+name = "email_address"
+label = "Email"
+kind = "email"
+required = true
+help = "Capped at 254 by default, the practical maximum for an address. [verification] names this field, which is why it has to be required."
+
+[[fields]]
+name = "reading"
+label = "URL"
+kind = "url"
+help = "Data to show, never a thing to fetch. Nothing in this crate resolves one, and nothing downstream should — a form field is not a reason to make an outbound request to an address a stranger chose."
+
+[[fields]]
+name = "preferred_date"
+label = "Date"
+kind = "date"
+min = "2026-01-01"
+max = "2026-12-31"
+help = "YYYY-MM-DD, inclusive bounds. Literal dates rather than offsets: an offset would have to be resolved against a clock, and the browser's clock is not the server's."
+
+[[fields]]
+name = "headcount"
+label = "Integer"
+kind = "integer"
+min = 1
+max = 500
+help = "Inclusive bounds, enforced at both ends."
+
+[[fields]]
+name = "format"
+label = "Select"
+kind = "select"
+required = true
+help = "One of ours. Nothing a stranger types can change which value this carries, which is what keeps the kind of a request out of their hands."
+options = [
+  { value = "in_person", label = "In person" },
+  { value = "remote", label = "Remote" },
+  { value = "hybrid", label = "Hybrid" },
+]
+
+[[fields]]
+name = "topics"
+label = "Multi-select"
+kind = "multi_select"
+max_choices = 2
+help = "Several of ours, up to max_choices. Renders as checkboxes rather than a multiple <select>, which nobody has ever operated correctly on a phone."
+options = [
+  { value = "memory", label = "Agent memory" },
+  { value = "sandboxing", label = "Sandboxing" },
+  { value = "evaluation", label = "Evaluation" },
+  { value = "provenance", label = "Provenance" },
+]
+
+[[fields]]
+name = "first_time"
+label = "Checkbox"
+kind = "bool"
+help = "A single boolean. Distinct from an acknowledgment, which is always required and carries something to read first."
+
+[[fields]]
+name = "supporting_document"
+label = "File"
+kind = "file"
+max_bytes = 4194304
+accept = ["pdf", "png"]
+help = "On the public form this renders as a note rather than an input: uploads happen after the address is verified, so the upload page is the one place a file input exists."
+
+[[acknowledgments]]
+id = "accurate"
+label = "What I have written here is accurate."
+
+[[acknowledgments]]
+id = "retention"
+label = "I understand this request is kept for 30 days."
+description = "Retention is declared by the request type, not negotiated per submission."

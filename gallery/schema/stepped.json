@@ -1,0 +1,50 @@
+{
+  "$id": "mecha-factory:request/stepped/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Three steps, the last of which only exists for some answers.",
+  "properties": {
+    "email_address": {
+      "format": "email",
+      "maxLength": 254,
+      "title": "Your email",
+      "type": "string"
+    },
+    "format": {
+      "enum": [
+        "in_person",
+        "remote",
+        "hybrid"
+      ],
+      "title": "How will it run?",
+      "type": "string"
+    },
+    "requester_name": {
+      "maxLength": 120,
+      "title": "Your name",
+      "type": "string"
+    },
+    "summary": {
+      "maxLength": 1200,
+      "title": "What are you asking for?",
+      "type": "string"
+    },
+    "travel_covered": {
+      "title": "Travel is covered",
+      "type": "boolean"
+    },
+    "travel_notes": {
+      "maxLength": 600,
+      "title": "Anything about the travel",
+      "type": "string"
+    }
+  },
+  "required": [
+    "requester_name",
+    "email_address",
+    "format",
+    "summary"
+  ],
+  "title": "A form in steps",
+  "type": "object"
+}

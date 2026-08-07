@@ -1,0 +1,79 @@
+# `show_when`, and the evaluator that reads it.
+#
+# The browser hides a field and the server enforces both halves — a hidden
+# field is never required and is never accepted. With JavaScript off every
+# conditional field is simply shown, which is the safe direction: a visible
+# optional field is a question you can ignore, where a hidden required one is
+# a form that cannot be submitted and does not say why.
+
+id = "conditions"
+version = 1
+title = "Conditional fields"
+description = "Change the format, tick the box, put a big number in attendance — the fields below react. The server re-evaluates every one of these rules on submit."
+
+[verification]
+field = "email_address"
+
+[[fields]]
+name = "email_address"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "format"
+label = "How will it run?"
+kind = "select"
+required = true
+options = [
+  { value = "in_person", label = "In person" },
+  { value = "remote", label = "Remote" },
+  { value = "hybrid", label = "Hybrid" },
+]
+
+[[fields]]
+name = "venue"
+label = "Where"
+kind = "text"
+max_length = 160
+required = true
+show_when = { field = "format", op = "in", value = ["in_person", "hybrid"] }
+help = "op = \"in\". Required only when shown: the browser did not show it, so the server cannot insist on it."
+
+[[fields]]
+name = "travel_covered"
+label = "Travel is covered"
+kind = "bool"
+show_when = { field = "format", op = "ne", value = "remote" }
+help = "op = \"ne\"."
+
+[[fields]]
+name = "travel_budget"
+label = "Budget, in dollars"
+kind = "integer"
+min = 0
+show_when = { field = "travel_covered", op = "is_true" }
+help = "op = \"is_true\", not \"present\" — an unticked checkbox is present and false, so `present` would show this whatever the answer."
+
+[[fields]]
+name = "headcount"
+label = "Expected attendance"
+kind = "integer"
+min = 1
+max = 5000
+
+[[fields]]
+name = "overflow_plan"
+label = "Overflow plan"
+kind = "long_text"
+max_length = 600
+show_when = { field = "headcount", op = "gt", value = 200 }
+help = "op = \"gt\". A non-numeric value on either side does not hold, rather than erroring."
+
+[[fields]]
+name = "venue_notes"
+label = "Anything about the venue"
+kind = "long_text"
+max_length = 600
+show_when = { field = "venue", op = "present" }
+help = "op = \"present\" means submitted and not empty. An empty string is absent, or every optional field would satisfy its own dependants."

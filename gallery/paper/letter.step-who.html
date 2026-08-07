@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Request a letter of recommendation</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2064%2064'%3E%3Cstyle%3Epath%7Bfill:%235d5294%7D@media(prefers-color-scheme:dark)%7Bpath%7Bfill:%23b5abfc%7D%7D%3C/style%3E%3Cpath%20d='M0%200h24l8%2010%208-10h24v20H0z'/%3E%3Cpath%20d='M0%2024h16v16H0zM48%2024h16v16H48zM0%2044h16v20H0zM48%2044h16v20H48z'/%3E%3Cpath%20d='M16%2044v20h12zM48%2044v20H36z'/%3E%3Cpath%20d='M20%2028h24v8H20z'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="form.css">
+</head>
+<body>
+<header class="site"><a class="mark" href="/" aria-label="mecha"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 63 54" width="28" height="24" fill="currentColor" role="img" aria-label="mecha"><path d="M0 0h24l7.5 8.5L39 0h24v16H0z"></path><path d="M0 20h14v15H0zM49 20h14v15H49zM0 39h14v15H0zM49 39h14v15H49z"></path><path d="M14 39v15h13.24zM49 39v15H35.76z"></path><path d="M21 24h21v7H21z"></path></svg></a></header>
+<main>
+<h1>Request a letter of recommendation</h1>
+<p class="intro">Everything I need to write a good one, in one place.</p>
+<form method="post" action="#">
+<fieldset id="step-who" data-step="who"><legend>Who you are</legend>
+<div class="field" data-field="requester_name">
+<label for="requester_name">Your name <span class="req" aria-hidden="true">*</span></label>
+<input type="text" id="requester_name" name="requester_name" maxlength="120" value="" required>
+</div>
+<div class="field" data-field="requester_email">
+<label for="requester_email">Your email <span class="req" aria-hidden="true">*</span></label>
+<input type="email" id="requester_email" name="requester_email" maxlength="254" value="" required>
+</div>
+<div class="field" data-field="relationship">
+<label for="relationship">How we know each other <span class="req" aria-hidden="true">*</span></label>
+<select id="relationship" name="relationship" required>
+<option value="">Choose…</option>
+<option value="course">You took a course with me</option>
+<option value="research">You worked in the lab</option>
+<option value="advising">I advised you</option>
+<option value="other">Some other way</option>
+</select>
+</div>
+<div class="field" data-field="relationship_detail">
+<label for="relationship_detail">Remind me of the details <span class="req" aria-hidden="true">*</span></label>
+<p class="help" id="relationship_detail-help">Which course or project, roughly when.</p>
+<textarea id="relationship_detail" name="relationship_detail" maxlength="800" rows="6" required aria-describedby="relationship_detail-help"></textarea>
+</div>
+</fieldset>
+<div class="field ack" data-field="deadline_is_real">
+<label for="deadline_is_real"><input type="checkbox" id="deadline_is_real" name="deadline_is_real" value="true" required> The deadline above is the real one, and I&#39;ll tell you if it moves.</label>
+</div>
+<button type="submit">Submit</button>
+</form>
+<script type="application/json" id="conditions">{"field:portal_note":{"field":"submission_method","op":"eq","value":"portal"}}</script>
+<script src="form.js" defer></script>
+</main>
+</body>
+</html>

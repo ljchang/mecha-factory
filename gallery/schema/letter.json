@@ -1,0 +1,138 @@
+{
+  "$id": "mecha-factory:request/letter/v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Everything I need to write a good one, in one place.",
+  "properties": {
+    "cv": {
+      "additionalProperties": false,
+      "description": "A PDF. You'll be asked for it after your email is verified.",
+      "properties": {
+        "attachment_id": {
+          "type": "string"
+        },
+        "content_type": {
+          "enum": [
+            "application/pdf"
+          ],
+          "type": "string"
+        },
+        "filename": {
+          "maxLength": 255,
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "size": {
+          "maximum": 8388608,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "filename",
+        "size",
+        "sha256",
+        "content_type"
+      ],
+      "title": "Your CV",
+      "type": "object"
+    },
+    "deadline": {
+      "description": "The one that comes first, not the last one.",
+      "format": "date",
+      "title": "The earliest deadline",
+      "type": "string"
+    },
+    "deadline_is_real": {
+      "const": true,
+      "description": null,
+      "title": "The deadline above is the real one, and I'll tell you if it moves.",
+      "type": "boolean"
+    },
+    "materials_url": {
+      "description": "Anything I can open without an account.",
+      "format": "uri",
+      "maxLength": 2048,
+      "title": "A link to your statement, or anything else useful",
+      "type": "string"
+    },
+    "portal_note": {
+      "description": "Some of them expire the link, which is worth warning me about.",
+      "maxLength": 600,
+      "title": "Anything I should know about the portal",
+      "type": "string"
+    },
+    "programs": {
+      "items": {
+        "enum": [
+          "phd",
+          "masters",
+          "job",
+          "fellowship",
+          "award"
+        ],
+        "type": "string"
+      },
+      "maxItems": 12,
+      "title": "What you're applying for",
+      "type": "array",
+      "uniqueItems": true
+    },
+    "relationship": {
+      "enum": [
+        "course",
+        "research",
+        "advising",
+        "other"
+      ],
+      "title": "How we know each other",
+      "type": "string"
+    },
+    "relationship_detail": {
+      "description": "Which course or project, roughly when.",
+      "maxLength": 800,
+      "title": "Remind me of the details",
+      "type": "string"
+    },
+    "requester_email": {
+      "format": "email",
+      "maxLength": 254,
+      "title": "Your email",
+      "type": "string"
+    },
+    "requester_name": {
+      "maxLength": 120,
+      "title": "Your name",
+      "type": "string"
+    },
+    "submission_method": {
+      "enum": [
+        "portal",
+        "email",
+        "upload"
+      ],
+      "title": "How the letter is submitted",
+      "type": "string"
+    },
+    "what_to_emphasise": {
+      "maxLength": 1500,
+      "title": "What you'd like me to emphasise",
+      "type": "string"
+    }
+  },
+  "required": [
+    "requester_name",
+    "requester_email",
+    "relationship",
+    "relationship_detail",
+    "deadline",
+    "programs",
+    "submission_method",
+    "deadline_is_real"
+  ],
+  "title": "Request a letter of recommendation",
+  "type": "object"
+}

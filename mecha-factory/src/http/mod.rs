@@ -23,6 +23,7 @@ pub mod artifacts;
 pub mod intake;
 pub mod signup;
 pub mod v1;
+pub mod viewer;
 
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderValue, StatusCode};
@@ -190,11 +191,10 @@ pub fn router(app: Shared) -> Router {
         // scheme reserves and no bundle file can occupy.
         .route("/b/{id}/v", get(artifacts::versions_index))
         .route("/b/{id}/v/", get(artifacts::versions_index))
-        // The framed viewer: factory chrome above untouched bundle bytes,
-        // outside /b/ so no bundle content can occupy the path. Its assets
-        // sit at names with dots, which no bundle id may contain.
-        .route("/view/form.css", get(artifacts::viewer_style))
-        .route("/view/menu.js", get(artifacts::viewer_script))
+        // The signed-in viewer lives on the GATE — where the session is —
+        // and frames the bundle cross-origin; see http/viewer.rs for the
+        // inversion. The artifact-origin spelling redirects to it.
+        .route("/view/{handle}/{id}/{version}", get(viewer::view))
         .route("/view/{id}/{version}", get(artifacts::viewer))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/", get(artifacts::version_root))

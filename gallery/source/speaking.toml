@@ -1,0 +1,126 @@
+# A starter. See meeting.toml for what these are and are not.
+#
+# The travel fields are the clearest example of a conditional step: they are
+# required when the event is in person and must not be submitted at all when it
+# is remote. The browser hides them, and the server enforces both halves.
+
+id = "speaking"
+version = 1
+title = "Invite a talk"
+description = "What I need to know to answer yes or no quickly."
+retain_days = 730
+
+[[fields]]
+name = "requester_name"
+label = "Your name"
+kind = "text"
+max_length = 120
+required = true
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "organisation"
+label = "Who's hosting"
+kind = "text"
+max_length = 160
+required = true
+
+[[fields]]
+name = "event_name"
+label = "The event"
+kind = "text"
+max_length = 200
+required = true
+
+[[fields]]
+name = "event_date"
+label = "Date"
+help = "If it's a range, the day you'd want me."
+kind = "date"
+required = true
+
+[[fields]]
+name = "format"
+label = "Format"
+kind = "select"
+required = true
+options = [
+  { value = "in_person", label = "In person" },
+  { value = "remote", label = "Remote" },
+  { value = "hybrid", label = "Hybrid — in person, streamed" },
+]
+
+[[fields]]
+name = "talk_kind"
+label = "What kind of talk"
+kind = "select"
+required = true
+options = [
+  { value = "keynote", label = "Keynote" },
+  { value = "seminar", label = "Department seminar" },
+  { value = "panel", label = "A panel" },
+  { value = "workshop", label = "A workshop or tutorial" },
+]
+
+[[fields]]
+name = "audience_size"
+label = "Roughly how many people"
+kind = "integer"
+min = 1
+max = 100000
+
+[[fields]]
+name = "travel_covered"
+label = "Travel and accommodation are covered"
+kind = "bool"
+
+[[fields]]
+name = "travel_notes"
+label = "Anything about travel I should know"
+help = "What's covered, how it's reimbursed, and how long you'd need me on site."
+kind = "long_text"
+max_length = 1000
+
+[[fields]]
+name = "notes"
+label = "Anything else"
+kind = "long_text"
+max_length = 2000
+
+[[steps]]
+id = "event"
+title = "The event"
+fields = [
+  "requester_name",
+  "requester_email",
+  "organisation",
+  "event_name",
+  "event_date",
+  "format",
+  "talk_kind",
+  "audience_size",
+]
+
+# Skipped whole when the talk is remote. Every field on it is then neither
+# required nor accepted — the server enforces both directions, because a record
+# carrying a field the browser never showed is a record that differs from what
+# was submitted.
+[[steps]]
+id = "travel"
+title = "Travel"
+fields = ["travel_covered", "travel_notes"]
+show_when = { field = "format", op = "not_in", value = ["remote"] }
+
+[[steps]]
+id = "anything-else"
+title = "Anything else"
+fields = ["notes"]
+
+[[acknowledgments]]
+id = "understands_request"
+label = "I understand this is an invitation, not a confirmed booking."
