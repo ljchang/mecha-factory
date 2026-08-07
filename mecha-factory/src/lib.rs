@@ -37,6 +37,7 @@ pub mod db;
 pub mod http;
 pub mod intake;
 pub mod keys;
+pub mod mail;
 pub mod ratelimit;
 pub mod serve;
 pub mod tls;

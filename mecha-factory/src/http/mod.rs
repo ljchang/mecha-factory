@@ -59,13 +59,16 @@ pub struct App {
 pub type Shared = Arc<App>;
 
 impl App {
+    /// Delivery comes from the configuration, and a `[mail]` section that
+    /// cannot be honoured stops the box here rather than degrading to logging.
     pub fn new(config: Config, db: Db) -> anyhow::Result<App> {
-        App::with_mailer(config, db, Box::new(crate::intake::LogMailer))
+        let mailer = crate::mail::configured(&config)?;
+        App::with_mailer(config, db, mailer)
     }
 
     /// The same thing with delivery supplied — which is how a test reads the
-    /// link a stranger would have been sent, and how a real deployment will
-    /// hand in an SMTP sender without this crate learning what SMTP is.
+    /// link a stranger would have been sent, and how a real deployment hands
+    /// in a sender without this crate learning what SES is.
     pub fn with_mailer(
         config: Config,
         db: Db,

@@ -170,6 +170,7 @@ pub fn start() -> Server {
 
     let config = Config {
         theme: "nocturne".into(),
+        mail: None,
         data_dir: dir.path().to_path_buf(),
         origins: Origins {
             gate: addresses[0].to_string(),

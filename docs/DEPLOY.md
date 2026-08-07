@@ -228,6 +228,58 @@ Rotation is mint, install, revoke — both keys work until the old one is
 revoked, and `factory key revoke <id>` never deletes the row, because the row is
 the record that the key existed and when it stopped.
 
+## Mail
+
+The box sends exactly one kind of message: the verification link a stranger
+gets after filling in a form. It goes through **Amazon SES**, and without it
+the intake path renders and validates and then quietly goes nowhere.
+
+```toml
+# /etc/mecha-factory/factory.toml
+[mail]
+from        = "no-reply@mecha-factory.ai"
+region      = "us-east-1"
+credentials = "/etc/mecha-factory/ses.toml"
+```
+
+```toml
+# /etc/mecha-factory/ses.toml — mode 0600, owned by the service user
+access_key_id     = "AKIA…"
+secret_access_key = "…"
+```
+
+The IAM user behind that key wants exactly one permission, `ses:SendEmail`.
+It is the first credential the box holds that can act as your domain, so it
+should be able to do nothing else — the claim worth preserving is not "the box
+holds no secrets" but **"the box holds no credential that reaches home"**.
+
+`[mail]` present and unreadable **stops the box**, with the reason. It does not
+fall back to writing links to the journal: that would look like a working
+deployment while every stranger's link went nowhere. `[mail]` absent is a
+different thing and is honest about itself — links go to the journal, an
+operator can complete a verification by hand, and `factory check` says so:
+
+```
+mail      log — links are written to the journal and not sent
+mail      Amazon SES — us-east-1 from no-reply@mecha-factory.ai
+mail      MISCONFIGURED — the box will refuse to start: …
+```
+
+**Two things that are AWS's, not ours, and both fail silently:**
+
+- **The sandbox.** A new SES account may only send to *verified* addresses.
+  The API accepts a send to anyone else and the mail is simply never
+  delivered — so the box looks healthy and no stranger ever gets a link. Ask
+  for production access before believing an end-to-end test that used your own
+  address.
+- **DKIM and SPF.** SES gives three CNAMEs for DKIM; add them, add an SPF
+  record including `amazonses.com`, and a DMARC record. Without them a link
+  that *is* sent lands in spam, which for a magic link is the same as not
+  sending it.
+
+Neither can be checked from the box without spending an API call on every
+start, which is why they are written down here instead.
+
 ## Patching
 
 ```sh

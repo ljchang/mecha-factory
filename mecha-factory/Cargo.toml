@@ -17,9 +17,18 @@ path = "src/main.rs"
 
 # Everything here runs on the public box, so the tree is worth reading. What is
 # absent is as deliberate as what is present: no template engine (the server
-# renders nothing it was not handed), no HTTP client (it never initiates), and
-# nothing from mecha except the manifest — which is the credential-isolation
-# claim, checkable by reading this list.
+# renders nothing it was not handed), and nothing from mecha except the
+# manifest — which is the credential-isolation claim, checkable by reading this
+# list.
+#
+# This list used to say "no HTTP client (it never initiates)". That stopped
+# being true when the box started sending verification links, and it had to:
+# §3 puts `submitted → verified` and the "templated, immediate" decline on the
+# origin, and immediate rules out waiting for home to drain a queue and send on
+# its behalf. So the box now initiates exactly one kind of outbound call — SES,
+# from `mail.rs`, over `ureq`. The claim that matters is unchanged and is worth
+# stating in its stronger form: **the box holds no credential that reaches
+# home.** An SES key can send mail as the domain and can do nothing else.
 [dependencies]
 mecha-manifest = { path = "../mecha-manifest", version = "0.1.0" }
 anyhow.workspace = true
@@ -42,6 +51,11 @@ argon2 = { version = "0.5", features = ["std"] }
 getrandom = "0.3"
 # Verification tokens are stored as hashes, never as links.
 sha2.workspace = true
+# SES is signed with SigV4, which is an HMAC chain over `sha2`. Pure Rust and
+# no C toolchain, like `ring` for ACME — and the reason `aws-sdk-sesv2` is not
+# here, since it would bring a second HTTP stack alongside `ureq`.
+hmac = "0.12"
+ureq.workspace = true
 # A bundle arrives as one archive. Both are pure Rust.
 tar = "0.4"
 flate2 = "1"

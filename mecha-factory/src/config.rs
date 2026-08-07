@@ -1,10 +1,15 @@
 //! What the box is told, and the one thing it is never told.
 //!
 //! The configuration names three hostnames, a data directory, and the ACME
-//! contact. It does **not** name a key, a provider, a model, or anything that
-//! reaches home — the credential-isolation claim is meant to be checkable by
-//! reading the deployed config, and a field that could hold a secret is a field
-//! somebody eventually puts one in.
+//! contact. It does **not** name a key, a model, or anything that reaches home
+//! — the credential-isolation claim is meant to be checkable by reading the
+//! deployed config, and a field that could hold a secret is a field somebody
+//! eventually puts one in.
+//!
+//! `[mail]` is the one place a provider is named, and it names a **path** where
+//! the others name values, for exactly the reason above: a region and a sender
+//! describe a deployment, while the key that can send mail as the domain lives
+//! beside the box's other secrets and never in here.
 //!
 //! Two decisions here that are load-bearing:
 //!
@@ -304,10 +309,33 @@ pub struct Config {
     /// refusing to start — a typo here must not take the forms down.
     #[serde(default = "default_theme")]
     pub theme: String,
+    /// How verification links are sent. Absent means they go to the journal
+    /// instead — a working development box, and an operator who can finish a
+    /// verification by hand, rather than a silent failure.
+    #[serde(default)]
+    pub mail: Option<Mail>,
 }
 
 fn default_theme() -> String {
     "nocturne".into()
+}
+
+/// The mail path, for the one message this box sends.
+///
+/// The credential is a **path**, not a value. This file describes a deployment
+/// and is the sort of thing that gets pasted into a bug report; the key that
+/// can send mail as the domain belongs beside the box's other secrets at mode
+/// 0600, exactly like the scoped keys.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct Mail {
+    /// The envelope sender. SES refuses anything but an identity it has
+    /// verified, so this is not a free-text field.
+    pub from: String,
+    /// The SES region. It is part of both the endpoint host and the signing
+    /// scope, so a wrong one is a 403 and never a misroute.
+    pub region: String,
+    /// A TOML file holding `access_key_id` and `secret_access_key`.
+    pub credentials: PathBuf,
 }
 
 impl Config {
@@ -328,6 +356,7 @@ impl Config {
     pub fn dev(data_dir: PathBuf, base_port: u16) -> Self {
         Config {
             theme: default_theme(),
+            mail: None,
             data_dir,
             origins: Origins {
                 gate: format!("127.0.0.1:{base_port}"),

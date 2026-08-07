@@ -499,9 +499,16 @@ fn check(cli: &Cli) -> Result<()> {
     println!("tls       {}", mecha_factory::tls::describe(&config));
     // Forms are refused outright without a way to send a link, so what the
     // mailer is belongs in the same breath as what the certificate is.
+    // Resolved from the config rather than assumed. This printed `LogMailer`
+    // unconditionally, so a box with SES wired would still have reported that
+    // links were being written to the journal — a check that reassures you
+    // about a deployment it never looked at.
     println!(
         "mail      {}",
-        mecha_factory::intake::Mailer::describe(&mecha_factory::intake::LogMailer)
+        match mecha_factory::mail::configured(&config) {
+            Ok(mailer) => mailer.describe(),
+            Err(e) => format!("MISCONFIGURED — the box will refuse to start: {e:#}"),
+        }
     );
     println!(
         "ledger    {} users, {} bundles, {} queued, {} keys",

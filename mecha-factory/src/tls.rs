@@ -208,6 +208,7 @@ mod tests {
     fn config(tls: Option<Tls>) -> Config {
         Config {
             theme: "nocturne".into(),
+            mail: None,
             data_dir: PathBuf::from("/tmp/factory-test"),
             origins: Origins {
                 gate: "gate.example.org".into(),
