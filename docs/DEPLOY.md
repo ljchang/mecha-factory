@@ -225,19 +225,29 @@ ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable
 systemctl enable --now unattended-upgrades
 ```
 
-**The binary is built on the box, from the public repository.** One vCPU takes
-a while — this is the step to start and walk away from:
+**The binary comes from a release, not a build.** The `release` workflow
+(`.github/workflows/release.yml`) turns a `v*` tag into a static musl
+`factory` with a checksum beside it, so the box needs no Rust toolchain —
+one fewer thing to patch on a machine whose whole premise is that it is one
+static binary and a SQLite file. *(Authored 2026-08-07; verify the first
+tagged release before deleting the toolchain from a box that has one.)*
+
+```sh
+curl -sSfLO https://github.com/ljchang/mecha-factory/releases/latest/download/factory-x86_64-linux-musl.tar.gz
+curl -sSfLO https://github.com/ljchang/mecha-factory/releases/latest/download/factory-x86_64-linux-musl.tar.gz.sha256
+sha256sum -c factory-x86_64-linux-musl.tar.gz.sha256
+tar xzf factory-x86_64-linux-musl.tar.gz
+```
+
+The fallback that always works — and was the procedure until the workflow
+existed — is building on the box, which one vCPU makes the step to start and
+walk away from:
 
 ```sh
 curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 git clone --depth 1 https://github.com/ljchang/mecha-factory /root/build
 cd /root/build && cargo build --release -p mecha-factory --bin factory
 ```
-
-*Worth replacing:* a release workflow that publishes an x86_64 binary would
-mean the box never needs a Rust toolchain at all, which is one fewer thing to
-patch on a machine whose whole premise is that it is one static binary and a
-SQLite file.
 
 ```sh
 adduser --system --group --no-create-home factory

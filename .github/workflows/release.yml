@@ -1,0 +1,79 @@
+# Build the box's binary so the box never has to.
+#
+# Each deploy was a five-minute `cargo build --release` on the droplet's one
+# vCPU — and a Rust toolchain resident on a machine whose premise is one static
+# binary and a SQLite file. This workflow moves the build here: a tag push
+# produces a `factory` binary as a release asset, and the deploy becomes a
+# download, a checksum, and a restart (docs/DEPLOY.md).
+#
+# Static musl rather than the runner's glibc, for the reason mecha's benchmark
+# harness learned the hard way: a binary built against the runner's libc
+# refuses to start on any box whose glibc is older ("version `GLIBC_2.39' not
+# found"), and the failure arrives at the worst time — during an incident, on
+# the machine being patched. rustls is the TLS backend throughout, so nothing
+# needs a system library. One caveat travels with static musl: no glibc NSS,
+# so hostname lookups use musl's own resolver — fine for this binary, which
+# dials out only to ACME and SES over ordinary DNS.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  # A binary without a release, for trying the artifact before tagging.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  TARGET: x86_64-unknown-linux-musl
+
+permissions:
+  contents: write
+
+jobs:
+  binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-musl
+      # `ring` compiles C for the musl target; musl-gcc is what it links with.
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --target "$TARGET" -p mecha-factory --bin factory
+
+      # Assert what this workflow exists to guarantee, rather than trusting
+      # the build: a dynamically linked binary here is the exact failure that
+      # stays invisible until the box refuses to start it.
+      - name: Refuse a dynamic binary
+        run: |
+          set -euo pipefail
+          BIN="target/$TARGET/release/factory"
+          file "$BIN" | grep -q "statically linked" || {
+            echo "refusing: $BIN is not statically linked" >&2; exit 1; }
+          "$BIN" --help >/dev/null
+
+      - name: Package with checksum
+        run: |
+          set -euo pipefail
+          cd "target/$TARGET/release"
+          tar czf factory-x86_64-linux-musl.tar.gz factory
+          sha256sum factory-x86_64-linux-musl.tar.gz > factory-x86_64-linux-musl.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: factory-x86_64-linux-musl
+          path: |
+            target/x86_64-unknown-linux-musl/release/factory-x86_64-linux-musl.tar.gz
+            target/x86_64-unknown-linux-musl/release/factory-x86_64-linux-musl.tar.gz.sha256
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/x86_64-unknown-linux-musl/release/factory-x86_64-linux-musl.tar.gz
+            target/x86_64-unknown-linux-musl/release/factory-x86_64-linux-musl.tar.gz.sha256
