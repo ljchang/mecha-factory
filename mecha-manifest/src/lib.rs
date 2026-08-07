@@ -67,12 +67,12 @@ mod schema;
 pub mod theme;
 mod validate;
 
-pub use brand::{FAVICON_DATA_URI, FAVICON_LINK};
+pub use brand::{FAVICON_DATA_URI, FAVICON_LINK, LOGO_MONO_SVG};
 pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};
 pub use csp::{gate_headers, Header};
 pub use digest::{digest_files, MANIFEST_FILE};
-pub use form::FormOptions;
+pub use form::{site_header, FormOptions};
 pub use media::{content_type, sniff, FileType};
 pub use request::{
     valid_id, Acknowledgment, Field, FieldKind, RequestType, Step, MAX_FILE_BYTES_PER_FIELD,

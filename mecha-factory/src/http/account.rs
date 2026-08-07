@@ -43,7 +43,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 
-use super::intake::{form_values, page, shell};
+use super::intake::{form_values, page, shell, shell_with};
 use super::{v1, Shared};
 use crate::config::{Origin, Role};
 use crate::db::UserRow;
@@ -244,25 +244,26 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
     }
     machines.push_str("</table>");
 
+    // Sign-out, pairing and the identity line live in the header's dropdown
+    // now; the page body is the two ledgers and nothing twice.
     let body = format!(
         "<h1><code>{handle}</code></h1>\
-         <p>{email}</p>\
-         <h2>Artifacts</h2>{artifacts}\
-         <h2>Machines</h2>\
+         <h2 id=\"artifacts\">Artifacts</h2>{artifacts}\
+         <h2 id=\"machines\">Machines</h2>\
          <p>Each connected machine holds its own keys. Revoking here is what \
          makes a lost laptop somebody else's brick — a key that is used is a \
-         machine that is alive.</p>{machines}\
-         <form method=\"post\" action=\"/account/pair\">\
-         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-         <button type=\"submit\">Connect a machine</button></form>\
-         <hr>\
-         <form method=\"post\" action=\"/account/signout\">\
-         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-         <button type=\"submit\">Sign out</button></form>",
+         machine that is alive.</p>{machines}",
         handle = esc(&user.handle),
-        email = esc(&user.email),
     );
-    page(StatusCode::OK, shell(&user.handle, &body, "/account/a/"))
+    let chrome = crate::http::intake::Chrome::Account {
+        handle: user.handle.clone(),
+        email: user.email.clone(),
+        csrf: csrf.clone(),
+    };
+    page(
+        StatusCode::OK,
+        shell_with(&user.handle, &body, "/account/a/", &chrome),
+    )
 }
 
 /// `POST /account/signin` — one answer, whoever asked.

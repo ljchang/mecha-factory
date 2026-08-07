@@ -252,14 +252,15 @@ async fn root(origin: Extension<Origin>) -> Response {
     if origin.role != Role::Gate {
         return Failure::text(StatusCode::NOT_FOUND, "not found").into_response();
     }
-    let body = "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
-                <title>factory</title></head>\n<body><p>This is a mecha factory. \
-                Nothing here is for browsing.</p></body></html>\n";
-    (
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        body,
+    intake::page(
+        StatusCode::OK,
+        intake::shell(
+            "factory",
+            "<p>This is a mecha factory. Nothing here is for browsing — \
+             but if it is yours, <a href=\"/account\">your page</a> is.</p>",
+            "/account/a/",
+        ),
     )
-        .into_response()
 }
 
 async fn fallback(request: Request) -> Response {

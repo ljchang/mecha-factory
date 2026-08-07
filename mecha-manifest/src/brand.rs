@@ -61,6 +61,23 @@ pub const FAVICON_DATA_URI: &str = favicon_uri!();
 /// The `<link>` element, since both callers want the same one.
 pub const FAVICON_LINK: &str = concat!("<link rel=\"icon\" href=\"", favicon_uri!(), "\">");
 
+/// The mark as inline SVG, `fill="currentColor"` — `brand/logo-mono.svg`
+/// verbatim.
+///
+/// Inline rather than served, for the favicon's reason wearing page clothes:
+/// no asset route means no new URL whose resolution could distinguish pages
+/// that must answer identically, and `currentColor` inherits `--text`, so
+/// one asset is correct in both themes with no media query. Attribute-fill
+/// only, no `<style>` block — `style-src 'self'` stays untouched.
+pub const LOGO_MONO_SVG: &str = "<svg xmlns=\"http://www.w3.org/2000/svg\" \
+viewBox=\"0 0 63 54\" width=\"28\" height=\"24\" fill=\"currentColor\" \
+role=\"img\" aria-label=\"mecha\">\
+<path d=\"M0 0h24l7.5 8.5L39 0h24v16H0z\"></path>\
+<path d=\"M0 20h14v15H0zM49 20h14v15H49zM0 39h14v15H0zM49 39h14v15H49z\"></path>\
+<path d=\"M14 39v15h13.24zM49 39v15H35.76z\"></path>\
+<path d=\"M21 24h21v7H21z\"></path>\
+</svg>";
+
 #[cfg(test)]
 mod tests {
     use super::*;

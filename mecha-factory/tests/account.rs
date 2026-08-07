@@ -302,3 +302,28 @@ fn a_key_can_disconnect_itself_and_only_itself() {
         .revoked_at
         .is_none());
 }
+
+/// The chrome: the mark on gate pages, the account dropdown only for a
+/// session, and none of it on the pages whose byte-identity is a security
+/// property — a header asset there would be a new oracle.
+#[test]
+fn the_header_knows_who_it_is_for() {
+    let server = common::start();
+
+    // Signed out: public chrome — the mark, no dropdown.
+    let signin = server.get(server.gate, "/account");
+    assert!(signin.body.contains("header class=\"site\""), "{}", signin.body);
+    assert!(!signin.body.contains("account-menu"));
+
+    // Signed in: the dropdown, holding the identity and the sign-out.
+    let cookie = signed_in(&server);
+    let page = get(&server, "/account", Some(&cookie));
+    assert!(page.body.contains("account-menu"), "{}", page.body);
+    assert!(page.body.contains("/account/signout"));
+    assert!(page.body.contains("alice"));
+
+    // A 404 that must not distinguish handles carries no chrome at all.
+    let missing = server.get(server.gate, "/f/nobody/nothing");
+    assert!(!missing.body.contains("header class=\"site\""), "{}", missing.body);
+    assert!(!missing.body.contains("form.css"));
+}

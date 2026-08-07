@@ -214,13 +214,14 @@ impl RequestType {
              <title>{}</title>\n\
              {}\n\
              <link rel=\"stylesheet\" href=\"{}form.css\">\n\
-             </head>\n<body>\n<main>\n{}</main>\n</body>\n</html>\n",
+             </head>\n<body>\n{}<main>\n{}</main>\n</body>\n</html>\n",
             escape_text(&self.title),
             // A `data:` URI rather than a `favicon.svg` beside the stylesheet:
             // the stylesheet is a same-origin asset the server routes, and a
             // form may be rendered to a file with no server behind it at all.
             crate::brand::FAVICON_LINK,
             escape_text(&options.assets),
+            site_header(),
             body
         );
 
@@ -304,10 +305,11 @@ impl RequestType {
              <title>{}</title>\n\
              {}\n\
              <link rel=\"stylesheet\" href=\"{}form.css\">\n\
-             </head>\n<body>\n<main>\n{}</main>\n</body>\n</html>\n",
+             </head>\n<body>\n{}<main>\n{}</main>\n</body>\n</html>\n",
             escape_text(&self.title),
             crate::brand::FAVICON_LINK,
             escape_text(&options.assets),
+            site_header(),
             body
         );
         FormPage {
@@ -574,6 +576,16 @@ impl RequestType {
         out.push_str("</div>\n");
         out
     }
+}
+
+/// The site header a rendered form carries: the mark, linked to the gate
+/// root. Public chrome only — a form is a stranger's page, and account
+/// affordances belong to the gate's own pages, not here.
+pub fn site_header() -> String {
+    format!(
+        "<header class=\"site\"><a class=\"mark\" href=\"/\" aria-label=\"mecha\">{}</a></header>\n",
+        crate::brand::LOGO_MONO_SVG
+    )
 }
 
 fn render_acknowledgment(ack: &Acknowledgment, options: &FormOptions) -> String {
@@ -977,9 +989,91 @@ a { color: var(--accent); text-underline-offset: 2px; }
    measure and rhythm without a second stylesheet. */
 main > h1:only-of-type + p { color: var(--muted); }
 
+/* The site header: mark on the left, account on the right. Present on the
+   gate's own pages and on rendered forms; never on artifact origins, whose
+   bytes are content-addressed and not ours to decorate. */
+header.site {
+  max-width: 34rem;
+  margin: 0 auto;
+  padding: 1rem 1.5rem 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text);
+}
+header.site a.mark { color: var(--text); display: inline-flex; }
+header.site a.mark:hover { color: var(--accent); }
+
+/* The account dropdown is a <details>: open/close is the browser's, no
+   script anywhere. */
+.account-menu { position: relative; }
+.account-menu > summary {
+  list-style: none;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  padding: 0.375rem 0.75rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.account-menu > summary::-webkit-details-marker { display: none; }
+.account-menu[open] > summary { border-color: var(--accent); }
+.account-menu > .menu {
+  position: absolute;
+  right: 0;
+  margin-top: 0.375rem;
+  min-width: 14rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem;
+  z-index: 1;
+}
+.account-menu .menu p {
+  color: var(--muted);
+  font-size: 0.8125rem;
+  margin: 0 0 0.5rem;
+  overflow-wrap: anywhere;
+}
+.account-menu .menu nav a { display: block; padding: 0.25rem 0; font-size: 0.875rem; }
+.account-menu .menu form { margin: 0.5rem 0 0; }
+.account-menu .menu button {
+  width: 100%;
+  padding: 0.4375rem 0.75rem;
+  font-size: 0.875rem;
+  background: var(--ground);
+  color: var(--text);
+  border-color: var(--line);
+}
+
+/* Tables — the account page's artifacts and machines. */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.875rem;
+  margin: 0.75rem 0 1.5rem;
+}
+th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  padding: 0.375rem 0.75rem 0.375rem 0;
+  border-bottom: 1px solid var(--line);
+}
+td {
+  padding: 0.5rem 0.75rem 0.5rem 0;
+  border-bottom: 1px solid var(--line);
+  vertical-align: middle;
+  overflow-wrap: anywhere;
+}
+td form { margin: 0; display: inline; }
+td button { padding: 0.25rem 0.625rem; font-size: 0.8125rem; }
+
 @media (max-width: 30rem) {
   main { padding: 2.5rem 1.25rem 4rem; }
   h1 { font-size: 1.5rem; }
+  header.site { padding: 1rem 1.25rem 0; }
 }
 "#;
 

@@ -47,6 +47,58 @@ pub(crate) fn page(status: StatusCode, body: String) -> Response {
     (status, Html(body)).into_response()
 }
 
+/// What sits above a page's content, decided per call site — typed, so a
+/// page cannot get account chrome by accident. There is deliberately no
+/// `None` variant: the pages that must answer byte-identically whoever asks
+/// are exactly the pages with an empty assets prefix, and `shell_with`
+/// suppresses chrome on that signal — one rule, structural, instead of two
+/// call-site decisions that could disagree.
+pub(crate) enum Chrome {
+    /// The mark, linked to the gate root. Signup, intake pages, the root.
+    Public,
+    /// The mark plus the account dropdown. Exactly one page earns this.
+    Account {
+        handle: String,
+        email: String,
+        /// The session's CSRF token, because the dropdown holds the sign-out
+        /// form and a form without it bounces off `mutating()`.
+        csrf: String,
+    },
+}
+
+impl Chrome {
+    fn render(&self) -> String {
+        match self {
+            Chrome::Public => mecha_manifest::site_header(),
+            Chrome::Account {
+                handle,
+                email,
+                csrf,
+            } => format!(
+                "<header class=\"site\">\
+                 <a class=\"mark\" href=\"/account\" aria-label=\"mecha\">{logo}</a>\
+                 <details class=\"account-menu\">\
+                 <summary>{handle}</summary>\
+                 <div class=\"menu\">\
+                 <p>{email}</p>\
+                 <nav><a href=\"#artifacts\">Artifacts</a>\
+                 <a href=\"#machines\">Machines</a></nav>\
+                 <form method=\"post\" action=\"/account/pair\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <button type=\"submit\">Connect a machine</button></form>\
+                 <form method=\"post\" action=\"/account/signout\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <button type=\"submit\">Sign out</button></form>\
+                 </div></details></header>\n",
+                logo = mecha_manifest::LOGO_MONO_SVG,
+                handle = mecha_manifest::escape_text(handle),
+                email = mecha_manifest::escape_text(email),
+                csrf = mecha_manifest::escape_text(csrf),
+            ),
+        }
+    }
+}
+
 /// The wrapper every non-form page uses.
 ///
 /// `assets` is a **root-relative** prefix, for the same reason the form's is:
@@ -55,8 +107,13 @@ pub(crate) fn page(status: StatusCode, body: String) -> Response {
 /// and a relative `form.css` resolved differently from each, which is to say
 /// wrongly from all of them. An empty prefix means "no stylesheet worth
 /// resolving", which is what a 404 that must not reveal whether a handle
-/// exists should say.
+/// exists should say — and such a page takes `Chrome::None` too, since a
+/// header referencing anything would be a second thing to prove identical.
 pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
+    shell_with(title, body, assets, &Chrome::Public)
+}
+
+pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome) -> String {
     let style = if assets.is_empty() {
         String::new()
     } else {
@@ -65,11 +122,18 @@ pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
             mecha_manifest::escape_text(assets)
         )
     };
+    // No stylesheet means a 404-class page; whatever the caller said, chrome
+    // that references an asset universe the page has opted out of is wrong.
+    let chrome = if assets.is_empty() {
+        String::new()
+    } else {
+        chrome.render()
+    };
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{}</title>{style}</head>\n\
-         <body><main>{body}</main></body></html>\n",
+         <body>{chrome}<main>{body}</main></body></html>\n",
         mecha_manifest::escape_text(title)
     )
 }
