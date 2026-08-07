@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 3;
+const SCHEMA: i64 = 4;
 
 #[derive(Clone)]
 pub struct Db {
@@ -75,6 +75,62 @@ impl UserRow {
     pub fn active(&self) -> bool {
         self.status == "active"
     }
+}
+
+/// One minted right to claim a handle, in whatever state it has reached.
+#[derive(Debug, Clone)]
+pub struct InviteRow {
+    pub id: String,
+    /// Where the link was sent — and the address the claimed account gets,
+    /// because clicking a link that arrived there is what proved it.
+    pub email: String,
+    /// The operator's own note: who this is, so `invite list` means something
+    /// a month later.
+    pub note: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub claimed_at: Option<String>,
+    pub claimed_by: Option<String>,
+    pub revoked_at: Option<String>,
+}
+
+impl InviteRow {
+    /// Derived rather than stored: a state column would be one more thing to
+    /// keep in step with the timestamps that already say it.
+    pub fn status(&self, now: &str) -> &'static str {
+        if self.claimed_at.is_some() {
+            "claimed"
+        } else if self.revoked_at.is_some() {
+            "revoked"
+        } else if self.expires_at.as_str() <= now {
+            "expired"
+        } else {
+            "pending"
+        }
+    }
+
+    fn live(&self, now: &str) -> bool {
+        self.status(now) == "pending"
+    }
+}
+
+/// What became of a signup's attempt to claim a handle.
+///
+/// An enum rather than error strings, because the page a stranger gets hangs
+/// on the difference: a taken handle is *their form back with an error on it*
+/// (the invite is still good), where a dead invite is the same nothing-page
+/// every dead invite gets. Matching on `anyhow` text to tell those apart is
+/// the kind of seam that breaks silently when a message is reworded.
+#[derive(Debug)]
+pub enum Claim {
+    Created(UserRow),
+    /// Somebody holds it, or once did. Which of the two is not a stranger's
+    /// business — see `user_create` for why the CLI, whose caller is the
+    /// operator, does get the difference.
+    HandleTaken,
+    /// Claimed, revoked, expired, or never real — one variant for all four,
+    /// for the same reason the page is one page.
+    InviteGone,
 }
 
 /// What a key may do — and the scope is read from **this row**, never from the
@@ -262,15 +318,7 @@ impl Db {
                     }
                 );
             }
-            tx.execute(
-                "INSERT INTO users (id, handle, email, status, created_at) \
-                 VALUES (?1, ?2, ?3, 'active', ?4)",
-                params![id, handle, email, now],
-            )?;
-            tx.execute(
-                "INSERT INTO handles (handle, user_id, issued_at) VALUES (?1, ?2, ?3)",
-                params![handle, id, now],
-            )?;
+            create_user_in(&tx, &id, handle, email, now)?;
             tx.commit()?;
             Ok(())
         })?;
@@ -355,6 +403,121 @@ impl Db {
             )?;
             Ok(n > 0)
         })
+    }
+
+    // ---- invites --------------------------------------------------------
+
+    /// Mint the right to claim one handle. The caller holds the token; this
+    /// holds its hash, exactly as the keys and the verification links do.
+    pub fn invite_create(
+        &self,
+        email: &str,
+        note: &str,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<InviteRow> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO invites (id, email, note, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![id, email, note, token_hash, now, expires_at],
+            )?;
+            Ok(())
+        })?;
+        self.invites()?
+            .into_iter()
+            .find(|row| row.id == id)
+            .ok_or_else(|| anyhow::anyhow!("the invite vanished between writing and reading it"))
+    }
+
+    pub fn invites(&self) -> Result<Vec<InviteRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, email, note, created_at, expires_at, claimed_at, claimed_by, \
+                 revoked_at FROM invites ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map([], invite_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Stop an unclaimed invite working. A claimed one is history, not policy,
+    /// and refusing to touch it is what keeps `claimed_by` meaning something.
+    pub fn invite_revoke(&self, id: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE invites SET revoked_at = ?2 \
+                 WHERE id = ?1 AND claimed_at IS NULL AND revoked_at IS NULL",
+                params![id, now],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// The live invite this token names, or nothing — where claimed, revoked,
+    /// expired and never-existed are all the same nothing, because the page
+    /// they produce is the same page.
+    pub fn invite_by_token(&self, token_hash: &str, now: &str) -> Result<Option<InviteRow>> {
+        Ok(self
+            .with(|conn| {
+                Ok(conn
+                    .query_row(
+                        "SELECT id, email, note, created_at, expires_at, claimed_at, \
+                         claimed_by, revoked_at FROM invites WHERE token_hash = ?1",
+                        params![token_hash],
+                        invite_row,
+                    )
+                    .optional()?)
+            })?
+            .filter(|row: &InviteRow| row.live(now)))
+    }
+
+    /// Spend an invite on a handle: the signup's one write.
+    ///
+    /// One transaction re-checks the invite is still live, claims the handle
+    /// through the same path `user_create` uses, and marks the invite spent —
+    /// so two clicks on one link race to a single account, and a claim that
+    /// fails on the handle leaves the invite good for another try. The caller
+    /// has already validated the handle's shape; what is decided here is only
+    /// what needs the ledger to decide.
+    pub fn invite_claim(&self, token_hash: &str, handle: &str, now: &str) -> Result<Claim> {
+        let id = crate::keys::random_id();
+        let outcome = self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let invite = tx
+                .query_row(
+                    "SELECT id, email, note, created_at, expires_at, claimed_at, \
+                     claimed_by, revoked_at FROM invites WHERE token_hash = ?1",
+                    params![token_hash],
+                    invite_row,
+                )
+                .optional()?;
+            let Some(invite) = invite.filter(|row| row.live(now)) else {
+                return Ok(None);
+            };
+            if handle_owner(&tx, handle)?.is_some() {
+                return Ok(Some(Err(())));
+            }
+            create_user_in(&tx, &id, handle, &invite.email, now)?;
+            tx.execute(
+                "UPDATE invites SET claimed_at = ?2, claimed_by = ?3 WHERE id = ?1",
+                params![invite.id, now, id],
+            )?;
+            tx.commit()?;
+            Ok(Some(Ok(())))
+        })?;
+        match outcome {
+            None => Ok(Claim::InviteGone),
+            Some(Err(())) => Ok(Claim::HandleTaken),
+            Some(Ok(())) => {
+                let user = self.user(&id)?.ok_or_else(|| {
+                    anyhow::anyhow!("the user vanished between writing and reading it")
+                })?;
+                Ok(Claim::Created(user))
+            }
+        }
     }
 
     // ---- keys -----------------------------------------------------------
@@ -867,6 +1030,39 @@ fn handle_owner(conn: &Connection, handle: &str) -> Result<Option<(String, bool)
         .optional()?)
 }
 
+/// The two inserts that make a user, inside a transaction the caller owns.
+///
+/// Shared by `user_create` and `invite_claim` so there is exactly one way an
+/// account comes to exist — the "front door is new, the mechanism is not"
+/// promise the CLI's help text makes. The caller has already decided the
+/// handle is free (`handle_owner`, inside the same transaction, or the check
+/// and the claim race).
+fn create_user_in(tx: &Connection, id: &str, handle: &str, email: &str, now: &str) -> Result<()> {
+    tx.execute(
+        "INSERT INTO users (id, handle, email, status, created_at) \
+         VALUES (?1, ?2, ?3, 'active', ?4)",
+        params![id, handle, email, now],
+    )?;
+    tx.execute(
+        "INSERT INTO handles (handle, user_id, issued_at) VALUES (?1, ?2, ?3)",
+        params![handle, id, now],
+    )?;
+    Ok(())
+}
+
+fn invite_row(r: &rusqlite::Row) -> rusqlite::Result<InviteRow> {
+    Ok(InviteRow {
+        id: r.get(0)?,
+        email: r.get(1)?,
+        note: r.get(2)?,
+        created_at: r.get(3)?,
+        expires_at: r.get(4)?,
+        claimed_at: r.get(5)?,
+        claimed_by: r.get(6)?,
+        revoked_at: r.get(7)?,
+    })
+}
+
 const BUNDLE_COLUMNS: &str = "SELECT user_id, id, version, digest, class, title, description, \
      template, published_at, received_at, withheld_at, withheld_reason FROM bundles";
 
@@ -966,21 +1162,23 @@ fn migrate(conn: &Connection) -> Result<()> {
     if version >= SCHEMA {
         return Ok(());
     }
-    // Schema 1 predates users, and the change is not one SQLite can make in
-    // place: every table's primary key gained a user. Refused rather than
-    // half-migrated, because a ledger that is partly scoped is worse than one
-    // that will not open — and this server has never been deployed, so the
-    // honest instruction is the cheap one.
-    if version > 0 && version < SCHEMA {
+    // Schemas 1 and 2 predate users and the deployment alike, and the change
+    // is not one SQLite can make in place: every table's primary key gained a
+    // user. Refused rather than half-migrated, because a ledger that is
+    // partly scoped is worse than one that will not open — and nothing was
+    // ever deployed from them, so the honest instruction is the cheap one.
+    //
+    // From 3 on, the box is live and "delete the database" stopped being an
+    // instruction anyone may print. Migrations from here are additive: the
+    // batch below is `IF NOT EXISTS` throughout, so running it *is* the
+    // migration, and a table added to it reaches an existing ledger by the
+    // version bump alone. A change that cannot be expressed that way needs a
+    // real migration written for it, not a wider bail.
+    if version > 0 && version < 3 {
         anyhow::bail!(
-            "this ledger is schema {version} and this binary speaks {SCHEMA}. \
-             Nothing has been deployed: delete the database file and start again."
-        );
-    }
-    if version == 1 {
-        anyhow::bail!(
-            "this ledger is schema 1, which predates users. Nothing has been \
-             deployed from it: delete the database file and start again."
+            "this ledger is schema {version}, which predates deployment. \
+             Nothing was ever deployed from it: delete the database file and \
+             start again."
         );
     }
     conn.execute_batch(
@@ -1087,6 +1285,23 @@ fn migrate(conn: &Connection) -> Result<()> {
             version     INTEGER NOT NULL,
             created_at  TEXT NOT NULL
         );
+
+        -- The right to claim one handle, minted by the operator and spent by
+        -- a signup. The token travels in a link and is stored as a hash, like
+        -- the verification tokens; the row outlives every state it passes
+        -- through, because who was invited and what became of it is the
+        -- operator's record.
+        CREATE TABLE IF NOT EXISTS invites (
+            id          TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            note        TEXT NOT NULL DEFAULT '',
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            claimed_at  TEXT,
+            claimed_by  TEXT,
+            revoked_at  TEXT
+        );
         ",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA)?;
@@ -1125,6 +1340,40 @@ mod tests {
             .user_create("alice", "alice@example.org", "2026-08-06T00:00:00Z")
             .unwrap();
         (db, user.id)
+    }
+
+    /// The migration the deployed box actually takes: a schema-3 ledger with
+    /// data in it opens under a schema-4 binary, keeps its rows, and gains
+    /// the invites table. "Delete the database and start again" stopped
+    /// being a printable instruction the day the box went live, so from 3 on
+    /// an upgrade has to be additive — this is the test that holds it to
+    /// that.
+    #[test]
+    fn a_deployed_ledger_upgrades_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("factory.db");
+        {
+            let db = Db::open(&path).unwrap();
+            db.user_create("alice", "a@example.org", "t").unwrap();
+            // Wind it back to what the box was running before invites, minus
+            // the table this migration adds.
+            db.with(|conn| {
+                conn.execute_batch("DROP TABLE invites; PRAGMA user_version = 3;")?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.user_by_handle("alice").unwrap().unwrap().email,
+            "a@example.org"
+        );
+        db.invite_create("b@example.org", "", "hash", "t", "2027-01-01T00:00:00Z")
+            .unwrap();
+        let version: i64 = db
+            .with(|conn| Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?))
+            .unwrap();
+        assert_eq!(version, SCHEMA);
     }
 
     fn bundle(user_id: &str, id: &str, version: u32, digest: &str) -> BundleRow {

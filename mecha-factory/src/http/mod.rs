@@ -20,6 +20,7 @@
 
 pub mod artifacts;
 pub mod intake;
+pub mod signup;
 pub mod v1;
 
 use axum::extract::{ConnectInfo, Request, State};
@@ -118,6 +119,10 @@ pub fn router(app: Shared) -> Router {
         )
         .route("/f/{handle}/{type_id}/{name}", get(intake::asset))
         .route("/f/{handle}/{type_id}/c/{token}", get(intake::confirm))
+        // Claiming a handle from an invite. Gate-only like the forms, and for
+        // the same reason: server-rendered HTML that executes nothing.
+        .route("/signup/{token}", get(signup::form).post(signup::submit))
+        .route("/signup/{token}/{name}", get(signup::asset))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))

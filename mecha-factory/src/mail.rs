@@ -262,6 +262,33 @@ impl crate::intake::Mailer for SesMailer {
         }
     }
 
+    fn send_invite(&self, address: &str, link: &str) {
+        let subject = "You are invited to claim a handle";
+        let text = format!(
+            "You have been invited to set up an account.\n\n\
+             Open this link to pick your handle — the name your pages will \
+             live under:\n\n\
+             {link}\n\n\
+             The link works once and expires in {} days. A handle is \
+             permanent, so pick one you want to keep.\n\n\
+             If you were not expecting this, ignore it — nothing happens \
+             until the link is opened.\n",
+            crate::intake::INVITE_EXPIRY_DAYS
+        );
+        // Logged rather than returned, like a verification: the CLI printing
+        // the link has already succeeded, and the operator watching it mint
+        // is the person the journal reaches.
+        match self.send(address, subject, &text, chrono::Utc::now()) {
+            Ok(()) => tracing::info!(to = address, "invite sent"),
+            Err(e) => tracing::error!(
+                error = %e,
+                to = address,
+                link,
+                "sending an invite failed — the link still works, deliver it another way"
+            ),
+        }
+    }
+
     fn describe(&self) -> String {
         format!("Amazon SES — {} from {}", self.region, self.from)
     }

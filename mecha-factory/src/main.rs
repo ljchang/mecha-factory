@@ -61,6 +61,11 @@ enum Command {
         #[command(subcommand)]
         action: KeyAction,
     },
+    /// The right to claim one handle, sent as a link.
+    Invite {
+        #[command(subcommand)]
+        action: InviteAction,
+    },
     /// Serve the three origins.
     Serve {
         /// Three loopback ports instead of three names, plain HTTP, and the
@@ -157,6 +162,29 @@ enum QueueAction {
 }
 
 #[derive(Subcommand)]
+enum InviteAction {
+    /// Mint an invite and email its link.
+    ///
+    /// The link is also printed, because delivery is best-effort and the
+    /// operator may be handing it over some other way — the person who can
+    /// mint invites could mint themselves anything, so showing them the token
+    /// is not a leak. Needs `--config`, not just `--data-dir`: the link is
+    /// built from the gate's origin, and the mailer comes from `[mail]`.
+    Create {
+        /// Where the link is sent — and the address the claimed account gets.
+        #[arg(long)]
+        email: String,
+        /// Who this is, so `invite list` means something a month later.
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Every invite, with what became of it.
+    List,
+    /// Stop an unclaimed invite working. Claimed ones are history, not policy.
+    Revoke { id: String },
+}
+
+#[derive(Subcommand)]
 enum KeyAction {
     /// Mint a key and print it **once**. There is no way to read it back.
     Create {
@@ -197,6 +225,7 @@ fn main() -> Result<()> {
             undo,
         } => withhold(&cli, handle, id, *version, reason.as_deref(), *undo),
         Command::Key { action } => key(&cli, action),
+        Command::Invite { action } => invite(&cli, action),
         Command::Serve { dev, port } => serve(&cli, *dev, *port),
         Command::Queue { action } => queue(&cli, action),
         Command::Sweep => sweep(&cli),
@@ -321,6 +350,82 @@ fn withhold(
         println!("{handle}/{id} v{version} is withheld — served to nobody, and still on disk");
     }
     Ok(())
+}
+
+fn invite(cli: &Cli, action: &InviteAction) -> Result<()> {
+    match action {
+        InviteAction::Create { email, note } => {
+            // The link needs the gate's origin and the send needs [mail], so
+            // this verb is the one that cannot run from --data-dir alone.
+            let config = load_config(cli)?;
+            let db = mecha_factory::db::Db::open(&config.db_path())?;
+            let token = mecha_factory::intake::mint_token();
+            let now = db::now();
+            let expires = (chrono::Utc::now()
+                + chrono::Duration::days(mecha_factory::intake::INVITE_EXPIRY_DAYS))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let row = db.invite_create(
+                email,
+                note,
+                &mecha_factory::intake::hash_token(&token),
+                &now,
+                &expires,
+            )?;
+            let link = format!(
+                "{}/signup/{token}",
+                config.base_url(mecha_factory::config::Role::Gate)
+            );
+            // stdout, alone — like a minted key — so the link can be piped or
+            // pasted wherever the invitation is actually being extended.
+            println!("{link}");
+            let mailer = mecha_factory::mail::configured(&config)?;
+            mailer.send_invite(email, &link);
+            eprintln!(
+                "invite {} for {email}: expires {expires}, delivery via {}",
+                row.id,
+                mailer.describe()
+            );
+            Ok(())
+        }
+        InviteAction::List => {
+            let db = open_db(cli)?;
+            let invites = db.invites()?;
+            if invites.is_empty() {
+                println!("no invites");
+                return Ok(());
+            }
+            let now = db::now();
+            for row in invites {
+                println!(
+                    "{}  {:<28} {:<8} minted {}  expires {}{}{}",
+                    row.id,
+                    row.email,
+                    row.status(&now),
+                    row.created_at,
+                    row.expires_at,
+                    match &row.claimed_by {
+                        Some(user) => format!("  claimed by {user}"),
+                        None => String::new(),
+                    },
+                    if row.note.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", row.note)
+                    }
+                );
+            }
+            Ok(())
+        }
+        InviteAction::Revoke { id } => {
+            let db = open_db(cli)?;
+            if db.invite_revoke(id, &db::now())? {
+                println!("revoked {id} — the link no longer works");
+            } else {
+                println!("{id} is not a pending invite (claimed, already revoked, or unknown)");
+            }
+            Ok(())
+        }
+    }
 }
 
 fn key(cli: &Cli, action: &KeyAction) -> Result<()> {

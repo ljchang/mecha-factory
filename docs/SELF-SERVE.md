@@ -456,7 +456,17 @@ zone triggers neither.
    - The property §14.3 asked us to keep survived: an unclaimed handle has no
      resolver, so it still dies at the TLS handshake and the 404 is still the
      second line of defence.
-3. **Signup**: invite → magic link → handle claim. Reuses `intake.rs`.
+3. ~~**Signup**~~ *Built 2026-08-07* — `factory invite create --email …`
+   mints the right to claim one handle (7-day expiry, token hashed at rest,
+   link printed and mailed), and `GET/POST /signup/<token>` on the gate is
+   the claim: pick a handle, and the account is created through the same
+   `invite_claim → create_user_in` path the CLI uses, spending the invite in
+   the same transaction. No second verification email — the invite arrived
+   by email and the single-use token proves the click. Every kind of dead
+   invite is one page with one set of bytes, and a rejected handle keeps the
+   invite claimable. The schema migration this needed (v3 → v4) established
+   the additive-migration rule: the box is live, so "delete the database"
+   stopped being a printable instruction.
 4. **Pairing**: the code, `factory-publish connect`, and the confirmation that
    names the handle — typed back, not answered `y`, per the review above.
 5. **The tenant surface**: artifacts owned, make public, connected machines,

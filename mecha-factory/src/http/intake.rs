@@ -43,7 +43,7 @@ use crate::config::Origin;
 use crate::db::UserRow;
 
 /// A page, under the gate's own policy. The middleware adds the headers.
-fn page(status: StatusCode, body: String) -> Response {
+pub(crate) fn page(status: StatusCode, body: String) -> Response {
     (status, Html(body)).into_response()
 }
 
@@ -56,7 +56,7 @@ fn page(status: StatusCode, body: String) -> Response {
 /// wrongly from all of them. An empty prefix means "no stylesheet worth
 /// resolving", which is what a 404 that must not reveal whether a handle
 /// exists should say.
-fn shell(title: &str, body: &str, assets: &str) -> String {
+pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
     let style = if assets.is_empty() {
         String::new()
     } else {
@@ -172,7 +172,14 @@ pub async fn asset(
     Extension(origin): Extension<Origin>,
     Path((_handle, _type_id, name)): Path<(String, String, String)>,
 ) -> Response {
-    if v1::not_on_gate(&origin).is_some() {
+    serve_asset(&app, &origin, &name)
+}
+
+/// The named built-in asset, from whichever route wants it — the intake forms
+/// and the signup page reference the same stylesheet, and serving it from one
+/// place is what keeps them agreeing about what it is.
+pub(crate) fn serve_asset(app: &Shared, origin: &Origin, name: &str) -> Response {
+    if v1::not_on_gate(origin).is_some() {
         return nothing_here();
     }
     let page = RequestType {
@@ -192,7 +199,7 @@ pub async fn asset(
         ..FormOptions::default()
     });
     for (asset_name, body) in page.assets() {
-        if asset_name == name {
+        if *asset_name == *name {
             return (
                 StatusCode::OK,
                 [(
@@ -417,7 +424,7 @@ pub async fn confirm(
 /// `RequestType::validate` coerces from. Repeated keys keep the last, which is
 /// what a browser means by a checkbox group's hidden default followed by its
 /// checked value.
-fn form_values(body: &str) -> serde_json::Map<String, serde_json::Value> {
+pub(crate) fn form_values(body: &str) -> serde_json::Map<String, serde_json::Value> {
     let mut out = serde_json::Map::new();
     for pair in body.split('&') {
         if pair.is_empty() {

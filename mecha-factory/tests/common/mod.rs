@@ -32,6 +32,10 @@ impl mecha_factory::intake::Mailer for CapturedMail {
         self.0.lock().unwrap().push(link.to_string());
     }
 
+    fn send_invite(&self, _address: &str, link: &str) {
+        self.0.lock().unwrap().push(link.to_string());
+    }
+
     fn describe(&self) -> String {
         "captured (test)".into()
     }

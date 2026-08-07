@@ -48,6 +48,14 @@ pub fn recipient_hash(address: &str) -> String {
     )
 }
 
+/// How long an invite waits to be claimed.
+///
+/// Days rather than minutes, unlike a verification link: a verification
+/// confirms a click somebody just made, where an invite sits in an inbox
+/// until a person has an evening free. Still bounded, because an unclaimed
+/// right to a handle should not be a standing offer forever.
+pub const INVITE_EXPIRY_DAYS: i64 = 7;
+
 /// Where a verification link goes.
 pub trait Mailer: Send + Sync {
     fn send_verification(
@@ -56,6 +64,10 @@ pub trait Mailer: Send + Sync {
         request_type: &mecha_manifest::RequestType,
         link: &str,
     );
+    /// An invite to claim a handle. Same delivery, different message: this
+    /// one was minted by the operator rather than triggered by the recipient,
+    /// so it has to say what to do when it was unexpected — nothing.
+    fn send_invite(&self, address: &str, link: &str);
     /// What `factory check` prints.
     fn describe(&self) -> String;
 }
@@ -79,6 +91,14 @@ impl Mailer for LogMailer {
             request_type = request_type.id,
             link,
             "verification link (not sent: no mailer configured)"
+        );
+    }
+
+    fn send_invite(&self, address: &str, link: &str) {
+        tracing::info!(
+            to = address,
+            link,
+            "invite link (not sent: no mailer configured)"
         );
     }
 
