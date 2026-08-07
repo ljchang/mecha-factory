@@ -17,7 +17,11 @@
 //! Nothing in this crate depends on `mecha-core`, and nothing may. The shared
 //! contract is `mecha-manifest`, which is data.
 
-pub mod availability;
+/// The availability engine lives in `mecha-manifest` — it is part of the
+/// contract a `booking` manifest carries, and the box parses slot JSON with
+/// the same types. Re-exported here because this crate is where it *runs*
+/// (`slots push`), and the CLI reads better naming it locally.
+pub use mecha_manifest::availability;
 pub mod mcp;
 pub mod notebook;
 pub mod pyodide;

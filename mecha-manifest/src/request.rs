@@ -80,6 +80,100 @@ pub struct RequestType {
     /// the artifact stops working the moment its agent is away.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub confirmation: Option<Confirmation>,
+
+    /// What kind of instrument this manifest declares. `request` (the
+    /// default, and what every existing manifest is) collects a typed ask;
+    /// `booking` adds a slot to the same flow — the page shows availability,
+    /// the submission names a slot, and verification doubles as the claim.
+    /// One extra deterministic step on the same state machine, never a
+    /// parallel system.
+    #[serde(default, skip_serializing_if = "RequestKind::is_default")]
+    pub kind: RequestKind,
+
+    /// The `[availability]` section — required exactly when `kind` is
+    /// `booking`. **Home reads this; the box never computes from it.** It
+    /// rides in the manifest so one file is authoritative for both halves,
+    /// and the same push that makes the page exist carries the policy the
+    /// slot pipeline runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<crate::availability::RawPolicy>,
+
+    /// The `[policy]` section — what the **box** enforces about a booking:
+    /// how long a soft hold lives, how close to a meeting a cancel still
+    /// works, when reminders fire. Meaningful only when `kind` is `booking`;
+    /// absent means the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<BookingPolicy>,
+}
+
+/// Which flow a manifest declares. Deliberately not free text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RequestKind {
+    #[default]
+    Request,
+    Booking,
+}
+
+impl RequestKind {
+    fn is_default(&self) -> bool {
+        *self == RequestKind::Request
+    }
+}
+
+/// What the box enforces about a booking. Every field has a default, so the
+/// section is optional; every default is stated here rather than scattered
+/// through the server, because "what happens if I omit this" must have one
+/// answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BookingPolicy {
+    /// How long a submitted-but-unverified booking holds its slot.
+    #[serde(default = "default_hold_minutes")]
+    pub hold_minutes: u32,
+    /// Inside this window before the meeting, the manage page explains the
+    /// policy instead of offering the cancel button.
+    #[serde(default = "default_cancel_cutoff")]
+    pub cancel_cutoff_hours: u32,
+    /// When reminders fire, as durations before the start: `"24h"`, `"90m"`,
+    /// `"3d"`. Checked at parse; a reminder inside the booking-to-start gap
+    /// is suppressed at send time, not here.
+    #[serde(default = "default_reminders")]
+    pub reminders: Vec<String>,
+}
+
+impl Default for BookingPolicy {
+    fn default() -> Self {
+        BookingPolicy {
+            hold_minutes: default_hold_minutes(),
+            cancel_cutoff_hours: default_cancel_cutoff(),
+            reminders: default_reminders(),
+        }
+    }
+}
+
+fn default_hold_minutes() -> u32 {
+    30
+}
+fn default_cancel_cutoff() -> u32 {
+    2
+}
+fn default_reminders() -> Vec<String> {
+    vec!["24h".into(), "1h".into()]
+}
+
+/// A reminder offset (`"24h"`, `"90m"`, `"3d"`) as minutes before start.
+/// `None` is a spelling this vocabulary does not have.
+pub fn reminder_minutes(spec: &str) -> Option<u32> {
+    let spec = spec.trim();
+    let (number, unit) = spec.split_at(spec.len().checked_sub(1)?);
+    let value: u32 = number.parse().ok().filter(|v| *v > 0)?;
+    match unit {
+        "m" => Some(value),
+        "h" => value.checked_mul(60),
+        "d" => value.checked_mul(60 * 24),
+        _ => None,
+    }
 }
 
 /// Proving that the address on a submission belongs to whoever sent it.
@@ -526,7 +620,92 @@ impl RequestType {
             )));
         }
         check_references(self)?;
+        self.check_kind()?;
         Ok(())
+    }
+
+    /// The rules that follow from `kind`, in both directions: a booking
+    /// manifest must carry what a booking needs, and a plain request must not
+    /// carry booking sections that nothing would read — a `[availability]`
+    /// on a request type is somebody believing they configured a booking
+    /// page when they configured a form.
+    fn check_kind(&self) -> Result<()> {
+        match self.kind {
+            RequestKind::Request => {
+                if self.availability.is_some() || self.policy.is_some() {
+                    return Err(ManifestError::invalid(format!(
+                        "`{}` carries [availability] or [policy] but is not \
+                         `kind = \"booking\"` — nothing would read them, which \
+                         is worse than an error",
+                        self.id
+                    )));
+                }
+                Ok(())
+            }
+            RequestKind::Booking => {
+                let Some(raw) = &self.availability else {
+                    return Err(ManifestError::invalid(format!(
+                        "booking `{}` has no [availability] section, so no \
+                         slot could ever be offered",
+                        self.id
+                    )));
+                };
+                // The full parse, not a shape check: `type check` at home is
+                // where a bad window should surface, not the slot pipeline
+                // at two in the morning.
+                crate::availability::Policy::from_raw(raw)?;
+                if self.verification.is_none() {
+                    return Err(ManifestError::invalid(format!(
+                        "booking `{}` has no [verification]: the magic-link \
+                         click is what converts a hold into a booking, so a \
+                         booking type without one has no way to book",
+                        self.id
+                    )));
+                }
+                // One page: the slot pick and the details are a single form,
+                // and the multi-step machinery would put a POST between them
+                // with a hold already ticking.
+                if !self.steps.is_empty() {
+                    return Err(ManifestError::invalid(format!(
+                        "booking `{}` declares steps; a booking page is one \
+                         page",
+                        self.id
+                    )));
+                }
+                if self.has_file_fields() {
+                    return Err(ManifestError::invalid(format!(
+                        "booking `{}` declares a file field; a booking takes \
+                         no attachments",
+                        self.id
+                    )));
+                }
+                for spec in &self.policy.clone().unwrap_or_default().reminders {
+                    if reminder_minutes(spec).is_none() {
+                        return Err(ManifestError::invalid(format!(
+                            "booking `{}` has the reminder `{spec}`, which is \
+                             not <n>m, <n>h or <n>d",
+                            self.id
+                        )));
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// The checked availability policy of a booking manifest. `None` for a
+    /// plain request; a `RequestType` that exists has passed `check`, so on
+    /// a booking this parse cannot fail — but the `Result` is kept honest
+    /// for a struct built by hand rather than parsed.
+    pub fn availability_policy(&self) -> Option<Result<crate::availability::Policy>> {
+        self.availability
+            .as_ref()
+            .map(crate::availability::Policy::from_raw)
+    }
+
+    /// The booking policy, with its defaults filled in.
+    pub fn booking_policy(&self) -> BookingPolicy {
+        self.policy.clone().unwrap_or_default()
     }
 
     /// The most attachment bytes one submission of this type may carry — the
@@ -1313,5 +1492,110 @@ accept=["docx"]
                 "{what}: expected {expected:?} in {err:?}"
             );
         }
+    }
+
+    // ---- the booking kind ----
+
+    const BOOKING_BASE: &str = r#"
+        id = "book"
+        version = 1
+        title = "Book a meeting"
+        kind = "booking"
+
+        [[fields]]
+        name = "requester_name"
+        label = "Your name"
+        kind = "text"
+        max_length = 120
+        required = true
+
+        [[fields]]
+        name = "requester_email"
+        label = "Your email"
+        kind = "email"
+        required = true
+
+        [verification]
+        field = "requester_email"
+
+        [availability]
+        timezone = "America/New_York"
+        durations = [30, 60]
+
+        [[availability.windows]]
+        day = "tue"
+        start = "13:00"
+        end = "17:00"
+    "#;
+
+    #[test]
+    fn a_booking_manifest_parses_and_carries_its_policies() {
+        let booking = RequestType::from_toml(BOOKING_BASE).unwrap();
+        assert_eq!(booking.kind, RequestKind::Booking);
+        let policy = booking.availability_policy().unwrap().unwrap();
+        assert_eq!(policy.durations, vec![30, 60]);
+        // No [policy] section: every default is a stated one.
+        let defaults = booking.booking_policy();
+        assert_eq!(defaults.hold_minutes, 30);
+        assert_eq!(defaults.cancel_cutoff_hours, 2);
+        assert_eq!(defaults.reminders, vec!["24h", "1h"]);
+        // And the manifest round-trips through TOML with its sections.
+        let round = RequestType::from_toml(&booking.to_toml().unwrap()).unwrap();
+        assert_eq!(round.kind, RequestKind::Booking);
+        assert!(round.availability.is_some());
+    }
+
+    #[test]
+    fn a_booking_without_its_needs_is_refused_with_the_reason() {
+        // No [availability]: nothing could ever be offered.
+        let err = RequestType::from_toml(&BOOKING_BASE.replace(
+            "[availability]",
+            "[availability_disabled]",
+        ));
+        assert!(err.is_err());
+
+        // A bad window inside [availability] surfaces at check, not at the
+        // slot pipeline at two in the morning.
+        let bad_window = BOOKING_BASE.replace("start = \"13:00\"", "start = \"19:00\"");
+        let err = RequestType::from_toml(&bad_window).unwrap_err().to_string();
+        assert!(err.contains("ends before"), "{err}");
+
+        // No verification: no way to convert a hold into a booking.
+        let no_verify = BOOKING_BASE.replace(
+            "[verification]\n        field = \"requester_email\"",
+            "",
+        );
+        let err = RequestType::from_toml(&no_verify).unwrap_err().to_string();
+        assert!(err.contains("no way to book"), "{err}");
+
+        // Steps: a booking page is one page.
+        let stepped = format!(
+            "{BOOKING_BASE}\n[[steps]]\nid = \"one\"\ntitle = \"One\"\nfields = [\"requester_name\", \"requester_email\"]"
+        );
+        let err = RequestType::from_toml(&stepped).unwrap_err().to_string();
+        assert!(err.contains("one page"), "{err}");
+    }
+
+    #[test]
+    fn a_plain_request_carrying_booking_sections_is_refused() {
+        let confused = BOOKING_BASE.replace("kind = \"booking\"", "");
+        let err = RequestType::from_toml(&confused).unwrap_err().to_string();
+        assert!(err.contains("nothing would read them"), "{err}");
+    }
+
+    #[test]
+    fn reminder_specs_parse_or_refuse() {
+        assert_eq!(reminder_minutes("24h"), Some(1440));
+        assert_eq!(reminder_minutes("90m"), Some(90));
+        assert_eq!(reminder_minutes("3d"), Some(4320));
+        for bad in ["soon", "h", "0h", "-1h", "24", ""] {
+            assert_eq!(reminder_minutes(bad), None, "{bad}");
+        }
+        let policy = BOOKING_BASE.replace(
+            "[availability]",
+            "[policy]\nreminders = [\"soon\"]\n\n[availability]",
+        );
+        let err = RequestType::from_toml(&policy).unwrap_err().to_string();
+        assert!(err.contains("soon"), "{err}");
     }
 }

@@ -11,6 +11,11 @@ repository.workspace = true
 # is data — TOML in, JSON Schema and HTML out — so each side can parse it in its
 # own language and neither has to trust the other's types.
 [dependencies]
+# The availability engine is part of the contract a booking instrument
+# carries, and time arithmetic in an IANA zone is what it is made of. Both
+# are pure — nothing here gained I/O.
+chrono.workspace = true
+chrono-tz.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 # The content address is part of the contract: the server recomputes it over

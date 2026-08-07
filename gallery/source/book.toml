@@ -1,0 +1,83 @@
+# The booking starter: a youcanbookme-shaped page in one manifest.
+#
+# `kind = "booking"` is what changes the flow. The page shows the slots home
+# pushed (never computed on the box), a submission names one, the soft hold
+# starts, and the verification click converts the hold into the booking.
+# One file, two readers: [availability] is home's — the slot pipeline runs
+# it — and [policy] is the box's. The fields below are the details form,
+# rendered beside the week view by the same machinery as every other type.
+
+id = "book"
+version = 1
+kind = "booking"
+title = "Book a meeting"
+description = "Pick a time that works; you'll get a confirmation and a calendar invite."
+retain_days = 365
+
+[availability]
+timezone = "America/New_York"
+durations = [30, 60]
+buffer_minutes = 10
+min_notice_hours = 24
+horizon_days = 60
+per_day_cap = 3
+
+[[availability.windows]]
+day = "tue"
+start = "13:00"
+end = "17:00"
+
+[[availability.windows]]
+day = "wed"
+start = "09:00"
+end = "12:00"
+
+[[availability.windows]]
+day = "thu"
+start = "13:00"
+end = "17:00"
+
+[policy]
+hold_minutes = 30
+cancel_cutoff_hours = 2
+reminders = ["24h", "1h"]
+
+[[fields]]
+name = "requester_name"
+label = "Your name"
+kind = "text"
+max_length = 120
+required = true
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+help = "The confirmation, the calendar invite, and the link to cancel all go here."
+
+[[fields]]
+name = "purpose"
+label = "What is this about?"
+kind = "select"
+required = true
+options = [
+  { value = "advising", label = "Advising" },
+  { value = "research", label = "Research / collaboration" },
+  { value = "office_hours", label = "Office hours" },
+  { value = "other", label = "Something else" },
+]
+
+[[fields]]
+name = "topic"
+label = "Anything I should read or know beforehand?"
+kind = "long_text"
+max_length = 600
+
+[verification]
+field = "requester_email"
+expires_hours = 24
+
+[confirmation]
+heading = "You're booked"
+body = """Your meeting is confirmed. A calendar invite is on its way to you, with a link to cancel if plans change."""

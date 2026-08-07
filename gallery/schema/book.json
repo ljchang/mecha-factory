@@ -1,0 +1,42 @@
+{
+  "$id": "mecha-factory:request/book/v1",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Pick a time that works; you'll get a confirmation and a calendar invite.",
+  "properties": {
+    "purpose": {
+      "enum": [
+        "advising",
+        "research",
+        "office_hours",
+        "other"
+      ],
+      "title": "What is this about?",
+      "type": "string"
+    },
+    "requester_email": {
+      "description": "The confirmation, the calendar invite, and the link to cancel all go here.",
+      "format": "email",
+      "maxLength": 254,
+      "title": "Your email",
+      "type": "string"
+    },
+    "requester_name": {
+      "maxLength": 120,
+      "title": "Your name",
+      "type": "string"
+    },
+    "topic": {
+      "maxLength": 600,
+      "title": "Anything I should read or know beforehand?",
+      "type": "string"
+    }
+  },
+  "required": [
+    "requester_name",
+    "requester_email",
+    "purpose"
+  ],
+  "title": "Book a meeting",
+  "type": "object"
+}

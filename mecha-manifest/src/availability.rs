@@ -74,83 +74,104 @@ pub struct Policy {
     pub overrides: Vec<DateOverride>,
 }
 
+/// The `[availability]` section exactly as TOML states it, before meaning is
+/// checked. Public within the crate so a `booking` manifest embeds it as a
+/// section and inherits this parse instead of re-deciding it. Strict on
+/// purpose (`deny_unknown_fields`): a typo'd key in an availability policy
+/// silently changes when a stranger can book the user's week.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawPolicy {
+    pub timezone: String,
+    pub durations: Vec<u32>,
+    #[serde(default)]
+    pub buffer_minutes: u32,
+    #[serde(default = "default_notice")]
+    pub min_notice_hours: u32,
+    #[serde(default = "default_horizon")]
+    pub horizon_days: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub per_day_cap: Option<u32>,
+    #[serde(default = "default_increment")]
+    pub increment_minutes: u32,
+    pub windows: Vec<RawWindow>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub overrides: Vec<RawOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawWindow {
+    pub day: String,
+    pub start: String,
+    pub end: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawOverride {
+    pub date: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows: Vec<[String; 2]>,
+}
+
+fn default_notice() -> u32 {
+    24
+}
+fn default_horizon() -> u32 {
+    60
+}
+fn default_increment() -> u32 {
+    30
+}
+
 impl Policy {
-    /// Parse the `[availability]` vocabulary from TOML. This is the same
-    /// section a `booking` instrument manifest will carry; parsing lives
-    /// here so the manifest work inherits it rather than re-deciding it.
-    ///
-    /// Strict on purpose (`deny_unknown_fields`, every window checked):
-    /// a typo'd key in an availability policy silently changes when a
-    /// stranger can book the user's week.
-    pub fn from_toml(text: &str) -> anyhow::Result<Policy> {
-        use anyhow::Context;
+    /// Parse the `[availability]` vocabulary from a standalone TOML document.
+    pub fn from_toml(text: &str) -> crate::Result<Policy> {
+        Self::from_raw(&toml::from_str(text)?)
+    }
 
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawPolicy {
-            timezone: String,
-            durations: Vec<u32>,
-            #[serde(default)]
-            buffer_minutes: u32,
-            #[serde(default = "default_notice")]
-            min_notice_hours: u32,
-            #[serde(default = "default_horizon")]
-            horizon_days: u32,
-            per_day_cap: Option<u32>,
-            #[serde(default = "default_increment")]
-            increment_minutes: u32,
-            windows: Vec<RawWindow>,
-            #[serde(default)]
-            overrides: Vec<RawOverride>,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawWindow {
-            day: String,
-            start: String,
-            end: String,
-        }
-        #[derive(serde::Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct RawOverride {
-            date: String,
-            #[serde(default)]
-            windows: Vec<[String; 2]>,
-        }
-        fn default_notice() -> u32 {
-            24
-        }
-        fn default_horizon() -> u32 {
-            60
-        }
-        fn default_increment() -> u32 {
-            30
+    /// Check a deserialized section and give it meaning. Every refusal names
+    /// its field — this is the validation both a `type check` at home and
+    /// the slot pipeline run, and "refused with the reason" is the contract.
+    pub fn from_raw(raw: &RawPolicy) -> crate::Result<Policy> {
+        use crate::ManifestError;
+        fn ensure(ok: bool, message: impl FnOnce() -> String) -> crate::Result<()> {
+            if ok {
+                Ok(())
+            } else {
+                Err(ManifestError::invalid(message()))
+            }
         }
 
-        let raw: RawPolicy = toml::from_str(text).context("availability policy")?;
-        let timezone: Tz = raw
-            .timezone
-            .parse()
-            .map_err(|_| anyhow::anyhow!("`{}` is not an IANA timezone", raw.timezone))?;
-        anyhow::ensure!(!raw.durations.is_empty(), "durations must name at least one");
-        anyhow::ensure!(
-            raw.durations.iter().all(|d| (5..=480).contains(d)),
-            "each duration must be 5–480 minutes"
-        );
-        anyhow::ensure!(!raw.windows.is_empty(), "windows must name at least one");
-        anyhow::ensure!(raw.horizon_days >= 1, "horizon_days must be at least 1");
-        anyhow::ensure!(
-            raw.increment_minutes >= 5,
-            "increment_minutes must be at least 5"
-        );
+        let timezone: Tz = raw.timezone.parse().map_err(|_| {
+            ManifestError::invalid(format!("`{}` is not an IANA timezone", raw.timezone))
+        })?;
+        ensure(!raw.durations.is_empty(), || {
+            "durations must name at least one".into()
+        })?;
+        ensure(raw.durations.iter().all(|d| (5..=480).contains(d)), || {
+            "each duration must be 5–480 minutes".into()
+        })?;
+        ensure(!raw.windows.is_empty(), || {
+            "windows must name at least one".into()
+        })?;
+        ensure(raw.horizon_days >= 1, || {
+            "horizon_days must be at least 1".into()
+        })?;
+        ensure(raw.increment_minutes >= 5, || {
+            "increment_minutes must be at least 5".into()
+        })?;
 
-        let time = |raw: &str| -> anyhow::Result<NaiveTime> {
+        let time = |raw: &str| -> crate::Result<NaiveTime> {
             NaiveTime::parse_from_str(raw, "%H:%M")
-                .with_context(|| format!("`{raw}` is not an HH:MM time"))
+                .map_err(|_| ManifestError::invalid(format!("`{raw}` is not an HH:MM time")))
         };
-        let pair = |start: &str, end: &str| -> anyhow::Result<(NaiveTime, NaiveTime)> {
+        let pair = |start: &str, end: &str| -> crate::Result<(NaiveTime, NaiveTime)> {
             let (start, end) = (time(start)?, time(end)?);
-            anyhow::ensure!(start < end, "window `{start}`–`{end}` ends before it starts");
+            ensure(start < end, || {
+                format!("window `{start}`–`{end}` ends before it starts")
+            })?;
             Ok((start, end))
         };
 
@@ -159,16 +180,15 @@ impl Policy {
             let day: Weekday = w
                 .day
                 .parse()
-                .map_err(|_| anyhow::anyhow!("`{}` is not a weekday", w.day))?;
+                .map_err(|_| ManifestError::invalid(format!("`{}` is not a weekday", w.day)))?;
             let (start, end) = pair(&w.start, &w.end)?;
             windows.push(WeeklyWindow { day, start, end });
         }
         let mut overrides = Vec::new();
         for o in &raw.overrides {
-            let date: NaiveDate = o
-                .date
-                .parse()
-                .with_context(|| format!("`{}` is not a YYYY-MM-DD date", o.date))?;
+            let date: NaiveDate = o.date.parse().map_err(|_| {
+                ManifestError::invalid(format!("`{}` is not a YYYY-MM-DD date", o.date))
+            })?;
             let mut day_windows = Vec::new();
             for [start, end] in &o.windows {
                 day_windows.push(pair(start, end)?);
@@ -181,7 +201,7 @@ impl Policy {
 
         Ok(Policy {
             timezone,
-            durations: raw.durations,
+            durations: raw.durations.clone(),
             buffer_minutes: raw.buffer_minutes,
             min_notice_hours: raw.min_notice_hours,
             horizon_days: raw.horizon_days,

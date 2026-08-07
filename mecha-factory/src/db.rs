@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 8;
+const SCHEMA: i64 = 9;
 
 #[derive(Clone)]
 pub struct Db {
@@ -273,6 +273,16 @@ pub struct BundleRow {
     /// response to a complaint is how you lose the ability to answer it.
     pub withheld_at: Option<String>,
     pub withheld_reason: Option<String>,
+}
+
+/// One withheld version, as the operator's panel lists it.
+#[derive(Debug, Clone)]
+pub struct WithheldRow {
+    pub handle: String,
+    pub id: String,
+    pub version: u32,
+    pub withheld_at: String,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -885,7 +895,110 @@ impl Db {
                 "DELETE FROM signin_links WHERE expires_at <= ?1",
                 params![now],
             )?;
-            Ok(a + b)
+            let c = conn.execute(
+                "DELETE FROM operator_sessions WHERE expires_at <= ?1",
+                params![now],
+            )?;
+            let d = conn.execute(
+                "DELETE FROM operator_links WHERE expires_at <= ?1",
+                params![now],
+            )?;
+            Ok(a + b + c + d)
+        })
+    }
+
+    // ---- the operator's sessions ----------------------------------------
+    //
+    // The same three verbs as the tenant ones, against their own tables, and
+    // the difference is what each joins on: a tenant session is a user
+    // signed in, an operator session is a *key* signed in. Nothing here
+    // reads `users` at all, which is what "shares nothing with tenant
+    // sessions" means as a property of queries rather than of intention.
+
+    /// Record a one-time browser link for an operate key.
+    pub fn operator_link_create(
+        &self,
+        key_id: &str,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO operator_links (id, key_id, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, key_id, token_hash, now, expires_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Spend an operator link: single-use, in one statement, like every
+    /// other token here. Returns the key it was minted by.
+    pub fn operator_link_redeem(&self, token_hash: &str, now: &str) -> Result<Option<String>> {
+        self.with(|conn| {
+            let key_id: Option<String> = conn
+                .query_row(
+                    "UPDATE operator_links SET used_at = ?2 \
+                     WHERE token_hash = ?1 AND used_at IS NULL AND expires_at > ?2 \
+                     RETURNING key_id",
+                    params![token_hash, now],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(key_id)
+        })
+    }
+
+    pub fn operator_session_create(
+        &self,
+        key_id: &str,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO operator_sessions (id, key_id, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, key_id, token_hash, now, expires_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The live operate key behind an operator session, or nothing. The
+    /// session dies with its key — the join demands the key unrevoked and
+    /// still `operate` — so break-glass revocation ends the browser too, the
+    /// way suspension ends a tenant's page.
+    pub fn operator_session_key(&self, token_hash: &str, now: &str) -> Result<Option<KeyRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT k.id, k.user_id, k.scope, k.hash, k.label, k.created_at, \
+                     k.revoked_at, k.last_used_at FROM operator_sessions s \
+                     JOIN keys k ON k.id = s.key_id \
+                     WHERE s.token_hash = ?1 AND s.revoked_at IS NULL \
+                     AND s.expires_at > ?2 AND k.revoked_at IS NULL \
+                     AND k.scope = 'operate'",
+                    params![token_hash, now],
+                    key_row,
+                )
+                .optional()?)
+        })
+    }
+
+    /// Sign out: the operator session stops working now.
+    pub fn operator_session_revoke(&self, token_hash: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE operator_sessions SET revoked_at = ?2 \
+                 WHERE token_hash = ?1 AND revoked_at IS NULL",
+                params![token_hash, now],
+            )?;
+            Ok(n > 0)
         })
     }
 
@@ -1082,6 +1195,29 @@ impl Db {
 
     pub fn bundle_count(&self) -> Result<i64> {
         self.with(|conn| Ok(conn.query_row("SELECT COUNT(*) FROM bundles", [], |r| r.get(0))?))
+    }
+
+    /// Every version currently withheld, with whose it is — the operator's
+    /// review list, so a withhold flipped months ago is a row on the panel
+    /// rather than a memory.
+    pub fn withheld(&self) -> Result<Vec<WithheldRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT u.handle, b.id, b.version, b.withheld_at, b.withheld_reason \
+                 FROM bundles b JOIN users u ON u.id = b.user_id \
+                 WHERE b.withheld_at IS NOT NULL ORDER BY b.withheld_at",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(WithheldRow {
+                    handle: r.get(0)?,
+                    id: r.get(1)?,
+                    version: r.get(2)?,
+                    withheld_at: r.get(3)?,
+                    reason: r.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
     }
 
     // ---- aliases --------------------------------------------------------
@@ -2121,6 +2257,30 @@ fn migrate(conn: &Connection) -> Result<()> {
         CREATE TABLE IF NOT EXISTS sessions (
             id          TEXT PRIMARY KEY,
             user_id     TEXT NOT NULL,
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            revoked_at  TEXT
+        );
+
+        -- The operator's way into a browser: a one-time link minted through
+        -- the API by an operate key, and the session it becomes. Deliberately
+        -- parallel to signin_links/sessions and deliberately not those
+        -- tables: a tenant session joins on a user, an operator session
+        -- joins on a key, and no query that answers one can be handed the
+        -- other.
+        CREATE TABLE IF NOT EXISTS operator_links (
+            id          TEXT PRIMARY KEY,
+            key_id      TEXT NOT NULL,
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            used_at     TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS operator_sessions (
+            id          TEXT PRIMARY KEY,
+            key_id      TEXT NOT NULL,
             token_hash  TEXT NOT NULL UNIQUE,
             created_at  TEXT NOT NULL,
             expires_at  TEXT NOT NULL,

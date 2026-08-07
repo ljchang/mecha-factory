@@ -55,6 +55,7 @@
 //! browser did not show it, so the server cannot insist on it. See
 //! [`RequestType::visible_fields`].
 
+pub mod availability;
 pub mod brand;
 mod bundle;
 mod condition;
@@ -75,8 +76,8 @@ pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::{site_header, FormOptions, FormPage};
 pub use media::{content_type, sniff, FileType};
 pub use request::{
-    valid_id, Acknowledgment, Field, FieldKind, RequestType, Step, MAX_FILE_BYTES_PER_FIELD,
-    MAX_FILE_BYTES_PER_TYPE,
+    reminder_minutes, valid_id, Acknowledgment, BookingPolicy, Field, FieldKind, RequestKind,
+    RequestType, Step, MAX_FILE_BYTES_PER_FIELD, MAX_FILE_BYTES_PER_TYPE,
 };
 pub use theme::{Palette, Theme, BUILT_IN as BUILT_IN_THEMES};
 pub use validate::{FileMeta, Phase, Submission, ValidationError};

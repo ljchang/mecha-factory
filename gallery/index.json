@@ -71,6 +71,19 @@
     },
     {
       "blurb": "A shipped starter, rendered by the same path.",
+      "id": "book",
+      "renderings": [
+        {
+          "file": "book.html",
+          "label": "the form"
+        }
+      ],
+      "schema": "schema/book.json",
+      "source": "source/book.toml",
+      "title": "Book a meeting"
+    },
+    {
+      "blurb": "A shipped starter, rendered by the same path.",
       "id": "lab-application",
       "renderings": [
         {

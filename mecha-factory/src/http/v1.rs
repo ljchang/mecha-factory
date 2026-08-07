@@ -1005,7 +1005,7 @@ pub async fn disconnect(
 // be one, kept apart by the credential rather than by attention.
 
 /// The operator, or a refusal. No user join: the key belongs to the box.
-fn authorised_operator(app: &Shared, headers: &HeaderMap) -> Result<KeyRow, Box<Response>> {
+pub(crate) fn authorised_operator(app: &Shared, headers: &HeaderMap) -> Result<KeyRow, Box<Response>> {
     match keys::authenticate(&app.db, bearer(headers), Scope::Operate) {
         Ok(row) => Ok(row),
         Err(e) => {
@@ -1130,17 +1130,56 @@ pub async fn admin_invite_create(
             return Failure::json(StatusCode::BAD_REQUEST, format!("body: {e}")).into_response()
         }
     };
-    let email = request.email.trim().to_string();
+    match mint_invite(&app, &request.email, &request.note) {
+        Ok(minted) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "id": minted.id,
+                "link": minted.link,
+                "expires_at": minted.expires_at,
+                "mailed_via": app.mailer.describe(),
+            })),
+        )
+            .into_response(),
+        Err(InviteRefused::BadAddress) => {
+            Failure::json(StatusCode::BAD_REQUEST, "an email address is required").into_response()
+        }
+        Err(InviteRefused::Unavailable) => {
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+/// An invite that exists and has been mailed.
+pub(crate) struct MintedInvite {
+    pub id: String,
+    pub link: String,
+    pub expires_at: String,
+}
+
+pub(crate) enum InviteRefused {
+    BadAddress,
+    Unavailable,
+}
+
+/// Mint an invite and have the box mail it — one definition, shared by the
+/// JSON endpoint and the admin page, so the two ways of inviting cannot
+/// drift on expiry, hashing, or who sends the mail.
+pub(crate) fn mint_invite(
+    app: &Shared,
+    email: &str,
+    note: &str,
+) -> Result<MintedInvite, InviteRefused> {
+    let email = email.trim().to_string();
     if email.is_empty() || !email.contains('@') {
-        return Failure::json(StatusCode::BAD_REQUEST, "an email address is required")
-            .into_response();
+        return Err(InviteRefused::BadAddress);
     }
     let token = crate::intake::mint_token();
     let expires = (chrono::Utc::now() + chrono::Duration::days(crate::intake::INVITE_EXPIRY_DAYS))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let row = match app.db.invite_create(
         &email,
-        &request.note,
+        note,
         &crate::intake::hash_token(&token),
         &crate::db::now(),
         &expires,
@@ -1148,22 +1187,17 @@ pub async fn admin_invite_create(
         Ok(row) => row,
         Err(e) => {
             tracing::error!(error = %e, "minting an invite");
-            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+            return Err(InviteRefused::Unavailable);
         }
     };
     let link = format!("{}/signup/{token}", app.config.base_url(Role::Gate));
     app.mailer.send_invite(&email, &link);
     tracing::info!(invite = %row.id, "operator minted an invite");
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "id": row.id,
-            "link": link,
-            "expires_at": expires,
-            "mailed_via": app.mailer.describe(),
-        })),
-    )
-        .into_response()
+    Ok(MintedInvite {
+        id: row.id,
+        link,
+        expires_at: expires,
+    })
 }
 
 /// `GET /v1/admin/invites` — every invite and what became of it.

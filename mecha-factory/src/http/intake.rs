@@ -259,6 +259,13 @@ fn resolve(app: &Shared, handle: &str, type_id: &str) -> Option<(UserRow, Reques
     let parsed = RequestType::from_toml(&stored.manifest).ok()?;
     // Refused rather than served unverified: see `RequestType::servable`.
     parsed.servable().ok()?;
+    // A booking type served as a plain form would collect a booking with no
+    // slot — a submission the drain side can only apologise for. Its home is
+    // the booking page, which arrives with its own routes; until and beside
+    // those, /f/ answers for it what it answers for a type that is not here.
+    if parsed.kind != mecha_manifest::RequestKind::Request {
+        return None;
+    }
     Some((user, parsed))
 }
 
@@ -377,6 +384,9 @@ pub(crate) fn serve_asset(app: &Shared, origin: &Origin, name: &str) -> Response
         acknowledgments: Vec::new(),
         verification: None,
         confirmation: None,
+        kind: mecha_manifest::RequestKind::Request,
+        availability: None,
+        policy: None,
     }
     .form(&FormOptions {
         theme: mecha_manifest::Theme::by_name(&app.config.theme),

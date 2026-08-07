@@ -19,6 +19,7 @@
 //! this server permits and it is the one the local preview server uses too.
 
 pub mod account;
+pub mod admin;
 pub mod artifacts;
 pub mod intake;
 pub mod signup;
