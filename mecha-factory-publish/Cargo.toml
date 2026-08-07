@@ -1,6 +1,6 @@
 [package]
 name = "mecha-factory-publish"
-description = "The home side of the public surface: renders bundles, versions them immutably, and (later) holds the publish key."
+description = "The home side of mecha-factory: renders bundles, versions them immutably, pairs a machine with scoped keys, and serves the MCP surface any agent client can drive."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

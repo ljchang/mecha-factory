@@ -17,13 +17,15 @@ A factory is where machines are built and shipped from — and it is deliberatel
 *not* the machine. Orders come in, product goes out.
 
 > **Where this is.** The design is in mecha's
-> `docs/PUBLIC-SURFACE-DESIGN.md`; §12 is the build order. Steps 1–6 are built:
-> the manifest, the bundle store, the vendoring gate, the notebook path, the MCP
-> surface, and **the server** — three origins, two scoped keys, SQLite, ACME.
-> What is not built is the inbound half: the public form, the magic-link
-> verification, and the state machine that carries a stranger's request from
-> `submitted` to `answered`. Until that exists the box has **no unauthenticated
-> write endpoint at all**.
+> `docs/PUBLIC-SURFACE-DESIGN.md`; §12 is the build order, and it is built
+> through self-serve: the manifest, the bundle store, the vendoring gate, the
+> notebook path, the MCP surface, **the server** — three origins, scoped keys,
+> SQLite, ACME — the inbound half (the public form, magic-link verification
+> over SES, the queue home drains), and **self-serve** end to end: invites,
+> handle claims, pairing, per-user certificates, the tenant page, the operator
+> surface. [`docs/SELF-SERVE.md`](docs/SELF-SERVE.md) records that arc;
+> [`docs/SECOND-CLIENT.md`](docs/SECOND-CLIENT.md) is the path for an MCP
+> client that is not mecha.
 
 ## Two purposes, matching the two directions of one boundary
 
@@ -44,8 +46,9 @@ A factory is where machines are built and shipped from — and it is deliberatel
 | `mecha-factory-publish` | The home side. Renders bundles, versions them immutably, moves the one alias a share URL resolves through, holds the publish key, and serves the MCP surface mecha wires. |
 | `mecha-factory` | The box. One binary serving three origins under three policies, an authenticated write API, and a queue home drains. **Multi-user**: every row belongs to a person, and each person's artifacts are served from their own hostname. Holds no credential that reaches home. |
 
-Next, in order: the inbound form and its verification (§12 step 7), then the
-booking page (step 8).
+Next, in order: a release binary from CI so the box needs no Rust toolchain,
+the crates.io split (`cargo install mecha-factory-publish`), then the booking
+page (§12 step 8).
 
 ## Try it
 
@@ -147,7 +150,7 @@ there was no origin to enforce it at. Now a private bundle answers exactly what
 a bundle that never existed answers — byte for byte, because any difference
 between them is the answer to the question a capability URL exists to withhold.
 A bundle published but never aliased is not yet a publication. Capability URLs
-for private bundles are step 7; until then private means served to nobody.
+for private bundles remain unbuilt; until then private means served to nobody.
 
 ## The invariants
 
