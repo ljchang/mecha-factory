@@ -287,7 +287,17 @@ One certificate covers all three names, and one more per active user.
 
 ## The keys
 
-Every key belongs to a user, so minting one names them:
+**The operator's own key first** (2026-08-07): `--scope operate` binds to the
+box rather than to a tenant, drives `/v1/admin/*` through
+`factory-publish operator …`, and is the reason this section is the last
+routine SSH a deployment needs —
+
+```sh
+factory --config /etc/mecha-factory/factory.toml key create --scope operate --label "where it lives"
+# install at home: ~/.mecha/factory/operate.key, mode 0600
+```
+
+Every other key belongs to a user, so minting one names them:
 
 ```sh
 factory --config /etc/mecha-factory/factory.toml key create --handle alice --scope publish --label laptop

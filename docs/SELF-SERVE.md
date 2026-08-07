@@ -8,12 +8,17 @@ design assumed, and the log said so out loud on every start:
 ordering certificates; a user created after this needs a restart to get one
 ```
 
-This document is the plan for removing that assumption. It was written before
-the code so the decisions could be argued about while they were still cheap;
-the build order at the end says which parts have since been built. **The
-restart is gone** as of 2026-08-07 — that line now reads *"a user created from
-here on gets one without a restart"* — so what remains between here and a
-second person is signup, pairing, and the two interfaces.
+This document was the plan for removing that assumption, written before the
+code so the decisions could be argued about while they were still cheap.
+**As of the evening of 2026-08-07, all six steps are built, deployed, and
+verified live** — the build order at the end records each step's decisions
+and what it shipped as. A stranger with an invite claims a handle, gets a
+certificate in seconds, pairs their machine by asserting whose it becomes,
+publishes with keys no operator ever saw, signs in with their email, and
+releases from a browser; the operator runs their day from
+`factory-publish operator …`. What deliberately remains on SSH: deploys, and
+minting a replacement operate key if every one is lost — root on the box is
+still the root of trust, it just stopped being the daily interface.
 
 ## What we are not building
 
