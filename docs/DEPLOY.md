@@ -15,6 +15,16 @@ forgetting is not "the site is down", it is "the site is someone else's".
 > sentence: **port 80 is now part of issuance and `[listen] http` is required
 > beside `[tls]`.** A configuration without it is refused at startup rather
 > than serving what it has cached and quietly never renewing.
+>
+> **Deployed the same day, with zero downtime.** The startup migration carried
+> the existing combined certificate into the per-group cache, so both groups
+> came up on `DeployedCachedCert` and no fresh order was spent on names
+> already served. The whole feature was then proved live: a throwaway
+> `smoketest` user went from `factory user create` to a served Let's Encrypt
+> production certificate in about thirty seconds, with nothing restarting
+> (the user is kept suspended, as ledger evidence). Expect the migration log
+> line once, on the first start after the upgrade; after each group's first
+> renewal it finds nothing to do.
 
 Everything below assumes the box is **assumed lost**. Nothing on it reaches
 home, and the two keys it holds are Argon2id hashes of tokens minted elsewhere.
