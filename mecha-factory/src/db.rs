@@ -186,6 +186,13 @@ pub enum Scope {
     Release,
     /// Read the queue and acknowledge records.
     Drain,
+    /// Run the box: users, invites, every key, withholds, queue depths.
+    ///
+    /// The operator's credential — what retires the SSH session from routine
+    /// operation. Bound to no tenant (its key row has an empty `user_id`),
+    /// which is exactly why the tenant authoriser must never accept it and
+    /// the admin authoriser never joins on a user.
+    Operate,
 }
 
 impl Scope {
@@ -197,13 +204,14 @@ impl Scope {
     /// adding a third minted tokens that nothing could parse: the key
     /// authenticated as no scope at all and the endpoint answered 401. A match
     /// would have caught it; a hand-copied list did not.
-    pub const ALL: [Scope; 3] = [Scope::Publish, Scope::Release, Scope::Drain];
+    pub const ALL: [Scope; 4] = [Scope::Publish, Scope::Release, Scope::Drain, Scope::Operate];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Scope::Publish => "publish",
             Scope::Release => "release",
             Scope::Drain => "drain",
+            Scope::Operate => "operate",
         }
     }
 
@@ -212,7 +220,8 @@ impl Scope {
             "publish" => Ok(Scope::Publish),
             "release" => Ok(Scope::Release),
             "drain" => Ok(Scope::Drain),
-            other => anyhow::bail!("unknown scope `{other}` (publish | release | drain)"),
+            "operate" => Ok(Scope::Operate),
+            other => anyhow::bail!("unknown scope `{other}` (publish | release | drain | operate)"),
         }
     }
 
@@ -223,6 +232,7 @@ impl Scope {
             Scope::Publish => "mk_pub_",
             Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
+            Scope::Operate => "mk_opr_",
         }
     }
 }

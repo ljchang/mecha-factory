@@ -796,3 +796,381 @@ pub async fn disconnect(
         }
     }
 }
+
+// ---- the operator's endpoints ------------------------------------------
+//
+// What retires the SSH session from routine operation. All of it sits behind
+// `Scope::Operate` — a credential bound to the box rather than to a tenant —
+// and none of it is reachable by any tenant key: the tenant authoriser joins
+// on a user and an operate key has none, and this authoriser demands the one
+// scope no tenant key carries. The two surfaces the design doc said must not
+// be one, kept apart by the credential rather than by attention.
+
+/// The operator, or a refusal. No user join: the key belongs to the box.
+fn authorised_operator(app: &Shared, headers: &HeaderMap) -> Result<KeyRow, Box<Response>> {
+    match keys::authenticate(&app.db, bearer(headers), Scope::Operate) {
+        Ok(row) => Ok(row),
+        Err(e) => {
+            tracing::warn!(error = %e, "refused (operator)");
+            let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::UNAUTHORIZED);
+            Err(Box::new(
+                Failure::json(status, e.public_message()).into_response(),
+            ))
+        }
+    }
+}
+
+/// `GET /v1/admin/users` — everyone, with their queue depth beside them.
+pub async fn admin_users(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    let users = match app.db.users() {
+        Ok(users) => users,
+        Err(e) => {
+            tracing::error!(error = %e, "listing users");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    let rows: Vec<serde_json::Value> = users
+        .iter()
+        .map(|user| {
+            serde_json::json!({
+                "handle": user.handle,
+                "email": user.email,
+                "status": user.status,
+                "created_at": user.created_at,
+                "quota_bytes": user.quota_bytes,
+                "queued": app.db.queue_depth(Some(&user.id)).unwrap_or(0),
+            })
+        })
+        .collect();
+    (StatusCode::OK, Json(serde_json::json!({ "users": rows }))).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct AdminStatusRequest {
+    pub status: String,
+}
+
+/// `POST /v1/admin/users/{handle}/status` — suspend or restore.
+pub async fn admin_user_status(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    let request: AdminStatusRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            return Failure::json(StatusCode::BAD_REQUEST, format!("body: {e}")).into_response()
+        }
+    };
+    if !matches!(request.status.as_str(), "active" | "suspended") {
+        return Failure::json(StatusCode::BAD_REQUEST, "status is active or suspended")
+            .into_response();
+    }
+    let user = match app.db.user_by_handle(&handle) {
+        Ok(Some(user)) => user,
+        Ok(None) => return Failure::json(StatusCode::NOT_FOUND, "no such handle").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "reading a user");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    if let Err(e) = app.db.user_status(&user.id, &request.status) {
+        tracing::error!(error = %e, "setting a status");
+        return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+    }
+    tracing::info!(%handle, status = %request.status, "operator set a status");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "handle": handle, "status": request.status })),
+    )
+        .into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct AdminInviteRequest {
+    pub email: String,
+    #[serde(default)]
+    pub note: String,
+}
+
+/// `POST /v1/admin/invites` — mint an invite; **the box mails it**, which is
+/// better than the on-box CLI could do for a remote operator: the link never
+/// travels anywhere but to its recipient and back in this response.
+pub async fn admin_invite_create(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    let request: AdminInviteRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            return Failure::json(StatusCode::BAD_REQUEST, format!("body: {e}")).into_response()
+        }
+    };
+    let email = request.email.trim().to_string();
+    if email.is_empty() || !email.contains('@') {
+        return Failure::json(StatusCode::BAD_REQUEST, "an email address is required")
+            .into_response();
+    }
+    let token = crate::intake::mint_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::days(crate::intake::INVITE_EXPIRY_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let row = match app.db.invite_create(
+        &email,
+        &request.note,
+        &crate::intake::hash_token(&token),
+        &crate::db::now(),
+        &expires,
+    ) {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::error!(error = %e, "minting an invite");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    let link = format!("{}/signup/{token}", app.config.base_url(Role::Gate));
+    app.mailer.send_invite(&email, &link);
+    tracing::info!(invite = %row.id, "operator minted an invite");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "id": row.id,
+            "link": link,
+            "expires_at": expires,
+            "mailed_via": app.mailer.describe(),
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/admin/invites` — every invite and what became of it.
+pub async fn admin_invites(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    let now = crate::db::now();
+    match app.db.invites() {
+        Ok(invites) => {
+            let rows: Vec<serde_json::Value> = invites
+                .iter()
+                .map(|row| {
+                    serde_json::json!({
+                        "id": row.id,
+                        "email": row.email,
+                        "note": row.note,
+                        "status": row.status(&now),
+                        "created_at": row.created_at,
+                        "expires_at": row.expires_at,
+                        "claimed_by": row.claimed_by,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!({ "invites": rows }))).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "listing invites");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+/// `POST /v1/admin/invites/{id}/revoke`.
+pub async fn admin_invite_revoke(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    match app.db.invite_revoke(&id, &crate::db::now()) {
+        Ok(revoked) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "revoked": revoked })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "revoking an invite");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+/// `GET /v1/admin/keys` — every key, live and dead, with whose it is.
+pub async fn admin_keys(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    let users = app.db.users().unwrap_or_default();
+    match app.db.keys() {
+        Ok(keys) => {
+            let rows: Vec<serde_json::Value> = keys
+                .iter()
+                .map(|key| {
+                    let handle = users
+                        .iter()
+                        .find(|u| u.id == key.user_id)
+                        .map(|u| u.handle.as_str())
+                        .unwrap_or(if key.user_id.is_empty() {
+                            "(operator)"
+                        } else {
+                            "(unknown)"
+                        });
+                    serde_json::json!({
+                        "id": key.id,
+                        "handle": handle,
+                        "scope": key.scope.as_str(),
+                        "label": key.label,
+                        "created_at": key.created_at,
+                        "revoked_at": key.revoked_at,
+                        "last_used_at": key.last_used_at,
+                    })
+                })
+                .collect();
+            (StatusCode::OK, Json(serde_json::json!({ "keys": rows }))).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "listing keys");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+/// `POST /v1/admin/keys/{id}/revoke` — break-glass, any key, including
+/// another operate key. The row stays, as everywhere.
+pub async fn admin_key_revoke(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    match app.db.key_revoke(&id, &crate::db::now()) {
+        Ok(revoked) => {
+            if revoked {
+                tracing::info!(key = %id, "operator revoked a key");
+            }
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "revoked": revoked })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "revoking a key");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct AdminWithholdRequest {
+    pub handle: String,
+    pub id: String,
+    pub version: u32,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub undo: bool,
+}
+
+/// `POST /v1/admin/withhold` — take a version out of service, reversibly.
+pub async fn admin_withhold(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    if let Err(refusal) = authorised_operator(&app, &headers) {
+        return *refusal;
+    }
+    let request: AdminWithholdRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            return Failure::json(StatusCode::BAD_REQUEST, format!("body: {e}")).into_response()
+        }
+    };
+    let user = match app.db.user_by_handle(&request.handle) {
+        Ok(Some(user)) => user,
+        Ok(None) => return Failure::json(StatusCode::NOT_FOUND, "no such handle").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "reading a user");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    let now = crate::db::now();
+    let changed = app.db.bundle_withhold(
+        &user.id,
+        &request.id,
+        request.version,
+        if request.undo {
+            None
+        } else {
+            request.reason.as_deref()
+        },
+        if request.undo { None } else { Some(&now) },
+    );
+    match changed {
+        Ok(true) => {
+            tracing::info!(handle = %request.handle, id = %request.id, version = request.version,
+                           undo = request.undo, "operator changed a withhold");
+            (StatusCode::OK, Json(serde_json::json!({ "changed": true }))).into_response()
+        }
+        Ok(false) => Failure::json(StatusCode::NOT_FOUND, "no such version").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "withholding");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}

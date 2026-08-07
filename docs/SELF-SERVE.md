@@ -498,7 +498,20 @@ zone triggers neither.
    revoked, no extra privilege) and leaves the disk; a key that could not
    be revoked keeps its file, because deleting the local copy of a live
    credential is tidiness dressed as security.
-6. **The operator surface**, which is the last thing still living on an SSH
-   session.
+6. ~~**The operator surface**~~ *Built 2026-08-07* — a fourth scope rather
+   than a second session system: `Scope::Operate`, minted once on the box
+   (`factory key create --scope operate` — the last SSH), bound to the box
+   rather than to any tenant, driving `/v1/admin/*` through
+   `factory-publish operator …` — users and status, invites (mailed by the
+   box, which the on-box CLI could not do for a remote operator), every key
+   with last-used, break-glass revoke, withhold. The two surfaces are kept
+   apart by the credential: no tenant key reaches an admin endpoint and the
+   operate key is refused everywhere a tenant key works. Deliberately
+   CLI-only, never MCP tools — suspending users is not power an agent
+   wields as a side effect of conversation, the same rule that keeps
+   drain's prose off the tool surface. What deliberately stays on SSH:
+   deploys, and minting a replacement operate key if every one is lost —
+   root on the box remains the root of trust, it just stops being the
+   daily interface.
 
 1 and 2 do not block each other, so either can start.

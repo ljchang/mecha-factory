@@ -207,10 +207,12 @@ enum InviteAction {
 enum KeyAction {
     /// Mint a key and print it **once**. There is no way to read it back.
     Create {
-        /// Whose key it is.
+        /// Whose key it is. Omitted only for `--scope operate`, which is
+        /// bound to the box rather than to a tenant.
         #[arg(long)]
-        handle: String,
-        /// `publish` (types, bundles, aliases) or `drain` (the queue).
+        handle: Option<String>,
+        /// `publish` (types, bundles, aliases), `drain` (the queue), or
+        /// `operate` (run the box — users, invites, every key).
         #[arg(long)]
         scope: String,
         /// Free text, so `key list` says which machine holds it.
@@ -480,8 +482,17 @@ fn key(cli: &Cli, action: &KeyAction) -> Result<()> {
             handle,
         } => {
             let scope = Scope::parse(scope)?;
-            let user = find_user(&db, handle)?;
-            let minted = keys::mint(&db, &user.id, scope, label).context("minting a key")?;
+            // The operator's key belongs to the box, not to a tenant; every
+            // other scope names whose namespace it writes.
+            let user_id = match (scope, handle) {
+                (Scope::Operate, None) => String::new(),
+                (Scope::Operate, Some(_)) => {
+                    bail!("an operate key is the box's, not a tenant's — drop --handle")
+                }
+                (_, Some(handle)) => find_user(&db, handle)?.id,
+                (_, None) => bail!("--handle names whose key this is"),
+            };
+            let minted = keys::mint(&db, &user_id, scope, label).context("minting a key")?;
             // stdout, alone, so `factory key create … > publish.key` is the
             // whole installation procedure.
             println!("{}", minted.token);

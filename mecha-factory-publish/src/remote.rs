@@ -43,6 +43,11 @@ pub enum Scope {
     /// client's config and onto the credential.
     Release,
     Drain,
+    /// Run the box. Held by the operator's own machine and never installed
+    /// by pairing — `connect` mints publish and drain, full stop. The verbs
+    /// behind it are CLI-only, never MCP tools: operator power stays off the
+    /// agent surface for the same reason drain's prose does.
+    Operate,
 }
 
 impl Scope {
@@ -54,6 +59,7 @@ impl Scope {
             Scope::Publish => "mk_pub_",
             Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
+            Scope::Operate => "mk_opr_",
         }
     }
 
@@ -62,6 +68,7 @@ impl Scope {
             Scope::Publish => "publish.key",
             Scope::Release => "release.key",
             Scope::Drain => "drain.key",
+            Scope::Operate => "operate.key",
         }
     }
 
@@ -72,6 +79,7 @@ impl Scope {
             Scope::Publish => "FACTORY_PUBLISH_KEY",
             Scope::Release => "FACTORY_RELEASE_KEY",
             Scope::Drain => "FACTORY_DRAIN_KEY",
+            Scope::Operate => "FACTORY_OPERATE_KEY",
         }
     }
 
@@ -80,6 +88,7 @@ impl Scope {
             Scope::Publish => "publish",
             Scope::Release => "release",
             Scope::Drain => "drain",
+            Scope::Operate => "operate",
         }
     }
 }
@@ -288,6 +297,25 @@ impl Remote {
 
     fn request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<serde_json::Value> {
         self.send(method, path, body, "application/gzip")
+    }
+
+    /// One JSON call, for the operator verbs. Public within the crate so the
+    /// CLI can drive the admin endpoints without re-owning HTTP.
+    pub fn json(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&serde_json::Value>,
+    ) -> Result<serde_json::Value> {
+        match body {
+            Some(value) => self.send(
+                method,
+                path,
+                Some(value.to_string().as_bytes()),
+                "application/json",
+            ),
+            None => self.send(method, path, None, "application/json"),
+        }
     }
 
     /// One HTTP call, with the credential attached and the far end's own error
@@ -836,8 +864,29 @@ mod connect_tests {
         let address = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // The whole request, not the first segment: answering after one
+            // read and closing races the client's body write under load, and
+            // the reset reads as a flaky connection error in whichever test
+            // drew the slow lane.
+            let mut request = Vec::new();
             let mut buffer = [0u8; 4096];
-            let _ = stream.read(&mut buffer);
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buffer[..n]),
+                }
+                if let Some(split) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..split]).to_lowercase();
+                    let expected: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if request.len() >= split + 4 + expected {
+                        break;
+                    }
+                }
+            }
             let text = body.to_string();
             let _ = write!(
                 stream,

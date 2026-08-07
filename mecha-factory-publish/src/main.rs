@@ -210,6 +210,17 @@ enum Command {
         #[arg(long)]
         replace: bool,
     },
+    /// Run the box, from here: users, invites, keys, withholds.
+    ///
+    /// Behind `operate.key` — minted once on the box, held on the machine
+    /// the human chooses, and never installed by pairing. Deliberately
+    /// CLI-only, never MCP tools: suspending users and minting invites is
+    /// power an agent should not wield as a side effect of conversation,
+    /// the same rule that keeps drain's prose off the tool surface.
+    Operator {
+        #[command(subcommand)]
+        action: OperatorAction,
+    },
     /// Retire this machine's keys: each revokes itself, then leaves the disk.
     ///
     /// Needs no extra privilege — a credential may always retire itself —
@@ -229,6 +240,41 @@ enum Command {
         /// One JSON object, for a trigger's `if` rather than a human's eye.
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum OperatorAction {
+    /// Everyone, with status and queue depth.
+    Users,
+    /// Stop an account serving and publishing. Never a delete.
+    Suspend { handle: String },
+    /// Undo a suspension.
+    Restore { handle: String },
+    /// Mint an invite. The box mails it; the link is also printed.
+    Invite {
+        email: String,
+        #[arg(long, default_value = "")]
+        note: String,
+    },
+    /// Every invite and what became of it.
+    Invites,
+    /// Stop an unclaimed invite working.
+    RevokeInvite { id: String },
+    /// Every key, live and dead, with whose it is and when it last worked.
+    Keys,
+    /// Break-glass: stop any key working, including another operator's.
+    RevokeKey { id: String },
+    /// Take a version out of service, reversibly, on a report.
+    Withhold {
+        handle: String,
+        id: String,
+        version: u32,
+        #[arg(long)]
+        reason: Option<String>,
+        /// Put it back.
+        #[arg(long)]
+        undo: bool,
     },
 }
 
@@ -434,6 +480,8 @@ fn main() -> Result<()> {
             label,
             replace,
         } => connect_command(code, gate, handle, label, replace)?,
+
+        Command::Operator { action } => operator_command(action)?,
 
         Command::Disconnect => println!("{}", remote::disconnect()?),
 
@@ -901,6 +949,157 @@ fn form_url(gate: &str, type_id: &str) -> String {
 /// in `requests.rs`: acknowledging is what deletes, so it happens after the
 /// bytes are on disk here. A record whose acknowledgement is lost comes back on
 /// the next drain and is recognised by its sequence number.
+fn operator_command(action: OperatorAction) -> Result<()> {
+    let Some(remote) = remote::Remote::configured_for(remote::Scope::Operate)? else {
+        bail!(
+            "no gate configured — `factory-publish connect` a machine first, or \
+             set FACTORY_GATE. The operate key is minted on the box: \
+             `factory key create --scope operate --label <where it lives>`."
+        );
+    };
+    match action {
+        OperatorAction::Users => {
+            let body = remote.json("GET", "/v1/admin/users", None)?;
+            for user in body["users"].as_array().into_iter().flatten() {
+                println!(
+                    "{:<20} {:<10} {:<28} queued {:>3}  quota {}",
+                    user["handle"].as_str().unwrap_or("?"),
+                    user["status"].as_str().unwrap_or("?"),
+                    user["email"].as_str().unwrap_or(""),
+                    user["queued"].as_i64().unwrap_or(0),
+                    user["quota_bytes"].as_i64().unwrap_or(0),
+                );
+            }
+            Ok(())
+        }
+        OperatorAction::Suspend { ref handle } | OperatorAction::Restore { ref handle } => {
+            // One arm: the verb is the status.
+            let status = if matches!(action, OperatorAction::Suspend { .. }) {
+                "suspended"
+            } else {
+                "active"
+            };
+            let handle = handle.clone();
+            let body = remote.json(
+                "POST",
+                &format!("/v1/admin/users/{handle}/status"),
+                Some(&serde_json::json!({ "status": status })),
+            )?;
+            println!(
+                "{} is now {}",
+                body["handle"].as_str().unwrap_or(&handle),
+                body["status"].as_str().unwrap_or(status)
+            );
+            Ok(())
+        }
+        OperatorAction::Invite { email, note } => {
+            let body = remote.json(
+                "POST",
+                "/v1/admin/invites",
+                Some(&serde_json::json!({ "email": email, "note": note })),
+            )?;
+            println!("{}", body["link"].as_str().unwrap_or("?"));
+            eprintln!(
+                "invite {} for {email}: expires {}, mailed via {}",
+                body["id"].as_str().unwrap_or("?"),
+                body["expires_at"].as_str().unwrap_or("?"),
+                body["mailed_via"].as_str().unwrap_or("?"),
+            );
+            Ok(())
+        }
+        OperatorAction::Invites => {
+            let body = remote.json("GET", "/v1/admin/invites", None)?;
+            for invite in body["invites"].as_array().into_iter().flatten() {
+                println!(
+                    "{}  {:<28} {:<8} expires {}{}",
+                    invite["id"].as_str().unwrap_or("?"),
+                    invite["email"].as_str().unwrap_or(""),
+                    invite["status"].as_str().unwrap_or("?"),
+                    invite["expires_at"].as_str().unwrap_or("?"),
+                    match invite["note"].as_str() {
+                        Some("") | None => String::new(),
+                        Some(note) => format!("  ({note})"),
+                    },
+                );
+            }
+            Ok(())
+        }
+        OperatorAction::RevokeInvite { id } => {
+            let body = remote.json(
+                "POST",
+                &format!("/v1/admin/invites/{id}/revoke"),
+                Some(&serde_json::json!({})),
+            )?;
+            println!(
+                "{}",
+                if body["revoked"].as_bool().unwrap_or(false) {
+                    "revoked — the link no longer works"
+                } else {
+                    "not a pending invite (claimed, already revoked, or unknown)"
+                }
+            );
+            Ok(())
+        }
+        OperatorAction::Keys => {
+            let body = remote.json("GET", "/v1/admin/keys", None)?;
+            for key in body["keys"].as_array().into_iter().flatten() {
+                println!(
+                    "{}  {:<12} {:<8} {:<16} minted {}  last used {}{}",
+                    key["id"].as_str().unwrap_or("?"),
+                    key["handle"].as_str().unwrap_or("?"),
+                    key["scope"].as_str().unwrap_or("?"),
+                    key["label"].as_str().unwrap_or(""),
+                    key["created_at"].as_str().unwrap_or("?"),
+                    key["last_used_at"].as_str().unwrap_or("never"),
+                    match key["revoked_at"].as_str() {
+                        Some(at) => format!("  REVOKED {at}"),
+                        None => String::new(),
+                    },
+                );
+            }
+            Ok(())
+        }
+        OperatorAction::RevokeKey { id } => {
+            let body = remote.json(
+                "POST",
+                &format!("/v1/admin/keys/{id}/revoke"),
+                Some(&serde_json::json!({})),
+            )?;
+            println!(
+                "{}",
+                if body["revoked"].as_bool().unwrap_or(false) {
+                    "revoked"
+                } else {
+                    "not a live key"
+                }
+            );
+            Ok(())
+        }
+        OperatorAction::Withhold {
+            handle,
+            id,
+            version,
+            reason,
+            undo,
+        } => {
+            remote.json(
+                "POST",
+                "/v1/admin/withhold",
+                Some(&serde_json::json!({
+                    "handle": handle, "id": id, "version": version,
+                    "reason": reason, "undo": undo,
+                })),
+            )?;
+            if undo {
+                println!("{handle}/{id} v{version} is served again");
+            } else {
+                println!("{handle}/{id} v{version} is withheld — served to nobody, still on disk");
+            }
+            Ok(())
+        }
+    }
+}
+
 fn connect_command(
     code: String,
     gate: Option<String>,

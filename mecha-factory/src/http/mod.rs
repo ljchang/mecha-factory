@@ -115,6 +115,24 @@ pub fn router(app: Shared) -> Router {
         // A credential retiring itself. Authenticated by the key being
         // revoked — the one thing it can still authorise.
         .route("/v1/disconnect", post(v1::disconnect))
+        // The operator's endpoints — Scope::Operate only, which no tenant
+        // key carries. This is what retires SSH from routine operation.
+        .route("/v1/admin/users", get(v1::admin_users))
+        .route(
+            "/v1/admin/users/{handle}/status",
+            post(v1::admin_user_status),
+        )
+        .route(
+            "/v1/admin/invites",
+            get(v1::admin_invites).post(v1::admin_invite_create),
+        )
+        .route(
+            "/v1/admin/invites/{id}/revoke",
+            post(v1::admin_invite_revoke),
+        )
+        .route("/v1/admin/keys", get(v1::admin_keys))
+        .route("/v1/admin/keys/{id}/revoke", post(v1::admin_key_revoke))
+        .route("/v1/admin/withhold", post(v1::admin_withhold))
         // The typed way in. On the gate, path-scoped by handle rather than
         // subdomain-scoped: a form is server-rendered HTML with no script, so
         // it executes nothing and there is nothing for an origin to separate
