@@ -133,9 +133,13 @@ pub fn mint(db: &Db, user_id: &str, scope: Scope, label: &str) -> Result<Minted>
 /// treating it as a claim would be treating attacker-supplied text as
 /// authorisation.
 fn split(token: &str) -> Option<(&str, &str)> {
-    let body = token
-        .strip_prefix("mk_pub_")
-        .or_else(|| token.strip_prefix("mk_drn_"))?;
+    // Derived from `Scope::ALL` rather than listed here. This named its two
+    // prefixes inline, so the day a third scope arrived it minted tokens
+    // nothing could parse — and the symptom was a 401 saying no token was
+    // presented, which reads as a client bug rather than a server one.
+    let body = Scope::ALL
+        .iter()
+        .find_map(|scope| token.strip_prefix(scope.prefix()))?;
     let (id, secret) = body.split_once('.')?;
     let hexish = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_hexdigit());
     (hexish(id) && hexish(secret)).then_some((id, secret))
@@ -250,6 +254,36 @@ mod tests {
         db.user_create("alice", "alice@example.org", "2026-08-06T00:00:00Z")
             .unwrap()
             .id
+    }
+
+    /// Every scope's token must survive `split`, which is what the prefix list
+    /// inside it used to decide by hand.
+    ///
+    /// Adding `Release` minted `mk_rel_…` tokens that `split` returned `None`
+    /// for, so a perfectly good key authenticated as nothing and the endpoint
+    /// answered "a valid bearer token is required" — a 401 that blames the
+    /// caller for a server-side omission. Iterating `Scope::ALL` here means a
+    /// fourth scope cannot repeat it silently.
+    #[test]
+    fn a_token_of_every_scope_parses_and_authenticates() {
+        let db = db();
+        let user = user(&db);
+        for scope in Scope::ALL {
+            let minted = mint(&db, &user, scope, "test").unwrap();
+            assert!(
+                minted.token.starts_with(scope.prefix()),
+                "{scope:?} minted {}",
+                minted.token
+            );
+            assert!(
+                split(&minted.token).is_some(),
+                "{scope:?} minted a token `split` cannot parse: {}",
+                minted.token
+            );
+            let row = authenticate(&db, Some(&format!("Bearer {}", minted.token)), scope)
+                .unwrap_or_else(|e| panic!("{scope:?} did not authenticate for its own scope: {e}"));
+            assert_eq!(row.scope, scope);
+        }
     }
 
     #[test]

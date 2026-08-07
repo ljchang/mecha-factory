@@ -77,22 +77,48 @@ impl UserRow {
     }
 }
 
-/// What a key may do. Two of them, mirroring the two forced-command SSH keys
-/// this replaces — and the scope is read from **this row**, never from the
+/// What a key may do — and the scope is read from **this row**, never from the
 /// token's `mk_pub_` prefix, which is a human-readable label an attacker
 /// controls the text of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
-    /// Upload types, publish bundles, move aliases.
+    /// Write immutable versions, and read back this user's own types.
+    ///
+    /// Deliberately **not** enough to make anything public. A bundle published
+    /// and never aliased is private and unreachable, so this is the scope an
+    /// agent can hold: the worst a stolen one does is write versions nobody
+    /// can read.
     Publish,
+    /// Move an alias, and serve a form. The two acts that change what the
+    /// world can see.
+    ///
+    /// Separated from `Publish` because "an agent drafts, a human releases"
+    /// was a property of the **client's** configuration — mecha's
+    /// `[outbox] tools` — so a different MCP client, or a typo in that list,
+    /// had no review at all and nothing said so. A guarantee that depends on
+    /// which program connected is the silently-degrading-sandbox shape this
+    /// project keeps refusing, so it moved to the side that cannot be
+    /// bypassed.
+    Release,
     /// Read the queue and acknowledge records.
     Drain,
 }
 
 impl Scope {
+    /// Every scope there is.
+    ///
+    /// Here so that code which must handle all of them — parsing a presented
+    /// token, listing what `key create` accepts — iterates rather than
+    /// repeating a list. `keys::split` used to name two prefixes inline, so
+    /// adding a third minted tokens that nothing could parse: the key
+    /// authenticated as no scope at all and the endpoint answered 401. A match
+    /// would have caught it; a hand-copied list did not.
+    pub const ALL: [Scope; 3] = [Scope::Publish, Scope::Release, Scope::Drain];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Scope::Publish => "publish",
+            Scope::Release => "release",
             Scope::Drain => "drain",
         }
     }
@@ -100,8 +126,9 @@ impl Scope {
     pub fn parse(text: &str) -> Result<Scope> {
         match text {
             "publish" => Ok(Scope::Publish),
+            "release" => Ok(Scope::Release),
             "drain" => Ok(Scope::Drain),
-            other => anyhow::bail!("unknown scope `{other}` (publish | drain)"),
+            other => anyhow::bail!("unknown scope `{other}` (publish | release | drain)"),
         }
     }
 
@@ -110,6 +137,7 @@ impl Scope {
     pub fn prefix(&self) -> &'static str {
         match self {
             Scope::Publish => "mk_pub_",
+            Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
         }
     }

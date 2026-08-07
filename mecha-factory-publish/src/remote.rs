@@ -38,6 +38,10 @@ use crate::store::{mecha_home, BundleStore};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
     Publish,
+    /// Move an alias, or serve a form. Held by a person, not by an agent —
+    /// see `Scope::Release` on the box for why the review moved off the
+    /// client's config and onto the credential.
+    Release,
     Drain,
 }
 
@@ -48,6 +52,7 @@ impl Scope {
     fn prefix(&self) -> &'static str {
         match self {
             Scope::Publish => "mk_pub_",
+            Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
         }
     }
@@ -55,6 +60,7 @@ impl Scope {
     fn file(&self) -> &'static str {
         match self {
             Scope::Publish => "publish.key",
+            Scope::Release => "release.key",
             Scope::Drain => "drain.key",
         }
     }
@@ -64,6 +70,7 @@ impl Scope {
     fn env(&self) -> &'static str {
         match self {
             Scope::Publish => "FACTORY_PUBLISH_KEY",
+            Scope::Release => "FACTORY_RELEASE_KEY",
             Scope::Drain => "FACTORY_DRAIN_KEY",
         }
     }
@@ -71,6 +78,7 @@ impl Scope {
     pub fn as_str(&self) -> &'static str {
         match self {
             Scope::Publish => "publish",
+            Scope::Release => "release",
             Scope::Drain => "drain",
         }
     }
@@ -349,25 +357,50 @@ pub fn mirror(
         return Ok(None);
     };
     let pushed = remote.push(store, id, version)?;
+    let mut note = String::new();
     // The alias moves second, and only after the bytes are there: the share URL
     // must never point at a version the box does not hold.
+    //
+    // And it moves under a *different* credential. Pushing writes a version
+    // nobody can read; aliasing is what a reader sees. A caller holding only a
+    // publish key gets the bytes up and is told plainly that they are not
+    // published — which is the shape an agent should have: it can do all the
+    // work and cannot be the one who decides the world sees it.
     if let Some(target) = alias_to {
-        remote.alias(id, Some(target), visibility)?;
+        match Remote::configured_for(Scope::Release)? {
+            Some(releaser) => {
+                releaser.alias(id, Some(target), visibility)?;
+            }
+            None => {
+                note = format!(
+                    "\nversion {target} is on the box and is not published: no release \
+                     key here, so the alias did not move. Release it with \
+                     `factory-publish alias {id} --version {target}` from a machine \
+                     that has one."
+                );
+            }
+        }
     }
     Ok(Some(if pushed.existing {
-        format!("{} (identical bytes; the box already had them)", pushed.url)
+        format!(
+            "{} (identical bytes; the box already had them){note}",
+            pushed.url
+        )
     } else {
-        pushed.url
+        format!("{}{note}", pushed.url)
     }))
 }
 
 /// Move the alias on the box without pushing anything, when there is one.
+///
+/// Release-scoped: this verb *is* the publication, so it is the one an agent's
+/// key deliberately cannot perform.
 pub fn mirror_alias(
     id: &str,
     version: Option<u32>,
     visibility: Visibility,
 ) -> Result<Option<String>> {
-    let Some(remote) = Remote::configured()? else {
+    let Some(remote) = Remote::configured_for(Scope::Release)? else {
         return Ok(None);
     };
     Ok(Some(remote.alias(id, version, visibility)?))

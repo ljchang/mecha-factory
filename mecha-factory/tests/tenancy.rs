@@ -19,16 +19,24 @@ fn two_users_may_hold_the_same_bundle_id() {
     let bob = server.add_user("bob");
     let gate = server.gate.to_string();
     let alice_key = server.key(Scope::Publish);
+    let alice_key_rel = server.key(Scope::Release);
     let bob_key = server.key_for(&bob, Scope::Publish);
 
-    for (key, body) in [(&alice_key, "Alice's Monday"), (&bob_key, "Bob's Monday")] {
+    let bob_key_rel = server.key_for(&bob, Scope::Release);
+
+    // Two keys each: writing a version and making it readable are different
+    // scopes now, so a test that does both has to hold both.
+    for (key, release, body) in [
+        (&alice_key, &alice_key_rel, "Alice's Monday"),
+        (&bob_key, &bob_key_rel, "Bob's Monday"),
+    ] {
         let reply = Request::new("POST", "/v1/bundles", &gate)
             .auth(key)
             .body(bundle_archive("brief", 1, ContentClass::Static, body))
             .send(server.gate);
         assert_eq!(reply.status, 201, "{}", reply.body);
         let alias = Request::new("POST", "/v1/bundles/brief/alias", &gate)
-            .auth(key)
+            .auth(release)
             .body(r#"{"version":1,"visibility":"public"}"#)
             .send(server.gate);
         assert_eq!(alias.status, 200, "{}", alias.body);
@@ -55,6 +63,7 @@ fn a_key_cannot_publish_into_another_users_namespace() {
     let bob = server.add_user("bob");
     let gate = server.gate.to_string();
     let bob_key = server.key_for(&bob, Scope::Publish);
+    let bob_key_rel = server.key_for(&bob, Scope::Release);
 
     // Bob publishes; the URL that comes back is Bob's, whatever he asked for.
     let reply = Request::new("POST", "/v1/bundles", &gate)
@@ -83,7 +92,7 @@ fn a_key_cannot_publish_into_another_users_namespace() {
         .alias_set(&server.user.id, "hers", None, Visibility::Public, "t")
         .unwrap();
     let reply = Request::new("POST", "/v1/bundles/hers/alias", &gate)
-        .auth(&bob_key)
+        .auth(&bob_key_rel)
         .body(r#"{"version":1}"#)
         .send(server.gate);
     assert_eq!(reply.status, 404, "{}", reply.body);
@@ -150,7 +159,7 @@ fn types_are_per_user() {
     .unwrap();
 
     let reply = Request::new("PUT", "/v1/types/meeting", &gate)
-        .auth(&server.key(Scope::Publish))
+        .auth(&server.key(Scope::Release))
         .body(manifest)
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -176,12 +185,13 @@ fn a_suspended_user_stops_serving_and_stops_publishing() {
     let server = start();
     let gate = server.gate.to_string();
     let key = server.key(Scope::Publish);
+    let key_rel = server.key(Scope::Release);
     Request::new("POST", "/v1/bundles", &gate)
         .auth(&key)
         .body(bundle_archive("brief", 1, ContentClass::Static, "Monday"))
         .send(server.gate);
     Request::new("POST", "/v1/bundles/brief/alias", &gate)
-        .auth(&key)
+        .auth(&key_rel)
         .body(r#"{"version":1,"visibility":"public"}"#)
         .send(server.gate);
     assert_eq!(server.get(server.artifacts, "/b/brief/v/1/").status, 200);
@@ -231,12 +241,13 @@ fn a_withheld_version_is_served_to_nobody_and_still_on_disk() {
     let server = start();
     let gate = server.gate.to_string();
     let key = server.key(Scope::Publish);
+    let key_rel = server.key(Scope::Release);
     Request::new("POST", "/v1/bundles", &gate)
         .auth(&key)
         .body(bundle_archive("brief", 1, ContentClass::Static, "Monday"))
         .send(server.gate);
     Request::new("POST", "/v1/bundles/brief/alias", &gate)
-        .auth(&key)
+        .auth(&key_rel)
         .body(r#"{"version":1,"visibility":"public"}"#)
         .send(server.gate);
     assert_eq!(server.get(server.artifacts, "/b/brief/v/1/").status, 200);
@@ -304,12 +315,13 @@ fn an_unowned_hostname_serves_nothing() {
     let server = start();
     let gate = server.gate.to_string();
     let key = server.key(Scope::Publish);
+    let key_rel = server.key(Scope::Release);
     Request::new("POST", "/v1/bundles", &gate)
         .auth(&key)
         .body(bundle_archive("brief", 1, ContentClass::Static, "Monday"))
         .send(server.gate);
     Request::new("POST", "/v1/bundles/brief/alias", &gate)
-        .auth(&key)
+        .auth(&key_rel)
         .body(r#"{"version":1,"visibility":"public"}"#)
         .send(server.gate);
 

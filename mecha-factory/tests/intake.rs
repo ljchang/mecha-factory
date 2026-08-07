@@ -18,7 +18,7 @@ fn upload_meeting(server: &Server) {
     )
     .unwrap();
     let reply = Request::new("PUT", "/v1/types/meeting", server.gate.to_string())
-        .auth(&server.key(Scope::Publish))
+        .auth(&server.key(Scope::Release))
         .body(manifest)
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -252,7 +252,7 @@ kind = "text"
 max_length = 100
 "#;
     let reply = Request::new("PUT", "/v1/types/unverified", server.gate.to_string())
-        .auth(&server.key(Scope::Publish))
+        .auth(&server.key(Scope::Release))
         .body(toml)
         .send(server.gate);
     assert_eq!(reply.status, 200, "uploading it is fine: {}", reply.body);

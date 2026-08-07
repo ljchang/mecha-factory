@@ -16,6 +16,7 @@ fn a_bundle_published_and_then_aliased_is_a_page_on_the_internet() {
     let server = start();
     let gate = server.gate.to_string();
     let key = server.key(Scope::Publish);
+    let release = server.key(Scope::Release);
 
     let reply = Request::new("POST", "/v1/bundles", &gate)
         .auth(&key)
@@ -36,7 +37,7 @@ fn a_bundle_published_and_then_aliased_is_a_page_on_the_internet() {
     assert_eq!(server.get(server.artifacts, "/b/brief/").status, 404);
 
     let reply = Request::new("POST", "/v1/bundles/brief/alias", &gate)
-        .auth(&key)
+        .auth(&release)
         .body(r#"{"version":1,"visibility":"public"}"#)
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -60,12 +61,13 @@ fn the_home_paths_in_the_manifest_do_not_reach_the_box() {
     let server = start();
     let gate = server.gate.to_string();
     let key = server.key(Scope::Publish);
+    let release = server.key(Scope::Release);
     Request::new("POST", "/v1/bundles", &gate)
         .auth(&key)
         .body(bundle_archive("brief", 1, ContentClass::Static, "Monday"))
         .send(server.gate);
     Request::new("POST", "/v1/bundles/brief/alias", &gate)
-        .auth(&key)
+        .auth(&release)
         .body(r#"{"version":1,"visibility":"public"}"#)
         .send(server.gate);
 
@@ -298,6 +300,7 @@ fn a_request_type_is_uploaded_once_and_readable_by_anyone() {
     let server = start();
     let gate = server.gate.to_string();
     let key = server.key(Scope::Publish);
+    let release = server.key(Scope::Release);
     let manifest = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../mecha-manifest/types/meeting.toml"),
@@ -305,7 +308,7 @@ fn a_request_type_is_uploaded_once_and_readable_by_anyone() {
     .unwrap();
 
     let reply = Request::new("PUT", "/v1/types/meeting", &gate)
-        .auth(&key)
+        .auth(&release)
         .body(manifest.clone())
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
@@ -341,7 +344,7 @@ fn a_request_type_is_uploaded_once_and_readable_by_anyone() {
     // An id is a path segment, a filename and a tool name, so it cannot be two
     // things.
     let reply = Request::new("PUT", "/v1/types/somethingelse", &gate)
-        .auth(&key)
+        .auth(&release)
         .body(manifest)
         .send(server.gate);
     assert_eq!(reply.status, 400);

@@ -789,11 +789,15 @@ fn type_command(action: TypeAction) -> Result<()> {
                 )
             })?;
 
-            let Some(remote) = remote::Remote::configured()? else {
+            // Release-scoped, like the alias: pushing a type makes a form live
+            // at a public URL that strangers can submit to. That is a
+            // publication, not bookkeeping, and it is not an agent's to make.
+            let Some(remote) = remote::Remote::configured_for(remote::Scope::Release)? else {
                 bail!(
-                    "no factory is configured. Write ~/.mecha/factory/config.toml with \
-                     `gate = \"https://…\"` and put a publish key in \
-                     ~/.mecha/factory/publish.key"
+                    "no factory is configured, or there is no release key. Write \
+                     ~/.mecha/factory/config.toml with `gate = \"https://…\"` and put a \
+                     release key in ~/.mecha/factory/release.key — serving a form is a \
+                     publication, so it needs one"
                 );
             };
             let body = remote.type_push(&text, &parsed.id)?;

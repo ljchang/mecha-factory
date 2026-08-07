@@ -329,7 +329,7 @@ pub async fn alias(
     if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    let user = match authorised(&app, &headers, Scope::Publish) {
+    let user = match authorised(&app, &headers, Scope::Release) {
         Ok((_, user)) => user,
         Err(refusal) => return *refusal,
     };
@@ -426,7 +426,7 @@ pub async fn put_type(
     if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    let user = match authorised(&app, &headers, Scope::Publish) {
+    let user = match authorised(&app, &headers, Scope::Release) {
         Ok((_, user)) => user,
         Err(refusal) => return *refusal,
     };
