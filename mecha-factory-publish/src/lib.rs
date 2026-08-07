@@ -33,3 +33,19 @@ pub use requests::{Record, RequestStore};
 pub use serve::Preview;
 pub use store::{Alias, BundleStore, Published};
 pub use vendor::{gate, scan, Finding};
+
+/// The lock a test takes before touching `MECHA_HOME`.
+///
+/// Environment variables are process-global and the test harness is threaded,
+/// so two tests that set and remove the same variable interleave: one test's
+/// `remove_var` lands mid-way through the other's read, and a type file that
+/// was there a microsecond ago is not found. It only ever fails under a loaded
+/// parallel run — exactly the kind of flake that reads as a bug in whatever
+/// else changed that day. Poisoning is ignored on purpose: a panicked test
+/// already failed, and the variable it left behind is a problem the next test
+/// has whether or not the lock reports it.
+#[cfg(test)]
+pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}

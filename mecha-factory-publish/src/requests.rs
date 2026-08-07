@@ -394,6 +394,7 @@ mod tests {
     /// answer.
     #[test]
     fn the_verified_address_is_carried_out_of_the_free_text_sweep() {
+        let _env = crate::env_lock();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("MECHA_HOME", home.path());
         let types = home.path().join("factory").join("types");

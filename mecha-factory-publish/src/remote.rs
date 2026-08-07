@@ -559,6 +559,7 @@ mod tests {
     /// The key travels on this connection, so the connection has to be one.
     #[test]
     fn a_plaintext_gate_is_refused() {
+        let _env = crate::env_lock();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("MECHA_HOME", dir.path());
         std::env::set_var("FACTORY_GATE", "http://gate.example.org");
