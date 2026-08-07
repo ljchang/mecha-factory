@@ -119,7 +119,8 @@ back, fix it, publish once.
 
 ## Verified
 
-2026-08-07, driven from a Claude Code session over raw stdio JSON-RPC:
+2026-08-07, driven from a Claude Code session over raw stdio JSON-RPC
+(`scripts/mcp-drive.py`, kept as the second-client smoke test):
 initialize handshake (protocol `2025-06-18`), `tools/list` (the seven above,
 no drain), and `bundle_render` end to end through `tools/call`, with the
 `--root` jail announced and enforced. The live-box legs (`bundle_publish`
