@@ -15,6 +15,7 @@ path = "src/main.rs"
 mecha-manifest = { path = "../mecha-manifest", version = "0.1.0" }
 anyhow.workspace = true
 chrono.workspace = true
+chrono-tz.workspace = true
 clap.workspace = true
 minijinja.workspace = true
 pulldown-cmark.workspace = true

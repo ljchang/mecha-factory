@@ -12,6 +12,7 @@ repository = "https://github.com/ljchang/mecha-factory"
 [workspace.dependencies]
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
 minijinja = "2"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
