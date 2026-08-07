@@ -6,7 +6,7 @@
 # tab.
 
 id = "letter"
-version = 1
+version = 2
 title = "Request a letter of recommendation"
 description = "Everything I need to write a good one, in one place."
 retain_days = 730
@@ -85,9 +85,17 @@ max_length = 600
 show_when = { field = "submission_method", op = "eq", value = "portal" }
 
 [[fields]]
+name = "cv"
+label = "Your CV"
+help = "A PDF. You'll be asked for it after your email is verified."
+kind = "file"
+accept = ["pdf"]
+max_bytes = 8388608
+
+[[fields]]
 name = "materials_url"
-label = "A link to your CV and statement"
-help = "A link is easier than an attachment. Anything I can open without an account."
+label = "A link to your statement, or anything else useful"
+help = "Anything I can open without an account."
 kind = "url"
 
 [[fields]]
@@ -110,8 +118,13 @@ fields = ["programs", "deadline", "submission_method", "portal_note"]
 id = "materials"
 title = "What I'll write from"
 description = "The part that makes the difference between a generic letter and a good one."
-fields = ["materials_url", "what_to_emphasise"]
+fields = ["cv", "materials_url", "what_to_emphasise"]
 
 [[acknowledgments]]
 id = "deadline_is_real"
 label = "The deadline above is the real one, and I'll tell you if it moves."
+
+# What stands between this form and the queue. Without it the type is not
+# served at all — see `RequestType::servable`.
+[verification]
+field = "requester_email"

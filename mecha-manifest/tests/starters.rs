@@ -174,3 +174,23 @@ fn free_text_never_includes_a_field_whose_values_are_ours() {
         }
     }
 }
+
+/// The letter starter is the motivating case for file fields, and it must
+/// stay both servable and exemplary: verification present (or the origin
+/// refuses to serve it at all), the CV optional (a link stays the easy
+/// path), and the upload budget within the per-type ceiling — which
+/// `check()` enforces, so this is really asserting nobody quietly removes
+/// the field or the block.
+#[test]
+fn the_letter_starter_asks_for_a_cv_and_can_be_served() {
+    let (_, letter) = starters()
+        .into_iter()
+        .find(|(name, _)| name == "letter.toml")
+        .expect("the letter starter exists");
+    assert!(letter.verification.is_some(), "letter must be servable");
+    let cv = letter.field("cv").expect("the cv field exists");
+    assert!(!cv.required, "a link stays the easy path; the CV is optional");
+    assert!(!cv.is_free_text());
+    assert!(letter.has_file_fields());
+    assert!(letter.attachment_budget() > 0);
+}
