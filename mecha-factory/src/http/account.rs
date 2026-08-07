@@ -72,7 +72,7 @@ fn cookie_token(headers: &HeaderMap) -> Option<String> {
 }
 
 /// The signed-in user, plus the raw token the CSRF value derives from.
-fn session(app: &Shared, headers: &HeaderMap) -> Option<(String, UserRow)> {
+pub(crate) fn session(app: &Shared, headers: &HeaderMap) -> Option<(String, UserRow)> {
     let token = cookie_token(headers)?;
     let user = app
         .db
@@ -84,7 +84,7 @@ fn session(app: &Shared, headers: &HeaderMap) -> Option<(String, UserRow)> {
 /// The CSRF value for a session — derived, so nothing is stored. It is a
 /// hash of the token, never the token: a value printed into every form must
 /// not be the credential itself.
-fn csrf(token: &str) -> String {
+pub(crate) fn csrf(token: &str) -> String {
     crate::intake::hash_token(&format!("csrf:{token}"))
 }
 
@@ -337,7 +337,36 @@ fn send_signin_link(app: &Shared, user: &UserRow) {
     app.mailer.send_signin(&user.email, &user.handle, &link);
 }
 
-/// `GET /account/s/<token>` — the link becomes a session.
+/// `GET /account/s/<token>` — a page with one button, and deliberately no
+/// database read at all.
+///
+/// The token used to be spent by this GET, and the first real sign-in from a
+/// university mailbox arrived already dead: Microsoft Safe Links (and every
+/// scanner like it) fetches a mail's URLs on delivery, so the robot's GET
+/// redeemed the link seconds before the person's click. Scanners follow GETs
+/// and do not submit forms — so the GET renders a Continue button and the
+/// POST below does everything the GET used to. No peek at the ledger here
+/// either: a page that varied on the token's state would hand the scanner's
+/// GET an oracle, and the POST answers soon enough.
+pub async fn finish_page(Extension(origin): Extension<Origin>) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    page(
+        StatusCode::OK,
+        shell(
+            "Sign in",
+            "<h1>Almost in</h1>\
+             <p>One click to finish — this is what keeps a mail scanner's \
+             robot from spending your link before you can.</p>\
+             <form method=\"post\">\
+             <button type=\"submit\">Continue to your page</button></form>",
+            "/account/a/",
+        ),
+    )
+}
+
+/// `POST /account/s/<token>` — the link becomes a session.
 pub async fn finish(
     State(app): State<Shared>,
     Extension(origin): Extension<Origin>,

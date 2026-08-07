@@ -33,7 +33,11 @@ fn signed_in(server: &Server) -> String {
     let asked = post(server, "/account/signin", "email=alice%40example.org", None);
     assert_eq!(asked.status, 200, "{}", asked.body);
     let link = server.verification_token(); // the last link the mailer saw
-    let finished = get(server, &format!("/account/s/{link}"), None);
+    // The person's path: interstitial first (which spends nothing — the
+    // mail-scanner fix), then the button's POST redeems.
+    let interstitial = get(server, &format!("/account/s/{link}"), None);
+    assert_eq!(interstitial.status, 200, "{}", interstitial.body);
+    let finished = post(server, &format!("/account/s/{link}"), "", None);
     assert_eq!(finished.status, 303, "{}", finished.head);
     let cookie = finished.header("set-cookie").expect("a session cookie");
     // The attributes are the security, so they are asserted, not assumed.
@@ -72,7 +76,7 @@ fn a_link_signs_in_once_and_the_cookie_is_armoured() {
 
     // The spent link is any dead token.
     let link = server.verification_token();
-    let again = get(&server, &format!("/account/s/{link}"), None);
+    let again = post(&server, &format!("/account/s/{link}"), "", None);
     assert_eq!(again.status, 404, "{}", again.head);
 
     // No cookie, no page — the sign-in form instead.

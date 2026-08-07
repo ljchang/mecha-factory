@@ -1003,6 +1003,13 @@ header.site {
 }
 header.site a.mark { color: var(--text); display: inline-flex; }
 header.site a.mark:hover { color: var(--accent); }
+header.site > nav { display: flex; gap: 1rem; align-items: center; }
+header.site > nav a {
+  font-size: 0.875rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+header.site > nav a:hover { color: var(--accent); text-decoration: underline; }
 
 /* The account dropdown is a <details>: open/close is the browser's, no
    script anywhere. */

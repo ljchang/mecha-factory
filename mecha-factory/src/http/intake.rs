@@ -55,8 +55,12 @@ pub(crate) fn page(status: StatusCode, body: String) -> Response {
 /// call-site decisions that could disagree.
 pub(crate) enum Chrome {
     /// The mark, linked to the gate root — plus a Docs link when the
-    /// deployment configured one. Signup, intake pages, the root.
-    Public(Option<String>),
+    /// deployment configured one, and a Sign in link where signing in is the
+    /// next thing a person might want (the splash, not a stranger's form).
+    Public {
+        docs_url: Option<String>,
+        sign_in: bool,
+    },
     /// The mark plus the account dropdown. Exactly one page earns this.
     Account {
         handle: String,
@@ -70,23 +74,29 @@ pub(crate) enum Chrome {
 
 impl Chrome {
     fn render(&self) -> String {
-        let docs_link = |docs: &Option<String>| match docs {
-            Some(url) => format!(
-                "<nav><a href=\"{}\">Docs</a></nav>",
-                mecha_manifest::escape_text(url)
-            ),
-            None => String::new(),
-        };
         match self {
-            Chrome::Public(docs) => match docs {
-                None => mecha_manifest::site_header(),
-                Some(_) => format!(
-                    "<header class=\"site\">\
-                     <a class=\"mark\" href=\"/\" aria-label=\"mecha\">{}</a>{}</header>\n",
-                    mecha_manifest::LOGO_MONO_SVG,
-                    docs_link(docs),
-                ),
-            },
+            Chrome::Public { docs_url, sign_in } => {
+                let mut nav = String::new();
+                if let Some(url) = docs_url {
+                    nav.push_str(&format!(
+                        "<a href=\"{}\">Docs</a>",
+                        mecha_manifest::escape_text(url)
+                    ));
+                }
+                if *sign_in {
+                    nav.push_str("<a href=\"/account\">Sign in</a>");
+                }
+                if nav.is_empty() {
+                    mecha_manifest::site_header()
+                } else {
+                    format!(
+                        "<header class=\"site\">\
+                         <a class=\"mark\" href=\"/\" aria-label=\"mecha\">{}</a>\
+                         <nav>{nav}</nav></header>\n",
+                        mecha_manifest::LOGO_MONO_SVG,
+                    )
+                }
+            }
             Chrome::Account {
                 handle,
                 email,
@@ -135,7 +145,15 @@ impl Chrome {
 /// exists should say — and such a page takes `Chrome::None` too, since a
 /// header referencing anything would be a second thing to prove identical.
 pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
-    shell_with(title, body, assets, &Chrome::Public(None))
+    shell_with(
+        title,
+        body,
+        assets,
+        &Chrome::Public {
+            docs_url: None,
+            sign_in: false,
+        },
+    )
 }
 
 pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome) -> String {
@@ -440,7 +458,46 @@ pub async fn submit(
     )
 }
 
-/// `GET /f/<handle>/<type>/c/<token>` — the click that makes it real.
+/// `GET /f/<handle>/<type>/c/<token>` — one button, and no token touched.
+///
+/// The same scanner problem as the sign-in link, fixed the same way:
+/// Microsoft Safe Links and its kind fetch a mail's URLs on delivery, so a
+/// GET that spent the verification token verified submissions no human had
+/// confirmed — and for a type with file fields, moved rows to the upload
+/// step on a robot's initiative. The GET renders a Confirm button; the POST
+/// below is the click that makes it real. The token is not even looked at
+/// here — a page that varied on its state would be an oracle for the
+/// scanner's GET.
+pub async fn confirm_page(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, type_id, _token)): Path<(String, String, String)>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((_, request_type)) = resolve(&app, &handle, &type_id) else {
+        return nothing_here();
+    };
+    page(
+        StatusCode::OK,
+        shell(
+            &request_type.title,
+            &format!(
+                "<h1>Confirm your email address</h1>\
+                 <p>One click to verify — this is what keeps a mail scanner's \
+                 robot from spending your link before you can. Confirming \
+                 sends your {} request on its way.</p>\
+                 <form method=\"post\">\
+                 <button type=\"submit\">Confirm</button></form>",
+                mecha_manifest::escape_text(&request_type.title)
+            ),
+            &format!("/f/{handle}/{type_id}/"),
+        ),
+    )
+}
+
+/// `POST /f/<handle>/<type>/c/<token>` — the click that makes it real.
 pub async fn confirm(
     State(app): State<Shared>,
     Extension(origin): Extension<Origin>,

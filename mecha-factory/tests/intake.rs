@@ -24,6 +24,17 @@ fn upload_meeting(server: &Server) {
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
 
+
+/// Click a verification link the way a person does: land on the interstitial,
+/// then submit its button. The GET must spend nothing — that is the mail-
+/// scanner fix — so the POST is what the old single GET used to be.
+fn click_confirm(server: &Server, path: &str) -> common::Reply {
+    let interstitial = server.get(server.gate, path);
+    assert_eq!(interstitial.status, 200, "{}", interstitial.body);
+    assert!(interstitial.body.contains("Confirm"), "{}", interstitial.body);
+    Request::new("POST", path, server.gate.to_string()).send(server.gate)
+}
+
 fn submit(server: &Server, body: &str) -> common::Reply {
     Request::new("POST", "/f/alice/meeting", server.gate.to_string())
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -69,7 +80,7 @@ fn a_stranger_can_fill_a_form_and_nothing_reaches_the_queue_until_they_click() {
 
     // The link, which in this build goes to the log rather than to an inbox.
     let token = server.verification_token();
-    let confirm = server.get(server.gate, &format!("/f/alice/meeting/c/{token}"));
+    let confirm = click_confirm(&server, &format!("/f/alice/meeting/c/{token}"));
     assert_eq!(confirm.status, 200, "{}", confirm.body);
     assert!(
         confirm.body.contains("that&#39;s in the queue"),
@@ -111,18 +122,25 @@ fn a_confirmation_link_is_single_use() {
     submit(&server, GOOD);
     let token = server.verification_token();
 
-    assert_eq!(
-        server
-            .get(server.gate, &format!("/f/alice/meeting/c/{token}"))
-            .status,
-        200
-    );
+    let path = format!("/f/alice/meeting/c/{token}");
+    assert_eq!(click_confirm(&server, &path).status, 200);
 
-    let again = server.get(server.gate, &format!("/f/alice/meeting/c/{token}"));
+    // The GET is an interstitial and spends nothing — a scanner can fetch it
+    // all day — so "single use" is a property of the POST alone, and the
+    // interstitial must answer identically for a spent link and a live one.
+    let refetched = server.get(server.gate, &path);
+    assert_eq!(refetched.status, 200, "{}", refetched.body);
+
+    let again = Request::new("POST", &path, server.gate.to_string()).send(server.gate);
     assert_eq!(again.status, 404);
     assert!(again.body.contains("expired"), "{}", again.body);
 
-    let invented = server.get(server.gate, "/f/alice/meeting/c/0123456789abcdef");
+    let invented = Request::new(
+        "POST",
+        "/f/alice/meeting/c/0123456789abcdef",
+        server.gate.to_string(),
+    )
+    .send(server.gate);
     assert_eq!(invented.status, 404);
     assert_eq!(
         invented.body, again.body,
@@ -194,13 +212,13 @@ fn an_unverified_submission_expires_and_is_deleted() {
         1
     );
     let token = server.verification_token();
-    assert_eq!(
-        server
-            .get(server.gate, &format!("/f/alice/meeting/c/{token}"))
-            .status,
-        404,
-        "a link to a swept row confirms nothing"
-    );
+    let dead = Request::new(
+        "POST",
+        &format!("/f/alice/meeting/c/{token}"),
+        server.gate.to_string(),
+    )
+    .send(server.gate);
+    assert_eq!(dead.status, 404, "a link to a swept row confirms nothing");
 }
 
 /// A stranger learns the same thing from every kind of absence: that there is
@@ -361,7 +379,7 @@ fn a_file_arrives_only_after_verification_and_only_as_what_it_is() {
 
     // The click: not queued yet — redirected to the upload page.
     let token = server.verification_token();
-    let confirm = server.get(server.gate, &format!("/f/alice/letterish/c/{token}"));
+    let confirm = click_confirm(&server, &format!("/f/alice/letterish/c/{token}"));
     assert_eq!(confirm.status, 303, "{}", confirm.body);
     let location = confirm.header("location").expect("a redirect names where");
     assert!(location.contains("/u/"), "{location}");
@@ -485,7 +503,7 @@ field = "requester_email"
         .body("requester_email=ada%40example.org")
         .send(server.gate);
     let token = server.verification_token();
-    let confirm = server.get(server.gate, &format!("/f/alice/optionalish/c/{token}"));
+    let confirm = click_confirm(&server, &format!("/f/alice/optionalish/c/{token}"));
     assert_eq!(confirm.status, 303);
     let location = confirm.header("location").unwrap();
 

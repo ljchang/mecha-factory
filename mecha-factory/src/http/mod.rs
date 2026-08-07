@@ -148,7 +148,12 @@ pub fn router(app: Shared) -> Router {
             get(intake::form).post(intake::submit),
         )
         .route("/f/{handle}/{type_id}/{name}", get(intake::asset))
-        .route("/f/{handle}/{type_id}/c/{token}", get(intake::confirm))
+        // GET is a page with a button and POST is the verification, because
+        // mail scanners follow GETs — see `intake::confirm_page`.
+        .route(
+            "/f/{handle}/{type_id}/c/{token}",
+            get(intake::confirm_page).post(intake::confirm),
+        )
         // The upload step, for types with file fields. The only multipart
         // route in the binary, and the second route to raise the 2 MB body
         // default — to the configured submission ceiling, with the type's own
@@ -170,7 +175,10 @@ pub fn router(app: Shared) -> Router {
         // server-rendered, no script.
         .route("/account", get(account::overview))
         .route("/account/signin", post(account::signin))
-        .route("/account/s/{token}", get(account::finish))
+        .route(
+            "/account/s/{token}",
+            get(account::finish_page).post(account::finish),
+        )
         .route("/account/signout", post(account::signout))
         .route("/account/release", post(account::release))
         .route("/account/revoke", post(account::revoke))
@@ -248,10 +256,28 @@ async fn guard(
 
 /// The gate's own front page. Deliberately almost nothing: this origin exists
 /// to serve an API and, later, forms — not to say who runs it.
-async fn root(State(app): State<Shared>, origin: Extension<Origin>) -> Response {
+async fn root(
+    State(app): State<Shared>,
+    origin: Extension<Origin>,
+    headers: axum::http::HeaderMap,
+) -> Response {
     if origin.role != Role::Gate {
         return Failure::text(StatusCode::NOT_FOUND, "not found").into_response();
     }
+    // The splash knows who is looking: a session gets its own dropdown, and
+    // everyone else gets the way in — far right, as a front page should.
+    let chrome = match account::session(&app, &headers) {
+        Some((token, user)) => intake::Chrome::Account {
+            handle: user.handle.clone(),
+            email: user.email.clone(),
+            csrf: account::csrf(&token),
+            docs_url: app.config.docs_url.clone(),
+        },
+        None => intake::Chrome::Public {
+            docs_url: app.config.docs_url.clone(),
+            sign_in: true,
+        },
+    };
     // The splash: what this machine is, and where everything else lives. The
     // GitHub links are ordinary anchors — navigation, which no CSP directive
     // governs — so the no-external-references rule for *resources* holds
@@ -286,12 +312,7 @@ async fn root(State(app): State<Shared>, origin: Extension<Origin>) -> Response 
     );
     intake::page(
         StatusCode::OK,
-        intake::shell_with(
-            "mecha factory",
-            &body,
-            "/account/a/",
-            &intake::Chrome::Public(app.config.docs_url.clone()),
-        ),
+        intake::shell_with("mecha factory", &body, "/account/a/", &chrome),
     )
 }
 
