@@ -222,11 +222,44 @@ churn suggests.
 | **B** — one ACME state per user, dispatch by SNI | **no** | ~50 new per week; thousands total | moderate, all our own code |
 | **C** — DNS-01 wildcard | no | unlimited | replace `rustls-acme` **and** move DNS |
 
-**B is the plan.** `state.resolver()` returns an `Arc<ResolvesServerCertAcme>`,
-which is a `ResolvesServerCert`; a wrapper holding `HashMap<sni, resolver>` can
-be added to at runtime. Creating a user spawns an `AcmeState` for their two
-names and inserts it. No restart, no new dependency, and the rate ceiling is
-irrelevant at any scale this will see soon.
+**B was the plan, and it is harder than it looks.** The idea survives:
+`state.resolver()` returns an `Arc<ResolvesServerCertAcme>`, which *is* a
+`ResolvesServerCert`, and its `resolve` already dispatches the TLS-ALPN-01
+challenge by SNI — so a wrapper holding `HashMap<sni, resolver>` serves both
+real traffic and challenges correctly, and can be added to at runtime.
+
+What blocks it is the acceptor. A TLS-ALPN-01 challenge arrives as a
+*connection*, not a request, and something has to answer it with the challenge
+certificate and then **not** hand that connection to the application.
+`AcmeAcceptor` does exactly that, and:
+
+```rust
+pub(crate) fn new(resolver: Arc<ResolvesServerCertAcme>) -> Self
+```
+
+It is `pub(crate)`, and it takes the library's concrete resolver rather than a
+`dyn ResolvesServerCert`. So the one type that must know about all the
+certificates cannot be handed a wrapper that does. `state.acceptor()` yields an
+acceptor bound to a single state, and there is no way to combine several.
+
+Three ways past it, none of them a day's work:
+
+- **Do the TLS layer here**: `tokio-rustls` with our own `ServerConfig`, our
+  own dispatching resolver, and our own detection of the `acme-tls/1` ALPN so a
+  challenge connection is answered and dropped rather than passed to axum. All
+  the pieces are public; the acceptor's job is small and would be ours.
+- **A different ACME crate.** `tokio-rustls-acme` is a fork with a different
+  surface and may not have the same restriction; `instant-acme` gives up the
+  serving integration entirely and leaves us the renewal loop.
+- **Option A as an interim.** A restart on user creation is a few lines and
+  costs seconds of downtime with certificates already cached. Ugly, honest, and
+  it unblocks everything downstream of the certificate while the real answer is
+  chosen.
+
+Worth noticing: the second option is most of the work option **C** needs
+anyway. If we are going to own a renewal loop, owning it once and getting
+wildcards — which need DNS-01, which no crate here speaks — may beat owning it
+twice. That is an argument for A now and C later, with B skipped.
 
 **C is the better end state and is deliberately deferred.** One certificate for
 `*.art` and `*.compute`, no per-user work at all. It means swapping to
@@ -298,16 +331,19 @@ zone triggers neither.
 
 ## Build order
 
-0. ~~**The scope split.**~~ *Done 2026-08-07.* First because it was cheapest
-   before any key existed in the wild and steadily more expensive after — and
-   because it is what stops the review gate depending on the client. **Not yet
-   deployed**: the live box has one `publish` key that can currently alias, so
-   a release key has to be minted and placed before the binary ships, or
-   aliasing breaks.
+0. ~~**The scope split.**~~ *Done and deployed 2026-08-07.* First because it
+   was cheapest before any key existed in the wild and steadily more expensive
+   after — and because it is what stops the review gate depending on the
+   client. Verified against the live box: the publish key is refused on
+   `/alias` with "this key does not cover this endpoint", and the release key
+   is accepted.
 1. **The zone move**, which is independent of everything else and stops the
    manual-DNS tax immediately.
-2. **B**, the per-user certificate. Nothing self-serve is possible until a new
-   user's hostname resolves without an operator.
+2. **A certificate that arrives without an operator.** Nothing self-serve
+   works until a new handle resolves on its own — and B turned out to be
+   blocked on a `pub(crate)` constructor, so this step is now a choice between
+   A as an interim and owning the ACME loop outright. See the certificates
+   section.
 3. **Signup**: invite → magic link → handle claim. Reuses `intake.rs`.
 4. **Pairing**: the code, `factory-publish connect`, and the confirmation that
    names the handle.
