@@ -59,8 +59,48 @@ pub async fn serve(app: Arc<App>, config: &Config) -> Result<()> {
     )?;
     std::fs::create_dir_all(config.acme_cache())?;
 
-    let registry = Registry::new(acme);
-    certificates::reconcile(&registry, &app.db, config)?;
+    let registry = Registry::new(acme.clone());
+    registry
+        .seed_account()
+        .await
+        .context("seeding the acme account key")?;
+
+    // Opportunistic on purpose: a migration that cannot read the ledger has
+    // nothing to migrate for, and the cost of skipping is the cost the upgrade
+    // always had — fresh orders — not an outage.
+    match app.db.users() {
+        Ok(users) => {
+            if let Err(e) = certificates::migrate_combined_cache(&acme, config, &users).await {
+                tracing::warn!(error = %e, "migrating the pre-upgrade certificate cache");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "reading the ledger to migrate the certificate cache"),
+    }
+
+    // **The challenge listener is bound before the first order is started.**
+    // On a cold cache an `AcmeState` begins ordering the moment it is spawned,
+    // and a validation GET that arrives before port 80 answers is a failed
+    // authorization plus hours of internal backoff — for an order that would
+    // have succeeded moments later. Binding is also the one failure worth
+    // dying on the spot for: this port is where certificates come from now,
+    // and a server that came up without it would serve its cache for sixty
+    // days and then stop.
+    let challenge_listener = tokio::net::TcpListener::bind(http)
+        .await
+        .with_context(|| format!("binding {http} — port 80 answers the acme challenges"))?;
+    tracing::info!(address = %http, "serving acme challenges and redirecting to https");
+
+    // The first pass, before anything is served. An error is a warning and not
+    // an exit: the base group was already ensured before the ledger read that
+    // can fail, and the reconcile loop retries in thirty seconds — where
+    // exiting would be a total outage grown from a transiently locked SQLite
+    // file.
+    match certificates::reconcile(&registry, &app.db, config) {
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "the first reconcile pass failed; retrying in the loop")
+        }
+    }
     tracing::info!(
         groups = registry.groups(),
         "ordering certificates over http-01; a user created from here on gets one without a restart"
@@ -84,13 +124,28 @@ pub async fn serve(app: Arc<App>, config: &Config) -> Result<()> {
             .serve(service),
     );
 
-    let port80 = tokio::spawn(challenge_and_redirect(app.clone(), registry.clone(), http));
+    let port80 = {
+        let app = app.clone();
+        let registry = registry.clone();
+        tokio::spawn(async move { axum::serve(challenge_listener, port_80(app, registry)).await })
+    };
     let reconcile = tokio::spawn(reconcile_forever(app.clone(), registry));
 
-    https.await.context("the tls listener panicked")??;
-    port80.abort();
+    // Either listener failing ends `serve`, loudly. The port-80 handle used to
+    // be spawned and dropped, which made its death invisible — and an
+    // invisible port 80 is certificates that stop renewing with no log line,
+    // which is precisely the shape `Config::check`'s refusal exists to
+    // prevent. A select rather than a join: the survivor is aborted, because
+    // half a server is not a state to keep running in.
+    let result = tokio::select! {
+        https = https => https.context("the tls listener panicked")?.map_err(Into::into),
+        port80 = port80 => match port80.context("the challenge listener panicked")? {
+            Ok(()) => Err(anyhow::anyhow!("the port-80 listener stopped")),
+            Err(e) => Err(e.into()),
+        },
+    };
     reconcile.abort();
-    Ok(())
+    result
 }
 
 /// Re-read the ledger, and order for whatever is in it that we do not have.
@@ -116,20 +171,6 @@ async fn reconcile_forever(app: Arc<App>, registry: Arc<Registry>) {
             Err(e) => tracing::warn!(error = %e, "reading the ledger to reconcile certificates"),
         }
     }
-}
-
-/// Serve [`port_80`] on `address`.
-async fn challenge_and_redirect(
-    app: Arc<App>,
-    registry: Arc<Registry>,
-    address: SocketAddr,
-) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .with_context(|| format!("binding {address}"))?;
-    tracing::info!(%address, "serving acme challenges and redirecting to https");
-    axum::serve(listener, port_80(app, registry)).await?;
-    Ok(())
 }
 
 /// Port 80: the ACME challenge, and one redirect.
@@ -244,39 +285,18 @@ pub fn describe(config: &Config) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Limits, Listen, Origins, Tls};
-    use std::path::PathBuf;
-
-    fn config(tls: Option<Tls>) -> Config {
-        Config {
-            theme: "nocturne".into(),
-            mail: None,
-            data_dir: PathBuf::from("/tmp/factory-test"),
-            origins: Origins {
-                gate: "gate.example.org".into(),
-                artifacts: "art.example.org".into(),
-                compute: "compute.example.org".into(),
-            },
-            listen: Listen {
-                https: ([0, 0, 0, 0], 443).into(),
-                http: Some(([0, 0, 0, 0], 80).into()),
-            },
-            tls,
-            limits: Limits::default(),
-        }
-    }
 
     /// `check` names the challenge type, because it is the sentence somebody
     /// reads before deciding whether port 80 may be firewalled off.
     #[test]
     fn the_staging_directory_and_the_challenge_type_are_named_in_what_check_prints() {
-        let staging = describe(&config(Some(Tls {
-            contact: "mailto:someone@example.org".into(),
-            staging: true,
-        })));
+        let staging = describe(&Config::example());
         assert!(staging.contains("staging"), "{staging}");
         assert!(staging.contains("http-01"), "{staging}");
         assert!(staging.contains("per active user"), "{staging}");
-        assert!(describe(&config(None)).contains("loopback"));
+
+        let mut loopback = Config::example();
+        loopback.tls = None;
+        assert!(describe(&loopback).contains("loopback"));
     }
 }

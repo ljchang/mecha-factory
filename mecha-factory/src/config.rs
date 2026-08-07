@@ -379,6 +379,35 @@ impl Config {
         }
     }
 
+    /// The `example.org` deployment the unit tests assert against.
+    ///
+    /// One definition rather than a hand-built literal per test module,
+    /// because a fixture copied three times is three deployments that drift
+    /// apart quietly — and because adding a field to `Config` should be one
+    /// edit here, not an archaeology of test modules.
+    #[cfg(test)]
+    pub(crate) fn example() -> Self {
+        Config {
+            theme: default_theme(),
+            mail: None,
+            data_dir: PathBuf::from("/tmp/factory-test"),
+            origins: Origins {
+                gate: "gate.example.org".into(),
+                artifacts: "art.example.org".into(),
+                compute: "compute.example.org".into(),
+            },
+            listen: Listen {
+                https: ([0, 0, 0, 0], 443).into(),
+                http: Some(([0, 0, 0, 0], 80).into()),
+            },
+            tls: Some(Tls {
+                contact: "mailto:someone@example.org".into(),
+                staging: true,
+            }),
+            limits: Limits::default(),
+        }
+    }
+
     fn check(&self) -> Result<()> {
         self.origins.check()?;
         if self.tls.is_none() && !self.listen.https.ip().is_loopback() {

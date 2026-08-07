@@ -54,7 +54,7 @@
 //! quietly unable to renew.
 
 use anyhow::Result;
-use futures_util::StreamExt;
+use futures_util::{FutureExt, StreamExt};
 use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use rustls::ServerConfig;
@@ -104,6 +104,14 @@ struct Inner {
     /// resolver so the dispatch can be tested without a handshake and without
     /// the network.
     by_name: HashMap<String, Arc<dyn ResolvesServerCert>>,
+    /// What answers a handshake that carries **no SNI at all**: the base
+    /// group's resolver. Monitors, health checks and curl-by-IP send none, and
+    /// the single-certificate shape this replaced answered them with its one
+    /// certificate — a regression nobody would trace back to here, because the
+    /// connection dies before HTTP exists. An *unknown* name is a different
+    /// case and still resolves to nothing: a name nobody claimed must keep
+    /// failing at the handshake.
+    fallback: Option<Arc<dyn ResolvesServerCert>>,
     /// Every ACME resolver once, for the challenge route. Concrete, because
     /// `get_http_01_key_auth` lives on the type and not on the trait.
     challengers: Vec<Arc<ResolvesServerCertAcme>>,
@@ -138,19 +146,70 @@ impl Registry {
         Arc::new(config)
     }
 
+    /// One ACME account, before any order can want one.
+    ///
+    /// Without this, a cold cache is a race: every group's `AcmeState` loads
+    /// the account cache, finds nothing — because no store has completed yet —
+    /// generates its own keypair, and registers its own account. Let's Encrypt
+    /// caps new registrations at 10 per IP per 3 hours, so a cold start with
+    /// enough users spends hours in backoff, and even under the cap it
+    /// registers N throwaway accounts where one was meant. Seeding the key
+    /// synchronously before the first `ensure` closes it: every state loads
+    /// the same key, and re-registering the *same* key is how RFC 8555 says
+    /// "give me my account back".
+    ///
+    /// The cache file is keyed on (contact, directory URL), which is exactly
+    /// the pair each `AcmeConfig` below is built with — a seed under different
+    /// values would be a file nobody reads, silently changing nothing.
+    pub async fn seed_account(&self) -> Result<()> {
+        use rustls_acme::acme::{
+            Account, LETS_ENCRYPT_PRODUCTION_DIRECTORY, LETS_ENCRYPT_STAGING_DIRECTORY,
+        };
+        use rustls_acme::AccountCache;
+
+        // The same composite type `AcmeConfig::cache` wraps ours in, so the
+        // file name derivation is the library's own.
+        let cache: DirCache<PathBuf> = DirCache::new(self.acme.cache.clone());
+        let contact = [self.acme.contact.clone()];
+        let directory = if self.acme.staging {
+            LETS_ENCRYPT_STAGING_DIRECTORY
+        } else {
+            LETS_ENCRYPT_PRODUCTION_DIRECTORY
+        };
+        if cache.load_account(&contact, directory).await?.is_some() {
+            return Ok(());
+        }
+        cache
+            .store_account(&contact, directory, &Account::generate_key_pair())
+            .await?;
+        tracing::info!("generated the acme account key, shared by every certificate order");
+        Ok(())
+    }
+
     /// Order a certificate for `names` unless one is already on the way.
     ///
     /// Returns whether this call started an order. Spawns the state machine
     /// that does the work: `AcmeState` is a stream, and nothing is ordered or
-    /// renewed unless somebody polls it.
-    pub fn ensure(self: &Arc<Self>, names: Vec<String>) -> bool {
-        let mut names = names;
-        names.sort();
-        names.dedup();
-        if names.is_empty() {
+    /// renewed unless somebody polls it. `fallback` marks this group's
+    /// resolver as the answer for handshakes that carry no SNI — true for the
+    /// base group, and for it alone.
+    pub fn ensure(self: &Arc<Self>, names: Vec<String>, fallback: bool) -> bool {
+        let Some((names, group)) = group_key(names) else {
+            return false;
+        };
+
+        // The steady state is "already ordered", thirty times a minute per
+        // group, on the same lock every TLS handshake reads — so probe under a
+        // read lock and let the write below arbitrate the race.
+        if self
+            .inner
+            .read()
+            .expect("certificate registry lock")
+            .ordered
+            .contains(&group)
+        {
             return false;
         }
-        let group = names.join(",");
 
         // Claim the group before building anything, so two reconciles racing
         // produce one order. The window where the group is claimed and the
@@ -174,9 +233,10 @@ impl Registry {
         {
             let mut inner = self.inner.write().expect("certificate registry lock");
             for name in &names {
-                inner
-                    .by_name
-                    .insert(name.to_ascii_lowercase(), resolver.clone());
+                inner.by_name.insert(name.clone(), resolver.clone());
+            }
+            if fallback {
+                inner.fallback = Some(resolver.clone());
             }
             inner.challengers.push(resolver);
         }
@@ -185,17 +245,34 @@ impl Registry {
         // failed to renew is a site that goes down in sixty days for a reason
         // nobody wrote down. The group is named on every line, because with one
         // state per user "acme error" on its own does not say whose.
+        //
+        // And the task's death releases the claim. The stream ending, or a
+        // panic anywhere in the poll path, would otherwise leave the group in
+        // `ordered` forever: every reconcile pass skips it as already handled,
+        // the stale resolver serves until its certificate expires, and the
+        // loop whose whole purpose is self-repair is structurally unable to
+        // repair it. Released, the next pass rebuilds the state — `by_name`
+        // keeps serving the old resolver until the new one replaces it, which
+        // is a stale certificate rather than none.
+        let registry = self.clone();
         tokio::spawn(async move {
-            loop {
-                match state.next().await {
-                    Some(Ok(event)) => tracing::info!(%group, ?event, "acme"),
-                    Some(Err(e)) => tracing::error!(%group, error = %e, "acme"),
-                    None => {
-                        tracing::error!(%group, "the acme state machine ended; this certificate will not renew");
-                        break;
+            let run = std::panic::AssertUnwindSafe(async {
+                loop {
+                    match state.next().await {
+                        Some(Ok(event)) => tracing::info!(%group, ?event, "acme"),
+                        Some(Err(e)) => tracing::error!(%group, error = %e, "acme"),
+                        None => break,
                     }
                 }
+            });
+            if run.catch_unwind().await.is_err() {
+                tracing::error!(group = %group, "the acme task panicked");
+            } else {
+                tracing::error!(group = %group, "the acme state machine ended");
             }
+            let mut inner = registry.inner.write().expect("certificate registry lock");
+            inner.ordered.remove(&group);
+            tracing::warn!(group = %group, "released for re-ordering on the next reconcile pass");
         });
         true
     }
@@ -204,11 +281,14 @@ impl Registry {
     ///
     /// Split out from [`ResolvesServerCert::resolve`] because a `ClientHello`
     /// can only be produced by a real handshake, and the dispatch is the part
-    /// worth testing.
+    /// worth testing. No SNI gets the base group's certificate — see
+    /// `Inner::fallback`; an unknown name still gets nothing.
     fn lookup(&self, sni: Option<&str>) -> Option<Arc<dyn ResolvesServerCert>> {
-        let sni = sni?.to_ascii_lowercase();
         let inner = self.inner.read().expect("certificate registry lock");
-        inner.by_name.get(&sni).cloned()
+        match sni {
+            Some(name) => inner.by_name.get(&name.to_ascii_lowercase()).cloned(),
+            None => inner.fallback.clone(),
+        }
     }
 
     /// The answer to an HTTP-01 challenge, from whichever order is waiting on
@@ -239,14 +319,19 @@ impl Registry {
     }
 
     /// Install a resolver for names directly. The seam [`Registry::ensure`]
-    /// uses, and what lets the SNI dispatch be tested with a stub.
+    /// uses, and what lets the SNI dispatch be tested with a stub. `fallback`
+    /// mirrors the parameter on `ensure`.
     #[cfg(test)]
-    fn install(&self, names: &[&str], resolver: Arc<dyn ResolvesServerCert>) {
+    fn install(&self, names: &[&str], resolver: Arc<dyn ResolvesServerCert>, fallback: bool) {
+        let resolver: Arc<dyn ResolvesServerCert> = resolver;
         let mut inner = self.inner.write().expect("certificate registry lock");
         for name in names {
             inner
                 .by_name
                 .insert(name.to_ascii_lowercase(), resolver.clone());
+        }
+        if fallback {
+            inner.fallback = Some(resolver);
         }
     }
 }
@@ -273,52 +358,130 @@ impl ResolvesServerCert for Registry {
 /// letting the router answer, and the router is where suspension is already
 /// decided and already tested. Restoring an account therefore costs nothing.
 pub fn groups(config: &Config, users: &[UserRow]) -> Vec<Vec<String>> {
-    let mut out = vec![config.origins.names()];
+    let mut out = vec![base_group(config)];
     for user in users.iter().filter(|user| user.active()) {
-        out.push(vec![
-            config.origins.host_for(Role::Artifacts, &user.handle),
-            config.origins.host_for(Role::Compute, &user.handle),
-        ]);
+        out.push(user_group(config, &user.handle));
     }
     out
 }
 
+/// The three base origins, which travel on one certificate.
+fn base_group(config: &Config) -> Vec<String> {
+    config.origins.names()
+}
+
+/// A group's canonical names and its identity, or nothing for an empty group.
+///
+/// Lowercased before anything keys on them: ACME identifiers are defined
+/// lowercase, and `by_name` lowercases independently for SNI — without this, a
+/// mixed-case configured origin would order a certificate the CA refuses while
+/// the dispatch table quietly disagreed with the `ordered` set about the
+/// group's identity, and a later case-variant of the same names would spend a
+/// duplicate order from the issuance budget.
+fn group_key(names: Vec<String>) -> Option<(Vec<String>, String)> {
+    let mut names: Vec<String> = names.iter().map(|n| n.to_ascii_lowercase()).collect();
+    names.sort();
+    names.dedup();
+    if names.is_empty() {
+        return None;
+    }
+    let group = names.join(",");
+    Some((names, group))
+}
+
+/// One user's two hostnames, which travel on theirs.
+fn user_group(config: &Config, handle: &str) -> Vec<String> {
+    vec![
+        config.origins.host_for(Role::Artifacts, handle),
+        config.origins.host_for(Role::Compute, handle),
+    ]
+}
+
+/// Carry the old single-certificate cache into the per-group keys, once.
+///
+/// The shape this module replaced ordered **one** certificate covering every
+/// name, and `DirCache` keys the cached file by the exact domain list — so on
+/// the first start after the upgrade, every per-group lookup misses, every
+/// group is a brand-new order, and every name fails its handshake until its
+/// order completes. On a busy deployment that is also a burst of new orders
+/// against a budget of 50 per week that refills at one per 202 minutes.
+///
+/// The old certificate is still valid for every one of those names. So: load
+/// it under the old combined key, and store the same PEM under each group's
+/// key that has no certificate of its own. Each `AcmeState` then comes up
+/// serving it, and orders a real per-group certificate at the ordinary renewal
+/// point — the migration burst becomes a renewal schedule. Idempotent by
+/// construction: a group that already has its own cached certificate is left
+/// alone, so after the first renewal this finds nothing to do.
+pub async fn migrate_combined_cache(
+    acme: &Acme,
+    config: &Config,
+    users: &[UserRow],
+) -> Result<usize> {
+    use rustls_acme::acme::{LETS_ENCRYPT_PRODUCTION_DIRECTORY, LETS_ENCRYPT_STAGING_DIRECTORY};
+    use rustls_acme::CertCache;
+
+    let cache: DirCache<PathBuf> = DirCache::new(acme.cache.clone());
+    let directory = if acme.staging {
+        LETS_ENCRYPT_STAGING_DIRECTORY
+    } else {
+        LETS_ENCRYPT_PRODUCTION_DIRECTORY
+    };
+
+    // The exact list the old `certificate_names` ordered for: every group's
+    // names flattened, sorted, deduplicated. Anything else is a cache key
+    // nobody ever wrote.
+    let mut combined: Vec<String> = groups(config, users).into_iter().flatten().collect();
+    combined.sort();
+    combined.dedup();
+    let Some(pem) = cache.load_cert(&combined, directory).await? else {
+        return Ok(0);
+    };
+
+    let mut migrated = 0;
+    for group in groups(config, users) {
+        let Some((names, _)) = group_key(group) else {
+            continue;
+        };
+        if cache.load_cert(&names, directory).await?.is_none() {
+            cache.store_cert(&names, directory, &pem).await?;
+            migrated += 1;
+        }
+    }
+    if migrated > 0 {
+        tracing::info!(
+            groups = migrated,
+            "carried the pre-upgrade combined certificate into the per-group cache; \
+             each group renews onto its own certificate on the ordinary schedule"
+        );
+    }
+    Ok(migrated)
+}
+
 /// Order whatever the ledger says we should have and do not. Returns how many
 /// orders this pass started.
+///
+/// The base group is ensured **before** the ledger is read, because it does
+/// not depend on the ledger and must not share its failures: a transient
+/// SQLite error at startup — a locked file from a concurrent `factory user
+/// create` — would otherwise take the base origins down with it, turning a
+/// degraded pass into a total outage. Ordered first for the same reason at
+/// every scale: the bases are what everyone reaches. The error still
+/// propagates, so the caller logs it and the next pass retries the users.
 pub fn reconcile(registry: &Arc<Registry>, db: &Db, config: &Config) -> Result<usize> {
+    let mut started = usize::from(registry.ensure(base_group(config), true));
     let users = db.users()?;
-    Ok(groups(config, &users)
-        .into_iter()
-        .filter(|names| registry.ensure(names.clone()))
-        .count())
+    for user in users.iter().filter(|user| user.active()) {
+        if registry.ensure(user_group(config, &user.handle), false) {
+            started += 1;
+        }
+    }
+    Ok(started)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{Limits, Listen, Origins, Tls};
-
-    fn config() -> Config {
-        Config {
-            theme: "nocturne".into(),
-            mail: None,
-            data_dir: PathBuf::from("/tmp/factory-test"),
-            origins: Origins {
-                gate: "gate.example.org".into(),
-                artifacts: "art.example.org".into(),
-                compute: "compute.example.org".into(),
-            },
-            listen: Listen {
-                https: ([0, 0, 0, 0], 443).into(),
-                http: Some(([0, 0, 0, 0], 80).into()),
-            },
-            tls: Some(Tls {
-                contact: "mailto:someone@example.org".into(),
-                staging: true,
-            }),
-            limits: Limits::default(),
-        }
-    }
 
     /// A resolver that answers nothing, so the dispatch can be tested without a
     /// certificate. What we assert is *which* resolver a name reaches, and
@@ -355,8 +518,9 @@ mod tests {
         registry.install(
             &["alice.art.example.org", "alice.compute.example.org"],
             Arc::new(Stub("alice")),
+            false,
         );
-        registry.install(&["bob.art.example.org"], Arc::new(Stub("bob")));
+        registry.install(&["bob.art.example.org"], Arc::new(Stub("bob")), false);
 
         let whose = |name: &str| format!("{:?}", registry.lookup(Some(name)).unwrap());
         assert_eq!(whose("alice.art.example.org"), r#"Stub("alice")"#);
@@ -371,15 +535,27 @@ mod tests {
     /// handshake and never reaches the router. That is the second line of
     /// defence §14.3 asked us to keep, and it is a property of *this* function
     /// — path routing would have given it away.
+    ///
+    /// **No SNI is a different case from an unknown name.** Monitors, health
+    /// checks and curl-by-IP send no SNI at all, and the single-certificate
+    /// shape this replaced completed their handshakes — so they get the base
+    /// group's certificate, not a refusal a person would only ever see as
+    /// "the site is down" with no application error anywhere.
     #[test]
-    fn a_name_nobody_has_claimed_resolves_to_nothing() {
+    fn an_unclaimed_name_gets_nothing_and_no_sni_gets_the_bases() {
         let registry = registry();
-        registry.install(&["alice.art.example.org"], Arc::new(Stub("alice")));
+        registry.install(
+            &["gate.example.org", "art.example.org", "compute.example.org"],
+            Arc::new(Stub("bases")),
+            true,
+        );
+        registry.install(&["alice.art.example.org"], Arc::new(Stub("alice")), false);
+
         assert!(registry.lookup(Some("mallory.art.example.org")).is_none());
-        assert!(registry.lookup(Some("art.example.org")).is_none());
-        // A client that sent no SNI is told apart from one that sent an unknown
-        // name only in that there is nothing to look up. Both get nothing.
-        assert!(registry.lookup(None).is_none());
+        assert_eq!(
+            format!("{:?}", registry.lookup(None).unwrap()),
+            r#"Stub("bases")"#
+        );
     }
 
     /// The base names are one certificate; each user is their own. A shared
@@ -387,7 +563,7 @@ mod tests {
     /// reordering for everybody — and Let's Encrypt caps a SAN list at 100.
     #[test]
     fn the_bases_are_one_group_and_every_user_is_their_own() {
-        let config = config();
+        let config = Config::example();
         let db = crate::db::Db::open_in_memory().unwrap();
         db.user_create("alice", "a@example.org", "t").unwrap();
         let suspended = db.user_create("bob", "b@example.org", "t").unwrap();
@@ -420,16 +596,17 @@ mod tests {
     /// backing off inside itself; replacing it would restart that backoff and
     /// spend the failed-validation budget instead of waiting it out.
     ///
-    /// Driven through `ordered` rather than `ensure`, because `ensure` spawns
-    /// onto a runtime and this is a claim about the bookkeeping.
+    /// Driven through `group_key` and `ordered` rather than `ensure`, because
+    /// `ensure` spawns onto a runtime and this is a claim about the
+    /// bookkeeping.
     #[test]
     fn a_group_is_ordered_once_however_often_it_is_reconciled() {
         let registry = registry();
         let claim = |names: &[&str]| {
-            let mut names: Vec<String> = names.iter().map(|n| n.to_string()).collect();
-            names.sort();
+            let names = names.iter().map(|n| n.to_string()).collect();
+            let (_, group) = group_key(names).unwrap();
             let mut inner = registry.inner.write().unwrap();
-            inner.ordered.insert(names.join(","))
+            inner.ordered.insert(group)
         };
         assert!(claim(&[
             "alice.art.example.org",
@@ -445,6 +622,113 @@ mod tests {
             "alice.compute.example.org",
             "alice.art.example.org"
         ]));
+        // Neither is case. ACME identifiers are lowercase, and a case-variant
+        // that read as a different group would order a duplicate certificate
+        // from a budget that refills at one per 202 minutes.
+        assert!(!claim(&[
+            "Alice.ART.example.org",
+            "alice.compute.EXAMPLE.org"
+        ]));
         assert_eq!(registry.groups(), 1);
+    }
+
+    /// Upgrading must not throw the certificate away. The old shape cached one
+    /// certificate under the combined domain list; the per-group lookups would
+    /// all miss it, and every name would fail its handshake until a fresh
+    /// order completed. The migration copies the still-valid PEM under each
+    /// group's key — and leaves a group alone once it has its own, so a
+    /// renewed per-group certificate is never clobbered by the relic.
+    #[test]
+    fn the_pre_upgrade_certificate_is_carried_into_every_group() {
+        use rustls_acme::acme::LETS_ENCRYPT_STAGING_DIRECTORY as DIR;
+        use rustls_acme::CertCache;
+
+        let dir = tempfile::tempdir().unwrap();
+        let acme = Acme {
+            contact: "mailto:someone@example.org".into(),
+            staging: true,
+            cache: dir.path().to_path_buf(),
+        };
+        let config = Config::example();
+        let db = crate::db::Db::open_in_memory().unwrap();
+        db.user_create("alice", "a@example.org", "t").unwrap();
+        let users = db.users().unwrap();
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cache: DirCache<PathBuf> = DirCache::new(acme.cache.clone());
+
+            // Nothing cached: nothing to migrate, and not an error.
+            assert_eq!(
+                migrate_combined_cache(&acme, &config, &users)
+                    .await
+                    .unwrap(),
+                0
+            );
+
+            // The old shape: one PEM under the combined sorted list, exactly
+            // as `certificate_names` ordered it.
+            let combined = vec![
+                "alice.art.example.org".to_string(),
+                "alice.compute.example.org".to_string(),
+                "art.example.org".to_string(),
+                "compute.example.org".to_string(),
+                "gate.example.org".to_string(),
+            ];
+            cache.store_cert(&combined, DIR, b"OLD PEM").await.unwrap();
+            // One group already renewed onto its own certificate.
+            let alice = vec![
+                "alice.art.example.org".to_string(),
+                "alice.compute.example.org".to_string(),
+            ];
+            cache.store_cert(&alice, DIR, b"ALICE OWN").await.unwrap();
+
+            assert_eq!(
+                migrate_combined_cache(&acme, &config, &users)
+                    .await
+                    .unwrap(),
+                1
+            );
+
+            let bases = vec![
+                "art.example.org".to_string(),
+                "compute.example.org".to_string(),
+                "gate.example.org".to_string(),
+            ];
+            assert_eq!(
+                cache.load_cert(&bases, DIR).await.unwrap().as_deref(),
+                Some(b"OLD PEM".as_ref())
+            );
+            // The group with its own certificate kept it.
+            assert_eq!(
+                cache.load_cert(&alice, DIR).await.unwrap().as_deref(),
+                Some(b"ALICE OWN".as_ref())
+            );
+            // And a second pass finds everything already in place.
+            assert_eq!(
+                migrate_combined_cache(&acme, &config, &users)
+                    .await
+                    .unwrap(),
+                0
+            );
+        });
+    }
+
+    /// The names an order is placed for are the canonical ones, not the bytes
+    /// the caller typed — the CA refuses uppercase identifiers outright.
+    #[test]
+    fn a_group_orders_lowercase_names_whatever_the_caller_wrote() {
+        let (names, group) = group_key(vec![
+            "Gate.Example.org".into(),
+            "ART.example.org".into(),
+            "art.example.org".into(),
+        ])
+        .unwrap();
+        assert_eq!(names, vec!["art.example.org", "gate.example.org"]);
+        assert_eq!(group, "art.example.org,gate.example.org");
+        assert!(group_key(vec![]).is_none());
     }
 }
