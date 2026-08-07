@@ -295,6 +295,50 @@ impl Remote {
         self.request("GET", "/v1/health", None)
     }
 
+    /// One attachment's bytes, by the id the drain named.
+    ///
+    /// The byte-returning sibling of [`Remote::send`], which reads every
+    /// response `to_string` and JSON-parses it and so structurally cannot
+    /// carry a blob. Capped at the size the drained metadata declared plus
+    /// one: the box is a machine we assume is lost, so its Content-Length is
+    /// a claim like any other, and a body running past the declaration is
+    /// refused rather than buffered. The caller verifies the digest; this
+    /// only carries bytes.
+    pub fn fetch_attachment(&self, id: &str, declared_size: u64) -> Result<Vec<u8>> {
+        let url = format!("{}/v1/queue/attachments/{id}", self.gate);
+        let mut response = ureq::get(&url)
+            .header("Authorization", &format!("Bearer {}", self.key))
+            .config()
+            .http_status_as_error(false)
+            .build()
+            .call()
+            .with_context(|| format!("GET {url}"))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            let text = response
+                .body_mut()
+                .read_to_string()
+                .unwrap_or_else(|_| String::new());
+            bail!("{url} answered {status}: {text}");
+        }
+        let mut bytes = Vec::new();
+        let limit = declared_size.saturating_add(1);
+        use std::io::Read;
+        response
+            .body_mut()
+            .as_reader()
+            .take(limit)
+            .read_to_end(&mut bytes)
+            .with_context(|| format!("reading {url}"))?;
+        if bytes.len() as u64 > declared_size {
+            bail!(
+                "{url} sent more than the {declared_size} bytes its own \
+                 metadata declared"
+            );
+        }
+        Ok(bytes)
+    }
+
     fn request(&self, method: &str, path: &str, body: Option<&[u8]>) -> Result<serde_json::Value> {
         self.send(method, path, body, "application/gzip")
     }

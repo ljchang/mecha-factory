@@ -1156,6 +1156,34 @@ fn connect_command(
     Ok(())
 }
 
+/// Bring one record's files home: fetch what is missing, verify every digest
+/// against the drained metadata, and write with the store's own discipline.
+/// A path that already exists is trusted — it was digest-verified when it was
+/// written — so the repair path costs nothing when there is nothing to
+/// repair.
+fn fetch_blobs(
+    remote: &remote::Remote,
+    store: &mecha_factory_publish::requests::RequestStore,
+    record: &mecha_factory_publish::requests::Record,
+) -> Result<()> {
+    for att in &record.attachments {
+        if store.attachment_path(&att.path).exists() {
+            continue;
+        }
+        let bytes = remote.fetch_attachment(&att.id, att.size)?;
+        use sha2::Digest;
+        let digest = format!("sha256:{:x}", sha2::Sha256::digest(&bytes));
+        anyhow::ensure!(
+            digest == att.sha256,
+            "field `{}`: the bytes hash to {digest}, not the {} the box declared",
+            att.field,
+            att.sha256
+        );
+        store.write_attachment(&att.path, &bytes)?;
+    }
+    Ok(())
+}
+
 fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> {
     use mecha_factory_publish::requests::{record_from, RequestStore};
 
@@ -1213,6 +1241,21 @@ fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> 
 
     for row in &rows {
         let record = record_from(row, &now);
+        // Blobs before the record, and both before the ack. The ack destroys
+        // the box's copies of the files along with the row, so the invariant
+        // that carries this loop is: **a record on disk implies its blobs on
+        // disk.** A fetch that fails keeps the whole record off the ack list
+        // and it all comes back next drain. This also repairs the
+        // already-held path — a record written by an older binary, or a blob
+        // someone deleted by hand, is refetched before the seq is
+        // acknowledged again.
+        if let Err(e) = fetch_blobs(&remote, &store, &record) {
+            eprintln!(
+                "failed to fetch the files of seq {}: {e:#}; the record stays on the box",
+                record.seq
+            );
+            continue;
+        }
         match store.write(&record) {
             Ok(true) => {
                 if !record.valid {

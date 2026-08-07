@@ -97,6 +97,37 @@ pub struct Record {
     /// verification and has therefore proved nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<String>,
+    /// The files that arrived with this request — the quarantined sidecar.
+    ///
+    /// The stranger's `filename` lives here and only here: on a validated
+    /// record, `Submission::take_attachments` strips it out of `values`, so
+    /// nothing that reads typed values can pick it up by accident. `path` is
+    /// where the bytes rest, relative to the store root, in a directory named
+    /// by the sequence number alone — every component of it is minted on this
+    /// side, because both the filename and the box's field strings are other
+    /// machines' bytes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<RecordAttachment>,
+}
+
+/// One attached file: the box's measurements, the stranger's claimed name,
+/// and where home put the bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordAttachment {
+    /// The box's blob id — what the drain fetches by. Useless once the bytes
+    /// are local, kept because the already-held repair path refetches by it.
+    pub id: String,
+    /// Which field of the form this answered.
+    pub field: String,
+    /// What the stranger called it. Display data for a human, never a path.
+    pub filename: String,
+    pub size: u64,
+    pub sha256: String,
+    pub content_type: String,
+    /// Where the bytes are, relative to the store root. Filled in by the
+    /// drain once the fetch has been verified; a record on disk implies its
+    /// blobs on disk.
+    pub path: String,
 }
 
 impl Record {
@@ -142,6 +173,11 @@ impl RequestStore {
         for entry in std::fs::read_dir(&self.root)? {
             let name = entry?.file_name();
             let name = name.to_string_lossy();
+            // Records only: the `attachments/` sibling and any temp debris
+            // must not read as stored sequence numbers.
+            if !name.ends_with(".json") {
+                continue;
+            }
             if let Some((seq, _)) = name.split_once('-') {
                 if let Ok(seq) = seq.parse::<i64>() {
                     seqs.push(seq);
@@ -165,6 +201,30 @@ impl RequestStore {
         // Rename over, so a reader never sees half a record.
         std::fs::rename(&temp, &path)?;
         Ok(true)
+    }
+
+    /// The absolute path of an attachment's bytes, from the relative path a
+    /// record carries.
+    pub fn attachment_path(&self, relative: &str) -> PathBuf {
+        self.root.join(relative)
+    }
+
+    /// Write one attachment's verified bytes, atomically, 0700/0600 like
+    /// everything else in this directory. Overwriting is fine — the content
+    /// is digest-verified before this is called, so a refetch writes the
+    /// same bytes, which is what makes the drain's repair path idempotent.
+    pub fn write_attachment(&self, relative: &str, bytes: &[u8]) -> Result<PathBuf> {
+        let path = self.root.join(relative);
+        let parent = path
+            .parent()
+            .context("an attachment path always has a parent")?;
+        std::fs::create_dir_all(parent)?;
+        restrict(parent)?;
+        let temp = path.with_extension("tmp");
+        std::fs::write(&temp, bytes)?;
+        restrict(&temp)?;
+        std::fs::rename(&temp, &path)?;
+        Ok(path)
     }
 
     /// Every record, oldest first.
@@ -249,12 +309,18 @@ pub fn record_from(row: &Value, now: &str) -> Record {
         values: raw.clone(),
         free_text: Vec::new(),
         reply_to: None,
+        attachments: attachments_from(row, seq),
     };
 
     match local_type(&type_id) {
         Ok(Some(request_type)) => match request_type.validate(&raw) {
-            Ok(submission) => {
+            Ok(mut submission) => {
                 record.valid = true;
+                // Strip the stranger's filenames out of the typed values;
+                // they live only in the sidecar from here on. The metas are
+                // discarded — the sidecar was built from the box's ledger,
+                // which carries the same measurements plus the blob id.
+                let _ = submission.take_attachments(&request_type);
                 record.free_text = submission
                     .free_text(&request_type)
                     .into_iter()
@@ -300,6 +366,47 @@ pub fn record_from(row: &Value, now: &str) -> Record {
         }
     }
     record
+}
+
+/// The sidecar entries for one drained row, paths included.
+///
+/// Every path component is minted here: the directory is the sequence number
+/// (an integer we format), and the file is the field name only when it is
+/// plain ASCII — the box is a machine we assume is lost, so its `field`
+/// string gets the same suspicion as an id, with the entry's index as the
+/// fallback rather than an omission. An omitted entry would be a blob the
+/// ack silently destroys.
+fn attachments_from(row: &Value, seq: i64) -> Vec<RecordAttachment> {
+    let Some(list) = row["attachments"].as_array() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (index, item) in list.iter().enumerate() {
+        let content_type = item["content_type"].as_str().unwrap_or_default();
+        let extension = mecha_manifest::FileType::from_mime(content_type)
+            .map(|t| t.extension())
+            .unwrap_or("bin");
+        let field = item["field"].as_str().unwrap_or_default().to_string();
+        let stem = if !field.is_empty()
+            && field
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            field.clone()
+        } else {
+            index.to_string()
+        };
+        out.push(RecordAttachment {
+            id: item["id"].as_str().unwrap_or_default().to_string(),
+            field,
+            filename: item["filename"].as_str().unwrap_or_default().to_string(),
+            size: item["size"].as_u64().unwrap_or(0),
+            sha256: item["sha256"].as_str().unwrap_or_default().to_string(),
+            content_type: content_type.to_string(),
+            path: format!("attachments/{seq:010}/{stem}.{extension}"),
+        });
+    }
+    out
 }
 
 #[cfg(unix)]
@@ -349,6 +456,7 @@ mod tests {
             values: Map::new(),
             free_text: Vec::new(),
             reply_to: None,
+            attachments: Vec::new(),
         };
 
         assert!(store.write(&record).unwrap(), "first write stores it");
@@ -477,5 +585,108 @@ mod tests {
     fn a_type_id_from_the_box_cannot_escape_the_types_directory() {
         assert!(local_type("../../.ssh/id_ed25519").unwrap().is_none());
         assert!(local_type("meeting/../../etc/passwd").unwrap().is_none());
+    }
+
+    /// The sidecar: filenames leave the values, paths are minted here, and a
+    /// hostile field string or content type from the box degrades to an index
+    /// and `.bin` — never to a path component and never to an omission, since
+    /// an omitted entry is a blob the ack silently destroys.
+    #[test]
+    fn attachments_ride_a_sidecar_and_the_filename_leaves_the_values() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let types = home.path().join("factory").join("types");
+        std::fs::create_dir_all(&types).unwrap();
+        std::fs::write(
+            types.join("letterish.toml"),
+            r#"
+id = "letterish"
+version = 1
+title = "A letter"
+
+[[fields]]
+name = "requester_email"
+label = "Your email"
+kind = "email"
+required = true
+
+[[fields]]
+name = "cv"
+label = "Your CV"
+kind = "file"
+accept = ["pdf"]
+required = true
+
+[verification]
+field = "requester_email"
+"#,
+        )
+        .unwrap();
+
+        let digest = format!("sha256:{}", "ab".repeat(32));
+        let row = json!({
+            "seq": 21,
+            "type": "letterish",
+            "created_at": "2026-08-07T00:00:00Z",
+            "payload": format!(
+                r#"{{"requester_email": "ada@example.org",
+                    "cv": {{"filename": "Ada CV.pdf", "size": 13,
+                            "sha256": "{digest}",
+                            "content_type": "application/pdf",
+                            "attachment_id": "blobblob"}}}}"#
+            ),
+            "attachments": [{
+                "id": "blobblob",
+                "field": "cv",
+                "filename": "Ada CV.pdf",
+                "size": 13,
+                "sha256": digest,
+                "content_type": "application/pdf",
+            }],
+        });
+        let record = record_from(&row, "2026-08-07T01:00:00Z");
+        std::env::remove_var("MECHA_HOME");
+
+        assert!(record.valid, "{:?}", record.invalid_reason);
+        assert_eq!(record.attachments.len(), 1);
+        let att = &record.attachments[0];
+        assert_eq!(att.filename, "Ada CV.pdf");
+        assert_eq!(att.path, "attachments/0000000021/cv.pdf");
+
+        // The stranger's filename is in the sidecar and nowhere else; the
+        // measurements stay in the typed value.
+        let cv = record.values.get("cv").unwrap();
+        assert!(cv.get("filename").is_none(), "{cv}");
+        assert_eq!(cv["sha256"], json!(format!("sha256:{}", "ab".repeat(32))));
+        // A file field is not prose: the sidecar quarantines the filename,
+        // not the field.
+        assert!(record.free_text.iter().all(|f| f != "cv"));
+
+        // Hostile strings from the box degrade safely.
+        let hostile = json!({
+            "seq": 7, "type": "x", "created_at": "t", "payload": "{}",
+            "attachments": [{
+                "id": "z", "field": "../escape", "filename": "a/b",
+                "size": 1, "sha256": "sha256:00", "content_type": "text/html",
+            }],
+        });
+        let record = record_from(&hostile, "t");
+        assert_eq!(record.attachments[0].path, "attachments/0000000007/0.bin");
+    }
+
+    /// The attachments directory beside the records must never read as a
+    /// stored sequence number, or a drain would skip a real record.
+    #[test]
+    fn known_counts_records_and_not_the_attachment_directory() {
+        let root = scratch("known-guard");
+        let store = RequestStore::open(&root).unwrap();
+        store
+            .write_attachment("attachments/0000000031/cv.pdf", b"%PDF-tiny")
+            .unwrap();
+        // Debris that once fooled a lossy reader.
+        std::fs::create_dir_all(root.join("0000000099-lookslike")).unwrap();
+        assert_eq!(store.known().unwrap(), Vec::<i64>::new());
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
