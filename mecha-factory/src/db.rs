@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 4;
+const SCHEMA: i64 = 5;
 
 #[derive(Clone)]
 pub struct Db {
@@ -131,6 +131,19 @@ pub enum Claim {
     /// Claimed, revoked, expired, or never real — one variant for all four,
     /// for the same reason the page is one page.
     InviteGone,
+}
+
+/// What became of a machine's attempt to redeem a pairing code.
+///
+/// Two variants where [`Claim`] has three, and that is the design: a wrong
+/// handle assertion, an expired code, a spent code and a code that never
+/// existed are all the same refusal, because telling a wrong assertion apart
+/// from a dead code would let whoever holds a stolen code probe for the
+/// handle it belongs to.
+#[derive(Debug)]
+pub enum Paired {
+    Redeemed(UserRow),
+    Refused,
 }
 
 /// What a key may do — and the scope is read from **this row**, never from the
@@ -518,6 +531,122 @@ impl Db {
                 Ok(Claim::Created(user))
             }
         }
+    }
+
+    // ---- pairings -------------------------------------------------------
+
+    /// Mint the right to connect one machine. Returns the pairing id.
+    pub fn pairing_create(
+        &self,
+        user_id: &str,
+        code_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<String> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO pairings (id, user_id, code_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, user_id, code_hash, now, expires_at],
+            )?;
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
+    /// Spend a pairing code on two keys — if everything about it holds.
+    ///
+    /// The caller prepared the key rows first (hashing is compute, not
+    /// ledger), and this is one transaction: the code is live, the user is
+    /// active, and the **asserted handle matches** — the assertion is checked
+    /// here, on the server, so no client can skip it and a `y` piped into a
+    /// prompt has nothing to defeat. On any refusal nothing is written and
+    /// nothing is revealed, including whether the code exists: a wrong
+    /// assertion must not become the probe that confirms a stolen code is
+    /// real.
+    pub fn pairing_redeem(
+        &self,
+        code_hash: &str,
+        asserted_handle: &str,
+        publish: &KeyRow,
+        drain: &KeyRow,
+        now: &str,
+    ) -> Result<Paired> {
+        let redeemed = self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let pairing = tx
+                .query_row(
+                    "SELECT id, user_id, expires_at, redeemed_at FROM pairings \
+                     WHERE code_hash = ?1",
+                    params![code_hash],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((pairing_id, user_id, expires_at, redeemed_at)) = pairing else {
+                return Ok(None);
+            };
+            if redeemed_at.is_some() || expires_at.as_str() <= now {
+                return Ok(None);
+            }
+            let user = tx
+                .query_row(
+                    "SELECT id, handle, email, status, created_at, quota_bytes, send_budget \
+                     FROM users WHERE id = ?1",
+                    params![user_id],
+                    user_row,
+                )
+                .optional()?;
+            let Some(user) = user.filter(|u| u.active() && u.handle == asserted_handle) else {
+                return Ok(None);
+            };
+
+            for row in [publish, drain] {
+                tx.execute(
+                    "INSERT INTO keys (id, user_id, scope, hash, label, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        row.id,
+                        user.id,
+                        row.scope.as_str(),
+                        row.hash,
+                        row.label,
+                        row.created_at
+                    ],
+                )?;
+            }
+            tx.execute(
+                "UPDATE pairings SET redeemed_at = ?2, publish_key_id = ?3, \
+                 drain_key_id = ?4 WHERE id = ?1",
+                params![pairing_id, now, publish.id, drain.id],
+            )?;
+            tx.commit()?;
+            Ok(Some(user))
+        })?;
+        Ok(match redeemed {
+            Some(user) => Paired::Redeemed(user),
+            None => Paired::Refused,
+        })
+    }
+
+    /// Expired, unredeemed pairing codes: gone. What `sweep` calls — a spent
+    /// code is a record (it says which keys a machine connected with), where
+    /// an expired one is machinery that never did anything.
+    pub fn expire_pairings(&self, now: &str) -> Result<usize> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "DELETE FROM pairings WHERE redeemed_at IS NULL AND expires_at <= ?1",
+                params![now],
+            )?;
+            Ok(n)
+        })
     }
 
     // ---- keys -----------------------------------------------------------
@@ -1302,6 +1431,23 @@ fn migrate(conn: &Connection) -> Result<()> {
             claimed_by  TEXT,
             revoked_at  TEXT
         );
+
+        -- The right to connect one machine: minted by a page or the CLI,
+        -- spent by `factory-publish connect`, which is when the keys it
+        -- names come to exist. Short-lived where an invite is long-lived,
+        -- because the person was just shown the command. Redeemed rows are
+        -- kept: they are where a pairing's keys are traced to the moment
+        -- somebody asks what this machine is.
+        CREATE TABLE IF NOT EXISTS pairings (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL,
+            code_hash       TEXT NOT NULL UNIQUE,
+            created_at      TEXT NOT NULL,
+            expires_at      TEXT NOT NULL,
+            redeemed_at     TEXT,
+            publish_key_id  TEXT,
+            drain_key_id    TEXT
+        );
         ",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA)?;
@@ -1358,7 +1504,9 @@ mod tests {
             // Wind it back to what the box was running before invites, minus
             // the table this migration adds.
             db.with(|conn| {
-                conn.execute_batch("DROP TABLE invites; PRAGMA user_version = 3;")?;
+                conn.execute_batch(
+                    "DROP TABLE invites; DROP TABLE pairings; PRAGMA user_version = 3;",
+                )?;
                 Ok(())
             })
             .unwrap();

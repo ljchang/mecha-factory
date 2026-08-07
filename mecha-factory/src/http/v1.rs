@@ -664,3 +664,95 @@ pub async fn ack(
         }
     }
 }
+
+/// What `factory-publish connect` sends.
+#[derive(serde::Deserialize)]
+pub struct PairRequest {
+    pub code: String,
+    /// The handle the person running `connect` expects this machine to
+    /// publish for. **Checked by the server**, which is what makes the
+    /// reversed-device-code defence structural: no client can skip the
+    /// assertion, because there is no redemption without it.
+    pub handle: String,
+    /// Free text for `key list` — the client sends its hostname.
+    #[serde(default)]
+    pub label: String,
+}
+
+/// `POST /v1/pair` — spend a pairing code, receive this machine's keys.
+///
+/// Unauthenticated: the code is the credential, single-use and minutes-lived.
+/// Every refusal is the same refusal. A wrong handle assertion in particular
+/// spends nothing and reveals nothing — it must not be the probe that tells
+/// whoever holds a forwarded code which account it belongs to.
+pub async fn pair(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let request: PairRequest = match serde_json::from_slice(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            return Failure::json(StatusCode::BAD_REQUEST, format!("body: {e}")).into_response()
+        }
+    };
+    let asserted = request.handle.trim().to_ascii_lowercase();
+    // The label rides into `key list` output, so it is bounded and stripped
+    // of anything that is not printable — it is the one free-text field on
+    // this endpoint.
+    let label: String = request
+        .label
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(64)
+        .collect();
+
+    // Hashing before the transaction: compute outside, decide inside.
+    let prepared = keys::prepare("", Scope::Publish, &label)
+        .and_then(|publish| Ok((publish, keys::prepare("", Scope::Drain, &label)?)));
+    let (publish, drain) = match prepared {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!(error = %e, "preparing keys for a pairing");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+
+    let hash = crate::intake::hash_token(request.code.trim());
+    match app.db.pairing_redeem(
+        &hash,
+        &asserted,
+        &publish.row,
+        &drain.row,
+        &crate::db::now(),
+    ) {
+        Ok(crate::db::Paired::Redeemed(user)) => {
+            tracing::info!(handle = %user.handle, %label, "a machine paired");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "handle": user.handle,
+                    "publish_key": publish.token,
+                    "publish_key_id": publish.row.id,
+                    "drain_key": drain.token,
+                    "drain_key_id": drain.row.id,
+                    "artifacts_url": app.config.user_url(Role::Artifacts, &user.handle),
+                    "compute_url": app.config.user_url(Role::Compute, &user.handle),
+                })),
+            )
+                .into_response()
+        }
+        Ok(crate::db::Paired::Refused) => Failure::json(
+            StatusCode::NOT_FOUND,
+            "that code is not valid for that handle",
+        )
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "redeeming a pairing code");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}

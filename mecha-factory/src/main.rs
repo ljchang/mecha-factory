@@ -66,6 +66,11 @@ enum Command {
         #[command(subcommand)]
         action: InviteAction,
     },
+    /// The right to connect one machine, as a command to run on it.
+    Pair {
+        #[command(subcommand)]
+        action: PairAction,
+    },
     /// Serve the three origins.
     Serve {
         /// Three loopback ports instead of three names, plain HTTP, and the
@@ -162,6 +167,20 @@ enum QueueAction {
 }
 
 #[derive(Subcommand)]
+enum PairAction {
+    /// Mint a pairing code and print the connect command.
+    ///
+    /// The signup welcome page mints these itself; this verb is for later —
+    /// a second machine, a reinstalled laptop — until the tenant surface
+    /// exists to mint them from a browser.
+    Create {
+        /// Whose machine is connecting.
+        #[arg(long)]
+        handle: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum InviteAction {
     /// Mint an invite and email its link.
     ///
@@ -226,6 +245,7 @@ fn main() -> Result<()> {
         } => withhold(&cli, handle, id, *version, reason.as_deref(), *undo),
         Command::Key { action } => key(&cli, action),
         Command::Invite { action } => invite(&cli, action),
+        Command::Pair { action } => pair(&cli, action),
         Command::Serve { dev, port } => serve(&cli, *dev, *port),
         Command::Queue { action } => queue(&cli, action),
         Command::Sweep => sweep(&cli),
@@ -428,6 +448,29 @@ fn invite(cli: &Cli, action: &InviteAction) -> Result<()> {
     }
 }
 
+fn pair(cli: &Cli, action: &PairAction) -> Result<()> {
+    match action {
+        PairAction::Create { handle } => {
+            // Like `invite create`: the printed command carries the gate's
+            // origin, so this verb needs the configuration.
+            let config = load_config(cli)?;
+            let db = mecha_factory::db::Db::open(&config.db_path())?;
+            let user = find_user(&db, handle)?;
+            let code = mecha_factory::keys::mint_pairing(&db, &user.id)?;
+            println!(
+                "factory-publish connect --gate {} --handle {} {code}",
+                config.base_url(mecha_factory::config::Role::Gate),
+                user.handle
+            );
+            eprintln!(
+                "run that on the machine being connected. The code works once and                  expires in {} minutes.",
+                mecha_factory::keys::PAIR_EXPIRY_MINUTES
+            );
+            Ok(())
+        }
+    }
+}
+
 fn key(cli: &Cli, action: &KeyAction) -> Result<()> {
     let db = open_db(cli)?;
     match action {
@@ -582,9 +625,11 @@ fn sweep(cli: &Cli) -> Result<()> {
     let now = db::now();
     let unverified = db.expire_unverified(&now)?;
     let retained = db.expire_retained(&now)?;
+    let pairings = db.expire_pairings(&now)?;
     println!("{unverified} unverified submission(s) past their link's expiry, removed");
     println!("{retained} record(s) past their retention window, removed");
-    if unverified + retained == 0 {
+    println!("{pairings} expired pairing code(s) nobody redeemed, removed");
+    if unverified + retained + pairings == 0 {
         println!("(nothing was due)");
     }
     Ok(())

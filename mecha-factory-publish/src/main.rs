@@ -184,6 +184,32 @@ enum Command {
     Type(TypeAction),
     /// Take what the box has verified and not yet handed over.
     ///
+    /// Pair this machine: spend a pairing code, install its keys.
+    ///
+    /// A CLI and deliberately not a tool: pairing decides what an agent on
+    /// this machine may do, so it is not something an agent should do to
+    /// itself as a side effect of conversation.
+    Connect {
+        /// The code from the signup page or `factory pair create`.
+        code: String,
+        /// `https://gate.example.org`. Falls back to `$FACTORY_GATE`.
+        #[arg(long)]
+        gate: Option<String>,
+        /// The handle this machine should publish for. Required when stdin
+        /// is not a terminal; prompted for otherwise. The server refuses a
+        /// mismatch without spending the code — typing it is the whole
+        /// confirmation.
+        #[arg(long)]
+        handle: Option<String>,
+        /// What the box's `key list` shows for these keys. Defaults to this
+        /// machine's hostname.
+        #[arg(long)]
+        label: Option<String>,
+        /// Pair afresh over keys already installed here. The old keys stay
+        /// valid on the box until revoked there.
+        #[arg(long)]
+        replace: bool,
+    },
     /// A CLI and deliberately not a tool: the common case is "nothing new",
     /// and it has to cost zero tokens. A trigger runs this on a schedule and
     /// only spawns an agent when something actually arrived.
@@ -394,6 +420,14 @@ fn main() -> Result<()> {
         }
 
         Command::Type(action) => type_command(action)?,
+
+        Command::Connect {
+            code,
+            gate,
+            handle,
+            label,
+            replace,
+        } => connect_command(code, gate, handle, label, replace)?,
 
         Command::Drain { out, dry_run, json } => drain_command(out, dry_run, json)?,
 
@@ -859,6 +893,62 @@ fn form_url(gate: &str, type_id: &str) -> String {
 /// in `requests.rs`: acknowledging is what deletes, so it happens after the
 /// bytes are on disk here. A record whose acknowledgement is lost comes back on
 /// the next drain and is recognised by its sequence number.
+fn connect_command(
+    code: String,
+    gate: Option<String>,
+    handle: Option<String>,
+    label: Option<String>,
+    replace: bool,
+) -> Result<()> {
+    let gate = match gate.or_else(|| std::env::var("FACTORY_GATE").ok().filter(|g| !g.is_empty())) {
+        Some(gate) => gate,
+        None => bail!("no gate named — pass --gate https://gate.example.org"),
+    };
+
+    // The assertion. Interactive, the person types the handle they expect —
+    // that *is* the confirmation, and there is no y/N to wave through.
+    // Non-interactive, --handle carries it, so an agent running this on
+    // somebody's instruction states whose machine this is becoming. Either
+    // way the server checks it, and a mismatch spends nothing.
+    let handle = match handle {
+        Some(handle) => handle,
+        None => {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                bail!(
+                    "no terminal to ask on — pass --handle <yours>. The handle \
+                     is checked by the server, and a code that pairs somewhere \
+                     you did not assert is refused."
+                );
+            }
+            eprint!("Type the handle this machine should publish for: ");
+            let mut line = String::new();
+            std::io::stdin().read_line(&mut line)?;
+            let typed = line.trim().to_string();
+            if typed.is_empty() {
+                bail!("nothing typed, nothing paired");
+            }
+            typed
+        }
+    };
+
+    let label = label.unwrap_or_else(|| {
+        std::fs::read_to_string("/etc/hostname")
+            .map(|h| h.trim().to_string())
+            .unwrap_or_default()
+    });
+
+    let summary = remote::connect(&remote::Connect {
+        gate: &gate,
+        code: &code,
+        handle: &handle,
+        label: &label,
+        replace,
+    })?;
+    println!("{summary}");
+    Ok(())
+}
+
 fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> {
     use mecha_factory_publish::requests::{record_from, RequestStore};
 

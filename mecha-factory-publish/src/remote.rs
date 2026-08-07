@@ -569,3 +569,323 @@ mod tests {
         std::env::remove_var("MECHA_HOME");
     }
 }
+
+/// What `connect` was told, resolved by the CLI before anything travels.
+pub struct Connect<'a> {
+    /// `https://gate.example.org`.
+    pub gate: &'a str,
+    /// The pairing code, from the welcome page or `factory pair create`.
+    pub code: &'a str,
+    /// The handle the person expects this machine to publish for. **Sent to
+    /// the server, which refuses a mismatch without spending the code** — the
+    /// assertion is the defence against the reversed device-code phish
+    /// (running a code Mallory sent means asserting `mallory`, which is
+    /// exactly what the person typing their own handle will not do), and it
+    /// lives in the protocol rather than in a prompt so no client, human or
+    /// agent, can skip it.
+    pub handle: &'a str,
+    /// Free text for the box's `key list`; the CLI defaults it to the
+    /// machine's hostname.
+    pub label: &'a str,
+    /// Overwrite keys already installed here. The old keys stay valid on the
+    /// box until revoked, and the summary says so.
+    pub replace: bool,
+}
+
+/// Pair this machine: spend the code, install the keys, and say what
+/// happened. Returns the summary the CLI prints.
+pub fn connect(args: &Connect) -> Result<String> {
+    let gate = args.gate.trim_end_matches('/');
+    if !gate.starts_with("https://") && !gate.starts_with("http://127.0.0.1") {
+        bail!("the factory gate `{gate}` is not https. The keys travel on this connection.");
+    }
+    let handle = args.handle.trim().to_ascii_lowercase();
+    if handle.is_empty() {
+        bail!("an empty handle asserts nothing");
+    }
+
+    let dir = Remote::dir()?;
+    let publish_path = dir.join(Scope::Publish.file());
+    let drain_path = dir.join(Scope::Drain.file());
+    if !args.replace {
+        for path in [&publish_path, &drain_path] {
+            if path.exists() {
+                bail!(
+                    "{} already exists — this machine is connected. Pass \
+                     `--replace` to pair it afresh; the keys it holds now stay \
+                     valid on the box until revoked there.",
+                    path.display()
+                );
+            }
+        }
+    }
+
+    // The one unauthenticated call this client makes: the code is the
+    // credential. The server's refusal is a single message for every kind of
+    // dead or mismatched code, and it is surfaced as-is.
+    let url = format!("{gate}/v1/pair");
+    let payload = serde_json::json!({
+        "code": args.code.trim(),
+        "handle": handle,
+        "label": args.label,
+    });
+    let mut response = ureq::post(&url)
+        .header("Content-Type", "application/json")
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .send(payload.to_string().as_bytes())
+        .with_context(|| format!("POST {url}"))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .unwrap_or_else(|_| String::new());
+    let body: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or(serde_json::json!({ "error": text }));
+    if !(200..300).contains(&status) {
+        bail!(
+            "{url} answered {status}: {}",
+            body["error"].as_str().unwrap_or(&text)
+        );
+    }
+
+    let granted = body["handle"].as_str().unwrap_or_default();
+    if granted != handle {
+        // The server enforces the assertion, so this firing means the far end
+        // is not the protocol this client speaks — refuse rather than install
+        // keys for an account nobody asserted.
+        bail!("{url} paired `{granted}` where `{handle}` was asserted — keys not installed");
+    }
+    let publish_key = body["publish_key"].as_str().unwrap_or_default();
+    let drain_key = body["drain_key"].as_str().unwrap_or_default();
+    if publish_key.is_empty() || drain_key.is_empty() {
+        bail!("{url} answered without keys — nothing was installed");
+    }
+
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    write_key(&publish_path, publish_key)?;
+    write_key(&drain_path, drain_key)?;
+
+    // The gate is remembered beside the keys, so the next `publish` needs no
+    // environment. An existing config naming a *different* gate is refused
+    // rather than silently rewritten: keys for one deployment beside a config
+    // pointing at another is a machine that publishes somewhere surprising.
+    let config_path = dir.join("config.toml");
+    match std::fs::read_to_string(&config_path) {
+        Ok(text) => {
+            let existing: Option<Config> = toml::from_str(&text).ok();
+            match existing {
+                Some(config) if config.gate.trim_end_matches('/') == gate => {}
+                _ if args.replace => std::fs::write(&config_path, format!("gate = \"{gate}\"\n"))?,
+                _ => bail!(
+                    "{} names a different gate — re-run with `--replace` if \
+                     this machine is moving deployments",
+                    config_path.display()
+                ),
+            }
+        }
+        Err(_) => std::fs::write(&config_path, format!("gate = \"{gate}\"\n"))?,
+    }
+
+    let mut summary = format!(
+        "This machine now publishes for `{handle}`.\n\
+         Artifacts: {}\n\
+         Publish key {} and drain key {} installed in {} — each machine pairs \
+         separately, and either key can be revoked on the box without touching \
+         the others.",
+        body["artifacts_url"].as_str().unwrap_or_default(),
+        body["publish_key_id"].as_str().unwrap_or("?"),
+        body["drain_key_id"].as_str().unwrap_or("?"),
+        dir.display(),
+    );
+    // The review's standing constraint: a paired agent machine holds publish
+    // and drain, never release. One already here is worth a loud line, not a
+    // refusal — the person may be pairing the machine they release from.
+    if dir.join(Scope::Release.file()).exists() {
+        summary.push_str(
+            "\nwarning: release.key is present on this machine. An agent here \
+             can make artifacts public with no review — keep release keys on \
+             the machine you review from, not the one that publishes.",
+        );
+    }
+    Ok(summary)
+}
+
+/// A credential hits the disk at 0600 from its first byte — written through
+/// a file created with the mode already set, never chmodded after.
+fn write_key(path: &Path, token: &str) -> Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(path)
+        .with_context(|| format!("writing {}", path.display()))?;
+    // An existing file keeps its old mode, so pairing over a leaky one is
+    // tightened rather than trusted.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    writeln!(file, "{token}")?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod connect_tests {
+    use super::*;
+
+    /// A one-shot gate: answers the next request with the given status and
+    /// JSON, then goes away. `connect` needs nothing more from the far end,
+    /// and a stub keeps the test about *this* side — the server's half is
+    /// tested in the server's own suite.
+    fn one_shot_gate(status: u16, body: serde_json::Value) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let _ = stream.read(&mut buffer);
+            let text = body.to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                text.len()
+            );
+        });
+        format!("http://{address}")
+    }
+
+    fn paired_body() -> serde_json::Value {
+        serde_json::json!({
+            "handle": "alice",
+            "publish_key": "mk_pub_id.secret",
+            "publish_key_id": "pubid",
+            "drain_key": "mk_drn_id.secret",
+            "drain_key_id": "drnid",
+            "artifacts_url": "https://alice.art.example.org",
+        })
+    }
+
+    /// The install: keys land at 0600, the gate is remembered, and the
+    /// summary names the handle the machine now publishes for.
+    #[test]
+    fn connect_installs_keys_at_0600_and_remembers_the_gate() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let gate = one_shot_gate(200, paired_body());
+
+        let summary = connect(&Connect {
+            gate: &gate,
+            code: "code",
+            handle: "Alice", // case is the client's to normalise
+            label: "rig",
+            replace: false,
+        })
+        .unwrap();
+        std::env::remove_var("MECHA_HOME");
+
+        assert!(summary.contains("`alice`"), "{summary}");
+        let dir = home.path().join("factory");
+        let key = std::fs::read_to_string(dir.join("publish.key")).unwrap();
+        assert_eq!(key.trim(), "mk_pub_id.secret");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for file in ["publish.key", "drain.key"] {
+                let mode = std::fs::metadata(dir.join(file))
+                    .unwrap()
+                    .permissions()
+                    .mode();
+                assert_eq!(mode & 0o777, 0o600, "{file} is {mode:o}");
+            }
+        }
+        let config = std::fs::read_to_string(dir.join("config.toml")).unwrap();
+        assert!(config.contains(&gate), "{config}");
+    }
+
+    /// A refusal installs nothing, and the server's one message is surfaced
+    /// as-is — it is the actionable half of the error.
+    #[test]
+    fn a_refused_code_installs_nothing() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let gate = one_shot_gate(
+            404,
+            serde_json::json!({"error": "that code is not valid for that handle"}),
+        );
+        let err = connect(&Connect {
+            gate: &gate,
+            code: "code",
+            handle: "alice",
+            label: "",
+            replace: false,
+        })
+        .unwrap_err()
+        .to_string();
+        std::env::remove_var("MECHA_HOME");
+        assert!(err.contains("not valid for that handle"), "{err}");
+        assert!(!home.path().join("factory").join("publish.key").exists());
+    }
+
+    /// A server that pairs a handle nobody asserted is not this protocol:
+    /// keys are refused rather than installed for a surprise account.
+    #[test]
+    fn keys_for_an_unasserted_handle_are_refused() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let mut body = paired_body();
+        body["handle"] = serde_json::json!("mallory");
+        let gate = one_shot_gate(200, body);
+        let err = connect(&Connect {
+            gate: &gate,
+            code: "code",
+            handle: "alice",
+            label: "",
+            replace: false,
+        })
+        .unwrap_err()
+        .to_string();
+        std::env::remove_var("MECHA_HOME");
+        assert!(err.contains("`mallory`"), "{err}");
+        assert!(!home.path().join("factory").join("publish.key").exists());
+    }
+
+    /// A machine that is already connected is told so before any network
+    /// happens, and `--replace` is the deliberate way over it.
+    #[test]
+    fn existing_keys_refuse_a_second_pairing_without_replace() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let dir = home.path().join("factory");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("publish.key"), "mk_pub_old.key\n").unwrap();
+
+        // A gate that would refuse the connection — reaching it would fail
+        // the test, which is the point: the refusal happens first.
+        let err = connect(&Connect {
+            gate: "http://127.0.0.1:1",
+            code: "code",
+            handle: "alice",
+            label: "",
+            replace: false,
+        })
+        .unwrap_err()
+        .to_string();
+        std::env::remove_var("MECHA_HOME");
+        assert!(err.contains("already exists"), "{err}");
+        assert!(err.contains("--replace"), "{err}");
+    }
+}

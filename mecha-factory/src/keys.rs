@@ -102,6 +102,17 @@ pub fn random_id() -> String {
 
 /// Mint a key for a user, store its hash, and hand back the token.
 pub fn mint(db: &Db, user_id: &str, scope: Scope, label: &str) -> Result<Minted> {
+    let minted = prepare(user_id, scope, label)?;
+    db.key_insert(&minted.row)?;
+    Ok(minted)
+}
+
+/// Everything `mint` does except the write: the token, and the row that would
+/// make it live. Pure, so a caller can hash first and decide later — pairing
+/// redemption inserts the rows inside the same transaction that spends the
+/// code, and a redemption that is refused discards tokens that were never
+/// stored anywhere.
+pub fn prepare(user_id: &str, scope: Scope, label: &str) -> Result<Minted> {
     let id = hex(&random::<8>()?);
     let secret = hex(&random::<32>()?);
     let salt = SaltString::encode_b64(&random::<16>()?)
@@ -120,12 +131,18 @@ pub fn mint(db: &Db, user_id: &str, scope: Scope, label: &str) -> Result<Minted>
         created_at: crate::db::now(),
         revoked_at: None,
     };
-    db.key_insert(&row)?;
     Ok(Minted {
         token: format!("{}{id}.{secret}", scope.prefix()),
         row,
     })
 }
+
+/// How long a pairing code waits for `factory-publish connect`.
+///
+/// Minutes, not days: unlike an invite it is not waiting in an inbox — the
+/// person who was just shown the command is walking to a terminal. Short is
+/// what bounds the work an attacker can do against a live code.
+pub const PAIR_EXPIRY_MINUTES: i64 = 15;
 
 /// Split a presented token into its lookup id and its secret.
 ///
@@ -239,6 +256,25 @@ pub fn read_key_file(path: &std::path::Path) -> Result<String> {
         }
     }
     Ok(token)
+}
+
+/// A fresh pairing code for a user, returning the token the connect command
+/// carries.
+///
+/// One definition shared by the signup welcome page and `factory pair
+/// create`, so the two ways of getting a code cannot drift on expiry or
+/// entropy.
+pub fn mint_pairing(db: &Db, user_id: &str) -> Result<String> {
+    let code = crate::intake::mint_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::minutes(PAIR_EXPIRY_MINUTES))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    db.pairing_create(
+        user_id,
+        &crate::intake::hash_token(&code),
+        &crate::db::now(),
+        &expires,
+    )?;
+    Ok(code)
 }
 
 #[cfg(test)]

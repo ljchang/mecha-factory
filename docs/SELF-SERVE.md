@@ -467,8 +467,21 @@ zone triggers neither.
    invite claimable. The schema migration this needed (v3 → v4) established
    the additive-migration rule: the box is live, so "delete the database"
    stopped being a printable instruction.
-4. **Pairing**: the code, `factory-publish connect`, and the confirmation that
-   names the handle — typed back, not answered `y`, per the review above.
+4. ~~**Pairing**~~ *Built 2026-08-07* — the signup welcome page (and
+   `factory pair create`, until the tenant surface exists) mints a
+   single-use, 15-minute code; `factory-publish connect --gate … --handle …
+   <code>` spends it at `POST /v1/pair` and installs this machine's own
+   publish and drain keys at 0600, remembering the gate beside them. The
+   review's constraint became the protocol: **the asserted handle is checked
+   by the server**, a mismatch spends nothing and answers exactly what a
+   nonexistent code answers, so no client can skip the confirmation and a
+   stolen code cannot be probed for whose it is. Interactively the person
+   types the handle; non-TTY requires `--handle`. Each machine pairs
+   separately and its keys revoke separately — same-`$HOME` agents share a
+   connection (separate keys there would be separable in the ledger, not in
+   security), and an agent wanting real isolation gets its own `MECHA_HOME`
+   and pairs as its own machine. `connect` warns when it finds a release key
+   on the machine, and never installs one.
 5. **The tenant surface**: artifacts owned, make public, connected machines,
    `factory-publish disconnect`.
 6. **The operator surface**, which is the last thing still living on an SSH

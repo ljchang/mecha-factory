@@ -155,6 +155,35 @@ pub async fn submit(
             tracing::info!(handle = %user.handle, "handle claimed from an invite");
             let art = app.config.user_url(Role::Artifacts, &user.handle);
             let compute = app.config.user_url(Role::Compute, &user.handle);
+
+            // The one moment we know a person is at a browser having just
+            // proved themselves is the moment to hand them the pairing
+            // command — signup that ends with "now find the operator" would
+            // put the SSH session right back in the flow. Failure to mint is
+            // a warning, not a dead signup: the account exists either way,
+            // and `factory pair create` can mint another code any time.
+            let pairing = crate::keys::mint_pairing(&app.db, &user.id)
+                .map_err(|e| tracing::warn!(error = %e, "minting a pairing code at signup"))
+                .ok();
+            let connect = match &pairing {
+                Some(code) => format!(
+                    "<h2>Connect your machine</h2>\
+                     <p>On the machine that will publish for you, run:</p>\
+                     <pre><code>factory-publish connect --gate {gate} \
+--handle {handle} {code}</code></pre>\
+                     <p>The code works once and expires in \
+                     {expiry}&nbsp;minutes. It installs this machine's own \
+                     keys — pair each machine separately, and any of them \
+                     can be revoked on its own.</p>",
+                    gate = mecha_manifest::escape_text(&app.config.base_url(Role::Gate)),
+                    handle = mecha_manifest::escape_text(&user.handle),
+                    code = mecha_manifest::escape_text(code),
+                    expiry = crate::keys::PAIR_EXPIRY_MINUTES,
+                ),
+                None => "<p>Connecting a machine needs a pairing code; ask \
+                         the operator for one.</p>"
+                    .to_string(),
+            };
             let body = format!(
                 "<h1>You are <code>{handle}</code></h1>\
                  <p>Your pages will live at \
@@ -162,9 +191,7 @@ pub async fn submit(
                  <a href=\"{compute}\">{compute}</a>.</p>\
                  <p>A certificate for those names is being ordered now — they \
                  start answering within a minute or two.</p>\
-                 <p>Next, connect the machine that will publish for you. That \
-                 flow is on its way; today it is a key the operator mints \
-                 for you.</p>",
+                 {connect}",
                 handle = mecha_manifest::escape_text(&user.handle),
                 art = mecha_manifest::escape_text(&art),
                 compute = mecha_manifest::escape_text(&compute),
