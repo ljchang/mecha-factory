@@ -1084,6 +1084,12 @@ header.site > nav a:hover { color: var(--accent); text-decoration: underline; }
   border-color: var(--line);
 }
 
+/* The framed artifact viewer: the site header above, the bundle below,
+   nothing scrolling but the frame itself. */
+body.viewer { display: flex; flex-direction: column; height: 100vh; margin: 0; }
+body.viewer iframe.artifact { border: 0; flex: 1; width: 100%; background: var(--ground); }
+.account-menu .menu nav strong { display: block; padding: 0.25rem 0; font-size: 0.875rem; }
+
 /* Tables — the account page's artifacts and machines. */
 table {
   width: 100%;

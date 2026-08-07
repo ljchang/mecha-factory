@@ -168,60 +168,134 @@ pub async fn viewer(
     if !versions.contains(&version) {
         return missing();
     }
-    let mut switcher = String::new();
+    // The version dropdown: the same details-menu the account page uses,
+    // holding every version with the one on screen and the live one marked.
+    let mut version_links = String::new();
     for v in &versions {
+        let marks = match (*v == version, *v == live) {
+            (true, true) => " — viewing, live",
+            (true, false) => " — viewing",
+            (false, true) => " — live",
+            (false, false) => "",
+        };
         if *v == version {
-            switcher.push_str(&format!("<strong>v{v}</strong> "));
+            version_links.push_str(&format!("<strong>v{v}{marks}</strong>"));
         } else {
-            switcher.push_str(&format!("<a href=\"/view/{id}/{v}\">v{v}</a> ", id = escape(&id)));
+            version_links.push_str(&format!(
+                "<a href=\"/view/{id}/{v}\">v{v}{marks}</a>",
+                id = escape(&id)
+            ));
         }
     }
-    let live_note = if version == live {
-        " (what the share URL shows)"
-    } else {
-        ""
-    };
+    let gate = app.config.base_url(crate::config::Role::Gate);
     let body = format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
          <title>{id} — v{version}</title>\n\
-         <style>\n\
-         body {{ margin: 0; display: flex; flex-direction: column; height: 100vh; \
-                 font-family: system-ui, sans-serif; }}\n\
-         header {{ display: flex; gap: 1rem; align-items: baseline; \
-                   padding: .625rem 1.25rem; border-bottom: 1px solid #ccc; \
-                   font-size: .875rem; }}\n\
-         header .grow {{ flex: 1; }}\n\
-         iframe {{ border: 0; flex: 1; width: 100%; }}\n\
-         </style></head>\n\
-         <body><header>\
-         <strong><code>{id}</code></strong>\
-         <span>{switcher}{live_note}</span>\
-         <span class=\"grow\"></span>\
-         <a href=\"/b/{id}/v/{version}/\">bare</a>\
-         <a href=\"/b/{id}/\">share URL</a>\
-         </header>\n\
-         <iframe src=\"/b/{id}/v/{version}/\" title=\"{id} v{version}\"></iframe>\
+         {favicon}\n\
+         <link rel=\"stylesheet\" href=\"/view/form.css\">\
+         <script src=\"/view/menu.js\" defer></script></head>\n\
+         <body class=\"viewer\">\
+         <header class=\"site\">\
+         <a class=\"mark\" href=\"{gate}/\" aria-label=\"mecha\">{logo}</a>\
+         <div class=\"site-right\">\
+         <details class=\"account-menu\">\
+         <summary>v{version} ▾</summary>\
+         <div class=\"menu\">\
+         <p><code>{id}</code> — every version is immutable; the share URL \
+         follows the live one.</p>\
+         <nav>{version_links}\
+         <a href=\"/b/{id}/v/{version}/\">bare page</a>\
+         <a href=\"/b/{id}/\">share URL</a></nav>\
+         </div></details>\
+         <nav><a href=\"{gate}/account\">Your page</a></nav>\
+         </div></header>\n\
+         <iframe class=\"artifact\" src=\"/b/{id}/v/{version}/\" \
+         title=\"{id} v{version}\"></iframe>\
          </body></html>\n",
         id = escape(&id),
+        favicon = mecha_manifest::FAVICON_LINK,
+        logo = mecha_manifest::LOGO_MONO_SVG,
     );
     (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
-            // The viewer's own policy: frame this origin, style itself, load
-            // nothing else. Set here so the guard's class default does not
-            // apply — the viewer is chrome, not a bundle.
+            // The viewer's own policy: frame and style from this origin,
+            // nothing else, and unframeable in turn. Set here so the guard's
+            // class default does not apply — the viewer is chrome, not a
+            // bundle.
             (
                 header::CONTENT_SECURITY_POLICY,
-                "default-src 'none'; style-src 'unsafe-inline'; \
-                 frame-src 'self'; base-uri 'none'; form-action 'none'; \
-                 frame-ancestors 'none'"
+                "default-src 'none'; style-src 'self'; script-src 'self'; \
+                 img-src 'self' data:; frame-src 'self'; base-uri 'none'; \
+                 form-action 'none'; frame-ancestors 'none'"
                     .to_string(),
             ),
             (header::CACHE_CONTROL, "no-store".to_string()),
         ],
         body,
+    )
+        .into_response()
+}
+
+/// `/view/form.css` and `/view/menu.js` — the viewer's own assets, served on
+/// the artifact origin. Static path segments containing a dot, which no
+/// bundle id may, so the routes are collision-proof by the id grammar.
+pub async fn viewer_style(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+) -> Response {
+    viewer_asset(&app, &origin, "form.css")
+}
+
+pub async fn viewer_script(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+) -> Response {
+    viewer_asset(&app, &origin, "menu.js")
+}
+
+fn viewer_asset(app: &Shared, origin: &Origin, name: &str) -> Response {
+    if origin.role == Role::Gate {
+        return missing();
+    }
+    if name == "menu.js" {
+        return (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                mecha_manifest::content_type("menu.js"),
+            )],
+            super::intake::MENU_JS.to_string(),
+        )
+            .into_response();
+    }
+    // The same stylesheet the gate serves, built the same way, so the viewer
+    // and the gate cannot drift apart about what the chrome looks like.
+    let page = mecha_manifest::RequestType {
+        id: "x".into(),
+        version: 1,
+        title: String::new(),
+        description: None,
+        retain_days: None,
+        fields: Vec::new(),
+        steps: Vec::new(),
+        acknowledgments: Vec::new(),
+        verification: None,
+        confirmation: None,
+    }
+    .form(&mecha_manifest::FormOptions {
+        theme: mecha_manifest::Theme::by_name(&app.config.theme),
+        ..mecha_manifest::FormOptions::default()
+    });
+    (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            mecha_manifest::content_type("form.css"),
+        )],
+        page.style.clone(),
     )
         .into_response()
 }

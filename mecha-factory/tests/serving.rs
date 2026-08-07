@@ -453,7 +453,7 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
     let viewer = get_host(server.artifacts, &host, "/view/switchable/2", None);
     assert_eq!(viewer.status, 200, "{}", viewer.body);
     assert!(
-        viewer.body.contains("<iframe src=\"/b/switchable/v/2/\""),
+        viewer.body.contains("src=\"/b/switchable/v/2/\""),
         "{}",
         viewer.body
     );
@@ -461,6 +461,17 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
     let viewer_csp = viewer.header("content-security-policy").unwrap();
     assert!(viewer_csp.contains("frame-src 'self'"), "{viewer_csp}");
     assert!(viewer_csp.contains("frame-ancestors 'none'"), "{viewer_csp}");
+    // The site chrome rides the viewer: the mark, the version dropdown, and
+    // assets served from this origin at dotted names no bundle id can take.
+    assert!(viewer.body.contains("class=\"site\""), "{}", viewer.body);
+    assert!(viewer.body.contains("account-menu"), "{}", viewer.body);
+    assert!(viewer.body.contains("/view/form.css"), "{}", viewer.body);
+    let css = get_host(server.artifacts, &host, "/view/form.css", None);
+    assert_eq!(css.status, 200);
+    assert!(css.body.contains("header.site"), "the shared stylesheet");
+    let js = get_host(server.artifacts, &host, "/view/menu.js", None);
+    assert_eq!(js.status, 200);
+    assert!(js.body.contains("account-menu"));
     let bundle = get_host(server.artifacts, &host, "/b/switchable/v/2/", None);
     let bundle_csp = bundle.header("content-security-policy").unwrap();
     assert!(

@@ -191,7 +191,10 @@ pub fn router(app: Shared) -> Router {
         .route("/b/{id}/v", get(artifacts::versions_index))
         .route("/b/{id}/v/", get(artifacts::versions_index))
         // The framed viewer: factory chrome above untouched bundle bytes,
-        // outside /b/ so no bundle content can occupy the path.
+        // outside /b/ so no bundle content can occupy the path. Its assets
+        // sit at names with dots, which no bundle id may contain.
+        .route("/view/form.css", get(artifacts::viewer_style))
+        .route("/view/menu.js", get(artifacts::viewer_script))
         .route("/view/{id}/{version}", get(artifacts::viewer))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/", get(artifacts::version_root))
