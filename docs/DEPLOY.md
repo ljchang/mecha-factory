@@ -265,20 +265,203 @@ mail      Amazon SES — us-east-1 from no-reply@mecha-factory.ai
 mail      MISCONFIGURED — the box will refuse to start: …
 ```
 
-**Two things that are AWS's, not ours, and both fail silently:**
+### Setting SES up
 
-- **The sandbox.** A new SES account may only send to *verified* addresses.
-  The API accepts a send to anyone else and the mail is simply never
-  delivered — so the box looks healthy and no stranger ever gets a link. Ask
-  for production access before believing an end-to-end test that used your own
-  address.
-- **DKIM and SPF.** SES gives three CNAMEs for DKIM; add them, add an SPF
-  record including `amazonses.com`, and a DMARC record. Without them a link
-  that *is* sent lands in spam, which for a magic link is the same as not
-  sending it.
+Two facts about this domain make the generic SES walkthrough wrong, and both
+were true before any of this was built:
 
-Neither can be checked from the box without spending an API call on every
-start, which is why they are written down here instead.
+```
+mecha-factory.ai        TXT   "v=spf1 -all"
+_dmarc.mecha-factory.ai TXT   "v=DMARC1; p=reject; sp=reject; adkim=s; aspf=s"
+```
+
+`v=spf1 -all` says **this domain sends no mail, reject anything claiming to**.
+And the DMARC policy is the strictest one that exists: `p=reject` (not
+quarantine — *reject*), with `adkim=s` and `aspf=s` demanding **strict**
+alignment, where the signing domain must equal the From domain exactly rather
+than merely share an organisational parent.
+
+So the usual failure here is not "the link went to spam". It is that receiving
+servers **refuse the message outright** and the stranger gets nothing, while
+SES reports a successful send. That is worth knowing before debugging the box.
+
+What satisfies it: **Easy DKIM signing as `mecha-factory.ai` itself**, which
+gives `d=mecha-factory.ai` and aligns strictly. DMARC passes when *either* SPF
+or DKIM aligns, so DKIM alone is sufficient — but it also means DKIM is the
+single point of failure, which is the tradeoff in step 6.
+
+**The DNS is at Squarespace** (`nsd1–4.squarespacedns.com`), which has no
+public API for custom records. Every DNS row below is typed into their web
+panel by hand; only the AWS half is scriptable.
+
+**1. The CLI.** Already installed at `~/.local/aws-cli` (v2). Add it to your
+path and give it a credential — an admin key, for setup only; the box gets its
+own much smaller one in step 7.
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+aws configure          # key, secret, region, json
+```
+
+Pick the region once and use it everywhere. It goes in `[mail] region`, it is
+half the SES endpoint host, and it is part of the SigV4 signing scope — a
+mismatch is a 403 that says nothing about which of the three is wrong.
+
+**2. The domain identity, with Easy DKIM.**
+
+```sh
+aws sesv2 create-email-identity \
+  --email-identity mecha-factory.ai \
+  --dkim-signing-attributes NextSigningKeyLength=RSA_2048_BIT
+```
+
+**3. The DKIM records.** Three tokens, three CNAMEs:
+
+```sh
+aws sesv2 get-email-identity --email-identity mecha-factory.ai \
+  --query 'DkimAttributes.Tokens' --output text
+```
+
+For each token, add at Squarespace — **CNAME**, and note the host has no
+trailing domain in most panels (Squarespace appends the zone itself):
+
+| Type | Host | Value |
+|---|---|---|
+| CNAME | `<token1>._domainkey` | `<token1>.dkim.amazonses.com` |
+| CNAME | `<token2>._domainkey` | `<token2>.dkim.amazonses.com` |
+| CNAME | `<token3>._domainkey` | `<token3>.dkim.amazonses.com` |
+
+**4. A custom MAIL FROM subdomain.** Without one, the envelope sender is
+`amazonses.com`, so SPF authenticates a domain that is not yours and the
+bounce path is shared. With one, bounces come back to you and SPF has
+something of yours to check.
+
+```sh
+aws sesv2 put-email-identity-mail-from-attributes \
+  --email-identity mecha-factory.ai \
+  --mail-from-domain mail.mecha-factory.ai \
+  --behavior-on-mx-failure USE_DEFAULT_VALUE
+```
+
+Two more rows, on the `mail` subdomain — **not** the root:
+
+| Type | Host | Value |
+|---|---|---|
+| MX | `mail` | `10 feedback-smtp.us-east-1.amazonses.com` |
+| TXT | `mail` | `v=spf1 include:amazonses.com -all` |
+
+Substitute your region into the MX value. **Leave the root `v=spf1 -all`
+alone** — it is correct, and now accurate: nothing uses the bare domain as an
+envelope sender.
+
+**5. Wait, then check.** Propagation is usually minutes; SES rechecks on its
+own schedule and can take up to 72 hours to flip.
+
+```sh
+aws sesv2 get-email-identity --email-identity mecha-factory.ai \
+  --query '{Sending:VerifiedForSendingStatus, DKIM:DkimAttributes.Status, MailFrom:MailFromAttributes.MailFromDomainStatus}'
+```
+
+Wanted: `Sending: true`, `DKIM: SUCCESS`, `MailFrom: SUCCESS`. Independently:
+
+```sh
+dig +short CNAME <token1>._domainkey.mecha-factory.ai
+dig +short TXT mail.mecha-factory.ai
+dig +short MX  mail.mecha-factory.ai
+```
+
+**6. A DMARC decision, and it is a real one.** Under `aspf=s`, a MAIL FROM of
+`mail.mecha-factory.ai` does **not** strictly align with a From of
+`mecha-factory.ai` — subdomains only satisfy *relaxed* alignment. So SPF will
+not contribute to DMARC and every message rides on DKIM alone. One rotated key
+or one stripped signature is then total delivery failure, under `p=reject`.
+
+Relaxing SPF alignment restores the second leg and gives up very little, since
+the subdomain is one you control:
+
+```
+_dmarc   TXT   v=DMARC1; p=reject; sp=reject; adkim=s; aspf=r; rua=mailto:dmarc@mecha-factory.ai
+```
+
+Adding `rua=` is worth more than it looks: aggregate reports are the only way
+to find out that something is failing DMARC without a person telling you their
+link never arrived. Leaving `aspf=s` is a defensible choice — just a deliberate
+one, made knowing DKIM is then load-bearing alone.
+
+**7. The box's own credential**, which is not the admin key from step 1. One
+action, one identity, one From address:
+
+```sh
+ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
+REGION=$(aws configure get region)
+
+cat > /tmp/ses-send.json <<JSON
+{"Version":"2012-10-17","Statement":[{
+  "Effect":"Allow",
+  "Action":["ses:SendEmail"],
+  "Resource":"arn:aws:ses:${REGION}:${ACCOUNT}:identity/mecha-factory.ai",
+  "Condition":{"StringEquals":{"ses:FromAddress":"no-reply@mecha-factory.ai"}}
+}]}
+JSON
+
+aws iam create-user --user-name mecha-factory-mail
+aws iam put-user-policy --user-name mecha-factory-mail \
+  --policy-name ses-send-only --policy-document file:///tmp/ses-send.json
+aws iam create-access-key --user-name mecha-factory-mail
+```
+
+That last command prints the secret **once**. It goes to
+`/etc/mecha-factory/ses.toml` on the box at mode 0600 and nowhere else. The
+`Condition` is what makes a stolen key uninteresting: it can send as
+`no-reply@` and it cannot send as you.
+
+**8. Out of the sandbox.** A new account may only send to *verified*
+addresses. Sends to anyone else are **accepted by the API and never
+delivered**, so the box looks healthy while no stranger gets a link. This is
+the failure this project refuses everywhere else, and it is AWS's to own.
+
+```sh
+aws sesv2 get-account --query '{Production:ProductionAccessEnabled, Quota:SendQuota}'
+
+aws sesv2 put-account-details \
+  --production-access-enabled \
+  --mail-type TRANSACTIONAL \
+  --website-url https://mecha-factory.ai \
+  --contact-language EN \
+  --use-case-description "Double opt-in confirmation links for a personal \
+request intake form. One message per submission, sent only to the address \
+just entered, in response to that action. No marketing, no lists, no bulk."
+```
+
+Review is usually within 24 hours. Until it clears, verify your own address so
+there is something to test against:
+
+```sh
+aws sesv2 create-email-identity --email-identity you@example.edu
+```
+
+**9. End to end.** Point `[mail]` at the credential, then:
+
+```sh
+factory --config /etc/mecha-factory/factory.toml check   # expect the SES line
+```
+
+Submit a real form to a verified address, click the link, and confirm the row
+moves. Then check the headers of what arrived: `DKIM-Signature` should carry
+`d=mecha-factory.ai`, and `Authentication-Results` should show `dkim=pass` and
+`dmarc=pass`. **An end-to-end test against your own verified address proves
+nothing about strangers while the account is in the sandbox** — that is what
+step 8 is for.
+
+### When it fails
+
+| What you see | Almost always |
+|---|---|
+| `403` / `SignatureDoesNotMatch` | `[mail] region` disagrees with the identity's region, or the box's clock has drifted — SigV4 signs a timestamp |
+| `MessageRejected: Email address is not verified` | still in the sandbox (step 8), or `from` is not the verified identity |
+| `AccessDenied` on send | the IAM condition — `from` in the config is not the address the policy pins |
+| SES says sent, nothing arrives, no bounce | `p=reject` did its job: check `Authentication-Results` on any copy you can get, and re-check DKIM status |
+| Was working, now silently rejected | someone edited the root SPF, or the DKIM CNAMEs were dropped in a DNS migration |
 
 ## Patching
 
