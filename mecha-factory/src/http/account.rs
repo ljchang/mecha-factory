@@ -170,11 +170,31 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
             .to_string()
     } else {
         let mut rows = String::from(
-            "<table><tr><th>bundle</th><th>share URL shows</th>\
+            "<table><tr><th>bundle</th><th>versions</th><th>share URL shows</th>\
              <th>who may read</th><th></th></tr>",
         );
+        // One form builder, many buttons: every action here is the same
+        // `alias_set` the release key drives, spelled as (version?,
+        // visibility) — and each button says which spelling it means, because
+        // the old "Make private" sent no version and so silently un-aliased
+        // as well, which is two decisions wearing one label.
+        let release_form = |id: &str, version: Option<u32>, visibility: &str, label: &str| {
+            format!(
+                "<form method=\"post\" action=\"/account/release\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                 {version}\
+                 <input type=\"hidden\" name=\"visibility\" value=\"{visibility}\">\
+                 <button type=\"submit\">{label}</button></form>",
+                id = esc(id),
+                version = version
+                    .map(|v| format!("<input type=\"hidden\" name=\"version\" value=\"{v}\">"))
+                    .unwrap_or_default(),
+            )
+        };
         for bundle in &bundles {
             let public = bundle.visibility == mecha_manifest::Visibility::Public;
+            let vis_word = if public { "public" } else { "private" };
             let shown = match bundle.aliased {
                 Some(version) => format!("v{version}"),
                 None => "nothing".to_string(),
@@ -184,33 +204,52 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
                 app.config.user_url(Role::Artifacts, &user.handle),
                 bundle.id
             );
-            // The one release form: alias to latest + public, or make
-            // private. Version pinning stays with the release key's richer
-            // interface; this page covers the person's two real acts.
-            let action = if public {
-                format!(
-                    "<form method=\"post\" action=\"/account/release\">\
-                     <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-                     <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-                     <input type=\"hidden\" name=\"visibility\" value=\"private\">\
-                     <button type=\"submit\">Make private</button></form>",
-                    id = esc(&bundle.id),
-                )
-            } else {
-                format!(
-                    "<form method=\"post\" action=\"/account/release\">\
-                     <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
-                     <input type=\"hidden\" name=\"id\" value=\"{id}\">\
-                     <input type=\"hidden\" name=\"version\" value=\"{latest}\">\
-                     <input type=\"hidden\" name=\"visibility\" value=\"public\">\
-                     <button type=\"submit\">Release v{latest} publicly</button></form>",
-                    id = esc(&bundle.id),
-                    latest = bundle.latest,
-                )
-            };
+            // Every stored version, viewable at its immutable URL, with a pin
+            // for whichever the share URL should follow.
+            let versions = app
+                .db
+                .bundle_versions(&user.id, &bundle.id)
+                .unwrap_or_default();
+            let mut versions_cell = String::new();
+            for v in &versions {
+                versions_cell.push_str(&format!("<a href=\"{url}v/{v}/\">v{v}</a> "));
+                if bundle.aliased == Some(*v) {
+                    versions_cell.push_str("(live) ");
+                } else {
+                    versions_cell.push_str(&release_form(
+                        &bundle.id,
+                        Some(*v),
+                        vis_word,
+                        &format!("pin v{v}"),
+                    ));
+                }
+            }
+            let mut actions = String::new();
+            if public {
+                // Who may read changes; where the share URL points does not.
+                actions.push_str(&release_form(
+                    &bundle.id,
+                    bundle.aliased,
+                    "private",
+                    "Make private",
+                ));
+            } else if let Some(version) = bundle.aliased.or(Some(bundle.latest)) {
+                actions.push_str(&release_form(
+                    &bundle.id,
+                    Some(version),
+                    "public",
+                    &format!("Release v{version} publicly"),
+                ));
+            }
+            if bundle.aliased.is_some() {
+                // The share URL points at nothing afterwards; every version
+                // stays on disk — nothing on this page deletes one.
+                actions.push_str(&release_form(&bundle.id, None, "private", "Take down"));
+            }
             rows.push_str(&format!(
                 "<tr><td><a href=\"{url}\">{id}</a> — {title}</td>\
-                 <td>{shown}</td><td>{vis}</td><td>{action}</td></tr>",
+                 <td>{versions_cell}</td>\
+                 <td>{shown}</td><td>{vis}</td><td>{actions}</td></tr>",
                 id = esc(&bundle.id),
                 title = esc(&bundle.title),
                 vis = if public { "everyone" } else { "nobody" },

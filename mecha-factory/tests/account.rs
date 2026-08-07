@@ -328,6 +328,9 @@ fn the_header_knows_who_it_is_for() {
     assert!(page.body.contains("account-menu"), "{}", page.body);
     assert!(page.body.contains("/account/signout"));
     assert!(page.body.contains("/account#artifacts"), "dropdown links are absolute");
+    // The artifacts table carries the full controls once bundles exist; on an
+    // empty account it at least says what would land here.
+    assert!(page.body.contains("Nothing published yet") || page.body.contains("Take down"));
     assert!(page.body.contains("menu.js"), "the dropdown gets its close script");
     assert!(page.body.contains("alice"));
 
