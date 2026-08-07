@@ -27,7 +27,8 @@ forgetting is not "the site is down", it is "the site is someone else's".
 > renewal it finds nothing to do.
 
 Everything below assumes the box is **assumed lost**. Nothing on it reaches
-home, and the two keys it holds are Argon2id hashes of tokens minted elsewhere.
+home, and every key it knows — publish, release, drain, operate — is an
+Argon2id hash of a token it can never reproduce.
 
 ## What runs where
 
