@@ -289,6 +289,28 @@ impl crate::intake::Mailer for SesMailer {
         }
     }
 
+    fn send_signin(&self, address: &str, handle: &str, link: &str) {
+        let subject = format!("Sign in as {handle}");
+        let text = format!(
+            "A sign-in link for the `{handle}` account page was requested:\n\n\
+             {link}\n\n\
+             It works once and expires in {} minutes.\n\n\
+             If you did not ask for this, ignore it — nothing happens unless \
+             the link is opened, and only somebody reading this mailbox can \
+             open it.\n",
+            crate::intake::SIGNIN_LINK_EXPIRY_MINUTES
+        );
+        match self.send(address, &subject, &text, chrono::Utc::now()) {
+            Ok(()) => tracing::info!(handle, "sign-in link sent"),
+            Err(e) => tracing::error!(
+                error = %e,
+                handle,
+                link,
+                "sending a sign-in link failed — it can be delivered by hand"
+            ),
+        }
+    }
+
     fn describe(&self) -> String {
         format!("Amazon SES — {} from {}", self.region, self.from)
     }

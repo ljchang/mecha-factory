@@ -130,6 +130,7 @@ pub fn prepare(user_id: &str, scope: Scope, label: &str) -> Result<Minted> {
         label: label.to_string(),
         created_at: crate::db::now(),
         revoked_at: None,
+        last_used_at: None,
     };
     Ok(Minted {
         token: format!("{}{id}.{secret}", scope.prefix()),
@@ -199,6 +200,11 @@ pub fn authenticate(
             needs,
         });
     }
+    // The stamp that makes the machine list mean something. After every
+    // check on purpose: only a call that will be acted on counts as use, and
+    // best-effort by contract — authentication must not fail over a
+    // timestamp.
+    db.key_touch(&row.id, &crate::db::now());
     Ok(row)
 }
 

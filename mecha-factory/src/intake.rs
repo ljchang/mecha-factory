@@ -56,6 +56,18 @@ pub fn recipient_hash(address: &str) -> String {
 /// right to a handle should not be a standing offer forever.
 pub const INVITE_EXPIRY_DAYS: i64 = 7;
 
+/// How long a sign-in link works, and how long the session it mints lasts.
+///
+/// The link is minutes like a pairing code — the person just asked for it.
+/// The session is days: signing in daily to check a page defeats the page.
+pub const SIGNIN_LINK_EXPIRY_MINUTES: i64 = 15;
+pub const SESSION_EXPIRY_DAYS: i64 = 7;
+
+/// Sign-in links one account may be sent in a day. The sign-in form is
+/// unauthenticated and answers identically whether an address exists, so the
+/// bound is what stops it being a way to fill somebody's inbox.
+pub const SIGNIN_LINKS_PER_DAY: i64 = 5;
+
 /// Where a verification link goes.
 pub trait Mailer: Send + Sync {
     fn send_verification(
@@ -68,6 +80,10 @@ pub trait Mailer: Send + Sync {
     /// one was minted by the operator rather than triggered by the recipient,
     /// so it has to say what to do when it was unexpected — nothing.
     fn send_invite(&self, address: &str, link: &str);
+    /// A sign-in link for the account page. `handle` names which account,
+    /// because one address can hold several and the link signs into exactly
+    /// one.
+    fn send_signin(&self, address: &str, handle: &str, link: &str);
     /// What `factory check` prints.
     fn describe(&self) -> String;
 }
@@ -99,6 +115,15 @@ impl Mailer for LogMailer {
             to = address,
             link,
             "invite link (not sent: no mailer configured)"
+        );
+    }
+
+    fn send_signin(&self, address: &str, handle: &str, link: &str) {
+        tracing::info!(
+            to = address,
+            handle,
+            link,
+            "sign-in link (not sent: no mailer configured)"
         );
     }
 

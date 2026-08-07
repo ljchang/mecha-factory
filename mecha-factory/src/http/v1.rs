@@ -756,3 +756,43 @@ pub async fn pair(
         }
     }
 }
+
+/// `POST /v1/disconnect` — the presented key revokes itself.
+///
+/// A credential may always retire itself: no scope check, because whichever
+/// scope the key has is exactly the authority being surrendered — and no
+/// body, because the Bearer token already names the one key this can touch.
+/// This is what makes a compromised laptop recoverable by the person who
+/// owns it, from the laptop, rather than only by whoever holds root on the
+/// box.
+pub async fn disconnect(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let row = match keys::authenticate_any(&app.db, bearer(&headers)) {
+        Ok(row) => row,
+        Err(e) => {
+            tracing::warn!(error = %e, "refused");
+            let status = StatusCode::from_u16(e.status()).unwrap_or(StatusCode::UNAUTHORIZED);
+            return Failure::json(status, e.public_message()).into_response();
+        }
+    };
+    match app.db.key_revoke(&row.id, &crate::db::now()) {
+        Ok(_) => {
+            tracing::info!(key = %row.id, scope = row.scope.as_str(), "a key retired itself");
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "revoked": row.id })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "revoking a key from itself");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}

@@ -732,6 +732,71 @@ pub fn connect(args: &Connect) -> Result<String> {
     Ok(summary)
 }
 
+/// Retire this machine's keys: each revokes itself on the box, then leaves
+/// the disk. Returns the summary the CLI prints.
+///
+/// An already-dead key (revoked from the account page, say) still gets its
+/// file removed — the box refusing it means it is exactly as retired as we
+/// wanted, and a cleanup that failed because the cleanup was already done
+/// would be the one wrong answer. The gate memory (`config.toml`) stays: it
+/// is an address, not a credential, and reconnecting wants it.
+pub fn disconnect() -> Result<String> {
+    let dir = Remote::dir()?;
+    let mut lines = Vec::new();
+    let mut any = false;
+    for scope in [Scope::Publish, Scope::Drain] {
+        let path = dir.join(scope.file());
+        if !path.exists() {
+            continue;
+        }
+        any = true;
+        match Remote::configured_for(scope) {
+            Ok(Some(remote)) => match remote.request("POST", "/v1/disconnect", Some(b"")) {
+                Ok(body) => lines.push(format!(
+                    "{} key {} revoked on the box",
+                    scope.as_str(),
+                    body["revoked"].as_str().unwrap_or("?")
+                )),
+                Err(e) if e.to_string().contains("401") => lines.push(format!(
+                    "{} key was already dead on the box",
+                    scope.as_str()
+                )),
+                Err(e) => {
+                    // A key we could not revoke stays on disk: deleting the
+                    // local copy of a still-live credential is tidiness
+                    // dressed as security, and it removes the only easy way
+                    // to retry.
+                    lines.push(format!(
+                        "{} key could NOT be revoked ({e}); its file stays for a retry",
+                        scope.as_str()
+                    ));
+                    continue;
+                }
+            },
+            Ok(None) => lines.push(format!(
+                "{} key has no gate configured; removing the file only",
+                scope.as_str()
+            )),
+            Err(e) => {
+                lines.push(format!(
+                    "{} key unreadable ({e}); removing the file",
+                    scope.as_str()
+                ));
+            }
+        }
+        std::fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+    }
+    if !any {
+        return Ok("nothing to disconnect — no keys are installed here".to_string());
+    }
+    lines.push(
+        "This machine no longer publishes. `factory-publish connect` with a \
+         fresh pairing code brings it back."
+            .to_string(),
+    );
+    Ok(lines.join("\n"))
+}
+
 /// A credential hits the disk at 0600 from its first byte — written through
 /// a file created with the mode already set, never chmodded after.
 fn write_key(path: &Path, token: &str) -> Result<()> {

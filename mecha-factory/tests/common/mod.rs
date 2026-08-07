@@ -36,6 +36,10 @@ impl mecha_factory::intake::Mailer for CapturedMail {
         self.0.lock().unwrap().push(link.to_string());
     }
 
+    fn send_signin(&self, _address: &str, _handle: &str, link: &str) {
+        self.0.lock().unwrap().push(link.to_string());
+    }
+
     fn describe(&self) -> String {
         "captured (test)".into()
     }
@@ -251,6 +255,11 @@ impl Server {
                 "2026-08-06T00:00:00Z",
             )
             .unwrap()
+    }
+
+    /// How many links of any kind the mailer has seen.
+    pub fn sent_links(&self) -> usize {
+        self.mail.0.lock().unwrap().len()
     }
 
     /// The token from the most recent verification link.

@@ -18,6 +18,7 @@
 //! from [`mecha_manifest::ContentClass`], so there is one definition of what
 //! this server permits and it is the one the local preview server uses too.
 
+pub mod account;
 pub mod artifacts;
 pub mod intake;
 pub mod signup;
@@ -111,6 +112,9 @@ pub fn router(app: Shared) -> Router {
         // Spending a pairing code. Unauthenticated — the code is the
         // credential — and rate-limited with the rest of the gate.
         .route("/v1/pair", post(v1::pair))
+        // A credential retiring itself. Authenticated by the key being
+        // revoked — the one thing it can still authorise.
+        .route("/v1/disconnect", post(v1::disconnect))
         // The typed way in. On the gate, path-scoped by handle rather than
         // subdomain-scoped: a form is server-rendered HTML with no script, so
         // it executes nothing and there is nothing for an origin to separate
@@ -126,6 +130,17 @@ pub fn router(app: Shared) -> Router {
         // the same reason: server-rendered HTML that executes nothing.
         .route("/signup/{token}", get(signup::form).post(signup::submit))
         .route("/signup/{token}/{name}", get(signup::asset))
+        // The tenant surface: a signed-in page carrying release authority —
+        // the second door to Scope::Release the scope split named. Gate-only,
+        // server-rendered, no script.
+        .route("/account", get(account::overview))
+        .route("/account/signin", post(account::signin))
+        .route("/account/s/{token}", get(account::finish))
+        .route("/account/signout", post(account::signout))
+        .route("/account/release", post(account::release))
+        .route("/account/revoke", post(account::revoke))
+        .route("/account/pair", post(account::pair))
+        .route("/account/a/{name}", get(account::asset))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))

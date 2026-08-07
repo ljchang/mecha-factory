@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 5;
+const SCHEMA: i64 = 6;
 
 #[derive(Clone)]
 pub struct Db {
@@ -46,6 +46,10 @@ pub struct KeyRow {
     pub label: String,
     pub created_at: String,
     pub revoked_at: Option<String>,
+    /// Stamped on every authenticated call, best-effort. What lets the
+    /// machine list say "alive last Tuesday" instead of only "minted in
+    /// June" — a silent compromise shows up as life where none was expected.
+    pub last_used_at: Option<String>,
 }
 
 /// A person. Never deleted — `status` is how an account stops working, because
@@ -131,6 +135,17 @@ pub enum Claim {
     /// Claimed, revoked, expired, or never real — one variant for all four,
     /// for the same reason the page is one page.
     InviteGone,
+}
+
+/// One bundle as the owner's page lists it.
+#[derive(Debug, Clone)]
+pub struct BundleSummary {
+    pub id: String,
+    pub latest: u32,
+    pub title: String,
+    /// What the share URL resolves to, if anything.
+    pub aliased: Option<u32>,
+    pub visibility: mecha_manifest::Visibility,
 }
 
 /// What became of a machine's attempt to redeem a pairing code.
@@ -418,6 +433,21 @@ impl Db {
         })
     }
 
+    /// Every active account behind an address, for sign-in. Plural because
+    /// nothing makes emails unique — one person, several handles — and a
+    /// sign-in link binds to exactly one account, so the sender loops.
+    pub fn users_by_email(&self, email: &str) -> Result<Vec<UserRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, handle, email, status, created_at, quota_bytes, send_budget \
+                 FROM users WHERE LOWER(email) = LOWER(?1) AND status = 'active' \
+                 ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map(params![email.trim()], user_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
     // ---- invites --------------------------------------------------------
 
     /// Mint the right to claim one handle. The caller holds the token; this
@@ -649,6 +679,145 @@ impl Db {
         })
     }
 
+    /// One user's bundles as their page lists them: latest version, what the
+    /// share URL points at, and who may read it.
+    pub fn bundles_overview(&self, user_id: &str) -> Result<Vec<BundleSummary>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT b.id, MAX(b.version), MAX(b.title), a.version, a.visibility \
+                 FROM bundles b LEFT JOIN aliases a \
+                 ON a.user_id = b.user_id AND a.id = b.id \
+                 WHERE b.user_id = ?1 GROUP BY b.id ORDER BY b.id",
+            )?;
+            let rows = stmt.query_map(params![user_id], |r| {
+                Ok(BundleSummary {
+                    id: r.get(0)?,
+                    latest: r.get::<_, i64>(1)? as u32,
+                    title: r.get(2)?,
+                    aliased: r.get::<_, Option<i64>>(3)?.map(|v| v as u32),
+                    visibility: match r.get::<_, Option<String>>(4)?.as_deref() {
+                        Some("public") => mecha_manifest::Visibility::Public,
+                        _ => mecha_manifest::Visibility::Private,
+                    },
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    // ---- sessions -------------------------------------------------------
+
+    /// Record a sign-in link. The budget check is the caller's; this is the
+    /// write.
+    pub fn signin_link_create(
+        &self,
+        user_id: &str,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO signin_links (id, user_id, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, user_id, token_hash, now, expires_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Sign-in links minted for a user today — the budget's denominator.
+    pub fn signin_links_today(&self, user_id: &str, today: &str) -> Result<i64> {
+        self.with(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM signin_links WHERE user_id = ?1 \
+                 AND substr(created_at, 1, 10) = ?2",
+                params![user_id, today],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// Spend a sign-in link: single-use, in one statement, exactly like a
+    /// verification token. Returns whose it was.
+    pub fn signin_redeem(&self, token_hash: &str, now: &str) -> Result<Option<String>> {
+        self.with(|conn| {
+            let user_id: Option<String> = conn
+                .query_row(
+                    "UPDATE signin_links SET used_at = ?2 \
+                     WHERE token_hash = ?1 AND used_at IS NULL AND expires_at > ?2 \
+                     RETURNING user_id",
+                    params![token_hash, now],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            Ok(user_id)
+        })
+    }
+
+    pub fn session_create(
+        &self,
+        user_id: &str,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, user_id, token_hash, now, expires_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// The active user behind a live session, or nothing. Suspension ends
+    /// sessions with everything else: the join is on `active`, so there is no
+    /// window where a suspended account still drives a signed-in page.
+    pub fn session_user(&self, token_hash: &str, now: &str) -> Result<Option<UserRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT u.id, u.handle, u.email, u.status, u.created_at, \
+                     u.quota_bytes, u.send_budget FROM sessions s \
+                     JOIN users u ON u.id = s.user_id \
+                     WHERE s.token_hash = ?1 AND s.revoked_at IS NULL \
+                     AND s.expires_at > ?2 AND u.status = 'active'",
+                    params![token_hash, now],
+                    user_row,
+                )
+                .optional()?)
+        })
+    }
+
+    /// Sign out: the session stops working now, whatever the cookie says.
+    pub fn session_revoke(&self, token_hash: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE sessions SET revoked_at = ?2 \
+                 WHERE token_hash = ?1 AND revoked_at IS NULL",
+                params![token_hash, now],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Expired sessions and sign-in links: gone, via `sweep`. Revoked or
+    /// spent rows within their window stay — they are the recent record.
+    pub fn expire_sessions(&self, now: &str) -> Result<usize> {
+        self.with(|conn| {
+            let a = conn.execute("DELETE FROM sessions WHERE expires_at <= ?1", params![now])?;
+            let b = conn.execute(
+                "DELETE FROM signin_links WHERE expires_at <= ?1",
+                params![now],
+            )?;
+            Ok(a + b)
+        })
+    }
+
     // ---- keys -----------------------------------------------------------
 
     pub fn key_insert(&self, row: &KeyRow) -> Result<()> {
@@ -673,8 +842,8 @@ impl Db {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT id, user_id, scope, hash, label, created_at, revoked_at \
-                     FROM keys WHERE id = ?1",
+                    "SELECT id, user_id, scope, hash, label, created_at, revoked_at, \
+                     last_used_at FROM keys WHERE id = ?1",
                     params![id],
                     key_row,
                 )
@@ -685,11 +854,49 @@ impl Db {
     pub fn keys(&self) -> Result<Vec<KeyRow>> {
         self.with(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT id, user_id, scope, hash, label, created_at, revoked_at \
-                 FROM keys ORDER BY created_at",
+                "SELECT id, user_id, scope, hash, label, created_at, revoked_at, \
+                 last_used_at FROM keys ORDER BY created_at",
             )?;
             let rows = stmt.query_map([], key_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Stamp a key as used. Best-effort by contract: authentication must not
+    /// fail because a timestamp could not be written.
+    pub fn key_touch(&self, id: &str, now: &str) {
+        let _ = self.with(|conn| {
+            conn.execute(
+                "UPDATE keys SET last_used_at = ?2 WHERE id = ?1",
+                params![id, now],
+            )?;
+            Ok(())
+        });
+    }
+
+    /// One user's keys, for the machine list on their page.
+    pub fn keys_for_user(&self, user_id: &str) -> Result<Vec<KeyRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, user_id, scope, hash, label, created_at, revoked_at, \
+                 last_used_at FROM keys WHERE user_id = ?1 ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map(params![user_id], key_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Revoke a key **belonging to this user**. The tenant page passes the
+    /// session's user, so a form that names somebody else's key id revokes
+    /// nothing — ownership is the WHERE clause, not a check before it.
+    pub fn key_revoke_for(&self, user_id: &str, id: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE keys SET revoked_at = ?3 \
+                 WHERE id = ?1 AND user_id = ?2 AND revoked_at IS NULL",
+                params![id, user_id, now],
+            )?;
+            Ok(n > 0)
         })
     }
 
@@ -1207,6 +1414,7 @@ fn key_row(r: &rusqlite::Row) -> rusqlite::Result<KeyRow> {
         label: r.get(4)?,
         created_at: r.get(5)?,
         revoked_at: r.get(6)?,
+        last_used_at: r.get(7)?,
     })
 }
 
@@ -1310,6 +1518,21 @@ fn migrate(conn: &Connection) -> Result<()> {
              start again."
         );
     }
+    // The one change the IF-NOT-EXISTS batch cannot express: a column added
+    // to a table that already exists. Guarded by the version span that lacks
+    // it — a fresh ledger gets the column from CREATE TABLE, and a ledger at
+    // 6 or later already has it.
+    if (3..6).contains(&version) {
+        // Idempotent on purpose: if the ALTER lands and anything after it
+        // fails before the version bump, the next start retries the whole
+        // migration — and a duplicate-column refusal would wedge the ledger
+        // permanently on a one-off transient failure.
+        if let Err(e) = conn.execute_batch("ALTER TABLE keys ADD COLUMN last_used_at TEXT;") {
+            if !e.to_string().contains("duplicate column") {
+                return Err(e.into());
+            }
+        }
+    }
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS users (
@@ -1335,13 +1558,18 @@ fn migrate(conn: &Connection) -> Result<()> {
         );
 
         CREATE TABLE IF NOT EXISTS keys (
-            id          TEXT PRIMARY KEY,
-            user_id     TEXT NOT NULL DEFAULT '',
-            scope       TEXT NOT NULL,
-            hash        TEXT NOT NULL,
-            label       TEXT NOT NULL DEFAULT '',
-            created_at  TEXT NOT NULL,
-            revoked_at  TEXT
+            id           TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL DEFAULT '',
+            scope        TEXT NOT NULL,
+            hash         TEXT NOT NULL,
+            label        TEXT NOT NULL DEFAULT '',
+            created_at   TEXT NOT NULL,
+            revoked_at   TEXT,
+            -- Stamped on every authenticated call. What turns the tenant
+            -- page's machine list from an inventory into a security feature:
+            -- a key that is used is a machine that is alive, and a silent
+            -- compromise is visible as life where none was expected.
+            last_used_at TEXT
         );
 
         CREATE TABLE IF NOT EXISTS bundles (
@@ -1448,6 +1676,29 @@ fn migrate(conn: &Connection) -> Result<()> {
             publish_key_id  TEXT,
             drain_key_id    TEXT
         );
+
+        -- A sign-in link: the email half of a session, single-use and
+        -- minutes-lived, stored as a hash like every other bearer token.
+        CREATE TABLE IF NOT EXISTS signin_links (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            used_at     TEXT
+        );
+
+        -- A signed-in browser. The cookie holds the token; this holds its
+        -- hash — reading the ledger off the box must not let anyone be
+        -- somebody's browser, the same property every credential here has.
+        CREATE TABLE IF NOT EXISTS sessions (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            revoked_at  TEXT
+        );
         ",
     )?;
     conn.pragma_update(None, "user_version", SCHEMA)?;
@@ -1504,8 +1755,20 @@ mod tests {
             // Wind it back to what the box was running before invites, minus
             // the table this migration adds.
             db.with(|conn| {
+                // DROP COLUMN would be shorter, but SQLite rewrites the
+                // stored DDL to do it and trips over the comments in ours —
+                // so the v3 table is rebuilt the long way.
                 conn.execute_batch(
-                    "DROP TABLE invites; DROP TABLE pairings; PRAGMA user_version = 3;",
+                    "DROP TABLE invites; DROP TABLE pairings; DROP TABLE sessions; \
+                     DROP TABLE signin_links; \
+                     CREATE TABLE keys_v3 (id TEXT PRIMARY KEY, \
+                       user_id TEXT NOT NULL DEFAULT '', scope TEXT NOT NULL, \
+                       hash TEXT NOT NULL, label TEXT NOT NULL DEFAULT '', \
+                       created_at TEXT NOT NULL, revoked_at TEXT); \
+                     INSERT INTO keys_v3 SELECT id, user_id, scope, hash, label, \
+                       created_at, revoked_at FROM keys; \
+                     DROP TABLE keys; ALTER TABLE keys_v3 RENAME TO keys; \
+                     PRAGMA user_version = 3;",
                 )?;
                 Ok(())
             })
@@ -1522,6 +1785,18 @@ mod tests {
             .with(|conn| Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?))
             .unwrap();
         assert_eq!(version, SCHEMA);
+
+        // The half-run case: the ALTER landed but the version bump did not.
+        // The retry must go through rather than wedging on a duplicate
+        // column — a one-off transient failure must not brick the ledger.
+        db.with(|conn| {
+            conn.pragma_update(None, "user_version", 5)?;
+            Ok(())
+        })
+        .unwrap();
+        drop(db);
+        let db = Db::open(&path).unwrap();
+        assert!(db.user_by_handle("alice").unwrap().is_some());
     }
 
     fn bundle(user_id: &str, id: &str, version: u32, digest: &str) -> BundleRow {
@@ -1663,6 +1938,7 @@ mod tests {
             label: "laptop".into(),
             created_at: "t0".into(),
             revoked_at: None,
+            last_used_at: None,
         })
         .unwrap();
         assert!(db.key_revoke("abcd1234", "t1").unwrap());

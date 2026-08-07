@@ -210,6 +210,12 @@ enum Command {
         #[arg(long)]
         replace: bool,
     },
+    /// Retire this machine's keys: each revokes itself, then leaves the disk.
+    ///
+    /// Needs no extra privilege — a credential may always retire itself —
+    /// which is what makes a compromised laptop recoverable by its owner
+    /// rather than only by whoever holds root on the box.
+    Disconnect,
     /// A CLI and deliberately not a tool: the common case is "nothing new",
     /// and it has to cost zero tokens. A trigger runs this on a schedule and
     /// only spawns an agent when something actually arrived.
@@ -428,6 +434,8 @@ fn main() -> Result<()> {
             label,
             replace,
         } => connect_command(code, gate, handle, label, replace)?,
+
+        Command::Disconnect => println!("{}", remote::disconnect()?),
 
         Command::Drain { out, dry_run, json } => drain_command(out, dry_run, json)?,
 

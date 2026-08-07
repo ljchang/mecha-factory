@@ -626,10 +626,12 @@ fn sweep(cli: &Cli) -> Result<()> {
     let unverified = db.expire_unverified(&now)?;
     let retained = db.expire_retained(&now)?;
     let pairings = db.expire_pairings(&now)?;
+    let sessions = db.expire_sessions(&now)?;
     println!("{unverified} unverified submission(s) past their link's expiry, removed");
     println!("{retained} record(s) past their retention window, removed");
     println!("{pairings} expired pairing code(s) nobody redeemed, removed");
-    if unverified + retained + pairings == 0 {
+    println!("{sessions} expired session(s) and sign-in link(s), removed");
+    if unverified + retained + pairings + sessions == 0 {
         println!("(nothing was due)");
     }
     Ok(())

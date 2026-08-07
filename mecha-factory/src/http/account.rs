@@ -1,0 +1,560 @@
+//! The tenant surface: a signed-in page, and what it may do.
+//!
+//! ```text
+//!   GET  /account              signed out: the sign-in form · signed in: the page
+//!   POST /account/signin       email → a link, and one answer whoever asked
+//!   GET  /account/s/<token>    the link → a session cookie → back to /account
+//!   POST /account/signout      the session stops working now
+//!   POST /account/release      move an alias / set visibility — release authority
+//!   POST /account/revoke       a machine's key stops working now
+//!   POST /account/pair         a fresh pairing code, as the command to run
+//! ```
+//!
+//! **A signed-in session is a release credential.** That sentence is from the
+//! plan and it is the whole reason this surface exists: releasing is one
+//! narrow capability with two doors — `release.key` for a machine somebody
+//! keeps for it, and this page for a person — and `POST /account/release`
+//! drives the same `alias_set` the key-authenticated endpoint drives.
+//!
+//! Three decisions hold the security of it:
+//!
+//! - **The cookie is `__Host-`-prefixed**, `HttpOnly; Secure; SameSite=Lax;
+//!   Path=/`. The prefix is load-bearing, not decoration: a tenant's page on
+//!   `alice.art.<domain>` runs their script, and without the prefix it could
+//!   set a `Domain=.<domain>` cookie that arrives here — a session fixation
+//!   the gate would never see coming. Browsers refuse a `__Host-` cookie that
+//!   carries a `Domain` at all, which closes the toss structurally and defers
+//!   the move-the-gate-to-its-own-domain question instead of forcing it.
+//! - **Every mutating POST carries a CSRF token bound to the session**, on
+//!   top of `SameSite=Lax`. Lax is the real defence; the token is the belt
+//!   for the browsers and embedders where it is not. The token is derived —
+//!   `hash("csrf:" + session token)` — so there is nothing extra to store,
+//!   and nothing to desynchronise.
+//! - **The sign-in form answers identically whether the address exists.**
+//!   Same page, same bytes. The link is budgeted per account per day, so the
+//!   form cannot be turned into a way to fill somebody's inbox.
+//!
+//! What a session deliberately cannot do: publish. Uploading versions is the
+//! machines' job through their scoped keys — a browser session that could
+//! push bytes would be a third write path with none of the review shape.
+
+use axum::extract::{Path, State};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Extension;
+
+use super::intake::{form_values, page, shell};
+use super::{v1, Shared};
+use crate::config::{Origin, Role};
+use crate::db::UserRow;
+
+/// The session cookie. `__Host-` is what makes a tenant page unable to toss
+/// one onto the gate — see the module doc.
+const COOKIE: &str = "__Host-factory-session";
+
+fn nothing_here() -> Response {
+    page(
+        StatusCode::NOT_FOUND,
+        shell("Not found", "<h1>Not found</h1>", ""),
+    )
+}
+
+/// The raw session token out of the Cookie header, if one came.
+fn cookie_token(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == COOKIE)
+        .map(|(_, value)| value.to_string())
+}
+
+/// The signed-in user, plus the raw token the CSRF value derives from.
+fn session(app: &Shared, headers: &HeaderMap) -> Option<(String, UserRow)> {
+    let token = cookie_token(headers)?;
+    let user = app
+        .db
+        .session_user(&crate::intake::hash_token(&token), &crate::db::now())
+        .ok()??;
+    Some((token, user))
+}
+
+/// The CSRF value for a session — derived, so nothing is stored. It is a
+/// hash of the token, never the token: a value printed into every form must
+/// not be the credential itself.
+fn csrf(token: &str) -> String {
+    crate::intake::hash_token(&format!("csrf:{token}"))
+}
+
+/// One mutating request's preamble: on the gate, signed in, and carrying the
+/// session's CSRF value. Everything failing answers 404 or the sign-in page
+/// rather than naming what was wrong.
+fn mutating(
+    app: &Shared,
+    origin: &Origin,
+    headers: &HeaderMap,
+    body: &str,
+) -> Result<(String, UserRow, serde_json::Map<String, serde_json::Value>), Box<Response>> {
+    if v1::not_on_gate(origin).is_some() {
+        return Err(Box::new(nothing_here()));
+    }
+    let Some((token, user)) = session(app, headers) else {
+        return Err(Box::new(signin_form()));
+    };
+    let values = form_values(body);
+    let sent = values.get("csrf").and_then(|v| v.as_str()).unwrap_or("");
+    if sent != csrf(&token) {
+        // A missing or stale token is a page re-rendered, not an action
+        // taken. 403 rather than 404: the session is real, the request is
+        // not — and nothing secret is in the difference.
+        return Err(Box::new(page(
+            StatusCode::FORBIDDEN,
+            shell(
+                "Try that again",
+                "<h1>Try that again</h1><p>That form was stale. Go back to \
+                 <a href=\"/account\">your page</a> and retry.</p>",
+                "",
+            ),
+        )));
+    }
+    Ok((token, user, values))
+}
+
+fn signin_form() -> Response {
+    page(
+        StatusCode::OK,
+        shell(
+            "Sign in",
+            "<h1>Sign in</h1>\
+             <p>Your account page is reached by a link, not a password.</p>\
+             <form method=\"post\" action=\"/account/signin\">\
+             <label for=\"email\">Email</label>\
+             <input id=\"email\" name=\"email\" type=\"email\" required>\
+             <button type=\"submit\">Send the link</button>\
+             </form>",
+            "/account/a/",
+        ),
+    )
+}
+
+/// `GET /account` — the page, or the way in.
+pub async fn overview(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((token, user)) = session(&app, &headers) else {
+        return signin_form();
+    };
+    render_overview(&app, &token, &user)
+}
+
+fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
+    let csrf = csrf(token);
+    let esc = mecha_manifest::escape_text;
+
+    let bundles = app.db.bundles_overview(&user.id).unwrap_or_default();
+    let artifacts = if bundles.is_empty() {
+        "<p>Nothing published yet. A connected machine publishes with \
+         <code>factory-publish publish</code>; what lands here is yours to \
+         release.</p>"
+            .to_string()
+    } else {
+        let mut rows = String::from(
+            "<table><tr><th>bundle</th><th>share URL shows</th>\
+             <th>who may read</th><th></th></tr>",
+        );
+        for bundle in &bundles {
+            let public = bundle.visibility == mecha_manifest::Visibility::Public;
+            let shown = match bundle.aliased {
+                Some(version) => format!("v{version}"),
+                None => "nothing".to_string(),
+            };
+            let url = format!(
+                "{}/b/{}/",
+                app.config.user_url(Role::Artifacts, &user.handle),
+                bundle.id
+            );
+            // The one release form: alias to latest + public, or make
+            // private. Version pinning stays with the release key's richer
+            // interface; this page covers the person's two real acts.
+            let action = if public {
+                format!(
+                    "<form method=\"post\" action=\"/account/release\">\
+                     <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                     <input type=\"hidden\" name=\"visibility\" value=\"private\">\
+                     <button type=\"submit\">Make private</button></form>",
+                    id = esc(&bundle.id),
+                )
+            } else {
+                format!(
+                    "<form method=\"post\" action=\"/account/release\">\
+                     <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                     <input type=\"hidden\" name=\"id\" value=\"{id}\">\
+                     <input type=\"hidden\" name=\"version\" value=\"{latest}\">\
+                     <input type=\"hidden\" name=\"visibility\" value=\"public\">\
+                     <button type=\"submit\">Release v{latest} publicly</button></form>",
+                    id = esc(&bundle.id),
+                    latest = bundle.latest,
+                )
+            };
+            rows.push_str(&format!(
+                "<tr><td><a href=\"{url}\">{id}</a> — {title}</td>\
+                 <td>{shown}</td><td>{vis}</td><td>{action}</td></tr>",
+                id = esc(&bundle.id),
+                title = esc(&bundle.title),
+                vis = if public { "everyone" } else { "nobody" },
+            ));
+        }
+        rows.push_str("</table>");
+        rows
+    };
+
+    let keys = app.db.keys_for_user(&user.id).unwrap_or_default();
+    let mut machines = String::from(
+        "<table><tr><th>key</th><th>scope</th><th>label</th>\
+         <th>minted</th><th>last used</th><th></th></tr>",
+    );
+    for key in &keys {
+        let state = match &key.revoked_at {
+            Some(at) => format!("revoked {}", esc(at)),
+            None => format!(
+                "<form method=\"post\" action=\"/account/revoke\">\
+                 <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+                 <input type=\"hidden\" name=\"key\" value=\"{id}\">\
+                 <button type=\"submit\">Revoke</button></form>",
+                id = esc(&key.id),
+            ),
+        };
+        machines.push_str(&format!(
+            "<tr><td><code>{id}</code></td><td>{scope}</td><td>{label}</td>\
+             <td>{minted}</td><td>{used}</td><td>{state}</td></tr>",
+            id = esc(&key.id),
+            scope = key.scope.as_str(),
+            label = esc(&key.label),
+            minted = esc(&key.created_at),
+            used = esc(key.last_used_at.as_deref().unwrap_or("never")),
+        ));
+    }
+    machines.push_str("</table>");
+
+    let body = format!(
+        "<h1><code>{handle}</code></h1>\
+         <p>{email}</p>\
+         <h2>Artifacts</h2>{artifacts}\
+         <h2>Machines</h2>\
+         <p>Each connected machine holds its own keys. Revoking here is what \
+         makes a lost laptop somebody else's brick — a key that is used is a \
+         machine that is alive.</p>{machines}\
+         <form method=\"post\" action=\"/account/pair\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <button type=\"submit\">Connect a machine</button></form>\
+         <hr>\
+         <form method=\"post\" action=\"/account/signout\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <button type=\"submit\">Sign out</button></form>",
+        handle = esc(&user.handle),
+        email = esc(&user.email),
+    );
+    page(StatusCode::OK, shell(&user.handle, &body, "/account/a/"))
+}
+
+/// `POST /account/signin` — one answer, whoever asked.
+pub async fn signin(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    body: String,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let email = form_values(&body)
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+
+    // Everything below this line must not change what the page says. The
+    // work happens if there is work; the answer is the same either way.
+    if !email.is_empty() {
+        match app.db.users_by_email(&email) {
+            Ok(users) => {
+                for user in users {
+                    send_signin_link(&app, &user);
+                }
+            }
+            Err(e) => tracing::error!(error = %e, "looking up a sign-in address"),
+        }
+    }
+    page(
+        StatusCode::OK,
+        shell(
+            "Check your email",
+            "<h1>Check your email</h1><p>If that address has an account, a \
+             sign-in link is on its way. It works once and expires in a few \
+             minutes.</p>",
+            "/account/a/",
+        ),
+    )
+}
+
+fn send_signin_link(app: &Shared, user: &UserRow) {
+    let today = crate::db::today();
+    match app.db.signin_links_today(&user.id, &today) {
+        Ok(sent) if sent >= crate::intake::SIGNIN_LINKS_PER_DAY => {
+            tracing::warn!(handle = %user.handle, "sign-in link budget exhausted for today");
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "counting sign-in links");
+            return;
+        }
+    }
+    let token = crate::intake::mint_token();
+    let expires = (chrono::Utc::now()
+        + chrono::Duration::minutes(crate::intake::SIGNIN_LINK_EXPIRY_MINUTES))
+    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if let Err(e) = app.db.signin_link_create(
+        &user.id,
+        &crate::intake::hash_token(&token),
+        &crate::db::now(),
+        &expires,
+    ) {
+        tracing::error!(error = %e, "recording a sign-in link");
+        return;
+    }
+    let link = format!("{}/account/s/{token}", app.config.base_url(Role::Gate));
+    app.mailer.send_signin(&user.email, &user.handle, &link);
+}
+
+/// `GET /account/s/<token>` — the link becomes a session.
+pub async fn finish(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(token): Path<String>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let now = crate::db::now();
+    let user_id = match app
+        .db
+        .signin_redeem(&crate::intake::hash_token(&token), &now)
+    {
+        Ok(Some(user_id)) => user_id,
+        Ok(None) => {
+            // Spent, expired, never real: one page, like every dead token
+            // in this program.
+            return page(
+                StatusCode::NOT_FOUND,
+                shell(
+                    "That link has expired",
+                    "<h1>That link has expired</h1><p>Sign-in links work once \
+                     and briefly. <a href=\"/account\">Ask for another.</a></p>",
+                    "",
+                ),
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "redeeming a sign-in link");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+
+    let session_token = crate::intake::mint_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::days(crate::intake::SESSION_EXPIRY_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if let Err(e) = app.db.session_create(
+        &user_id,
+        &crate::intake::hash_token(&session_token),
+        &now,
+        &expires,
+    ) {
+        tracing::error!(error = %e, "creating a session");
+        return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+            .into_response();
+    }
+
+    // 303: the token has been spent, and a refresh of this URL must land on
+    // the page rather than re-redeeming a dead link.
+    (
+        StatusCode::SEE_OTHER,
+        [
+            (header::LOCATION, "/account".to_string()),
+            (
+                header::SET_COOKIE,
+                format!(
+                    "{COOKIE}={session_token}; Path=/; HttpOnly; Secure; \
+                     SameSite=Lax; Max-Age={}",
+                    crate::intake::SESSION_EXPIRY_DAYS * 24 * 60 * 60
+                ),
+            ),
+        ],
+    )
+        .into_response()
+}
+
+/// `POST /account/signout`.
+pub async fn signout(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (token, _, _) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let _ = app
+        .db
+        .session_revoke(&crate::intake::hash_token(&token), &crate::db::now());
+    (
+        StatusCode::SEE_OTHER,
+        [
+            (header::LOCATION, "/account".to_string()),
+            (
+                header::SET_COOKIE,
+                format!("{COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"),
+            ),
+        ],
+    )
+        .into_response()
+}
+
+/// `POST /account/release` — the session's release authority.
+///
+/// The same `alias_set` the release key drives, under the same rules: the
+/// version must exist, and the user is the session's, never a form field.
+pub async fn release(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (token, user, values) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let field = |name: &str| {
+        values
+            .get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let id = field("id");
+    if mecha_manifest::valid_id(&id, "bundle id").is_err() {
+        return nothing_here();
+    }
+    let visibility = match field("visibility").as_str() {
+        "public" => mecha_manifest::Visibility::Public,
+        "private" => mecha_manifest::Visibility::Private,
+        _ => return nothing_here(),
+    };
+    let version = match field("version").as_str() {
+        "" => None,
+        text => match text.parse::<u32>() {
+            Ok(version) => Some(version),
+            Err(_) => return nothing_here(),
+        },
+    };
+    if let Some(version) = version {
+        match app.db.bundle(&user.id, &id, version) {
+            Ok(Some(_)) => {}
+            _ => return nothing_here(),
+        }
+    }
+    if let Err(e) = app
+        .db
+        .alias_set(&user.id, &id, version, visibility, &crate::db::now())
+    {
+        tracing::error!(error = %e, %id, "releasing from a session");
+        return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+            .into_response();
+    }
+    tracing::info!(handle = %user.handle, %id, ?version, ?visibility, "released from the account page");
+    render_overview(&app, &token, &user)
+}
+
+/// `POST /account/revoke` — a machine dies now.
+pub async fn revoke(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (token, user, values) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let key = values
+        .get("key")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    // Ownership is the WHERE clause: somebody else's key id revokes nothing.
+    match app.db.key_revoke_for(&user.id, key, &crate::db::now()) {
+        Ok(revoked) => {
+            if revoked {
+                tracing::info!(handle = %user.handle, key, "key revoked from the account page");
+            }
+        }
+        Err(e) => tracing::error!(error = %e, "revoking a key"),
+    }
+    render_overview(&app, &token, &user)
+}
+
+/// `POST /account/pair` — a fresh code, as the command to run.
+pub async fn pair(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (_, user, _) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let code = match crate::keys::mint_pairing(&app.db, &user.id) {
+        Ok(code) => code,
+        Err(e) => {
+            tracing::error!(error = %e, "minting a pairing code");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+    let esc = mecha_manifest::escape_text;
+    let body = format!(
+        "<h1>Connect a machine</h1>\
+         <p>On the machine that will publish for <code>{handle}</code>, run:</p>\
+         <pre><code>factory-publish connect --gate {gate} --handle {handle} \
+{code}</code></pre>\
+         <p>The code works once and expires in {expiry}&nbsp;minutes. \
+         <a href=\"/account\">Back to your page.</a></p>",
+        handle = esc(&user.handle),
+        gate = esc(&app.config.base_url(Role::Gate)),
+        code = esc(&code),
+        expiry = crate::keys::PAIR_EXPIRY_MINUTES,
+    );
+    page(
+        StatusCode::OK,
+        shell("Connect a machine", &body, "/account/a/"),
+    )
+}
+
+/// `GET /account/a/<name>` — the shared stylesheet, at this depth.
+pub async fn asset(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(name): Path<String>,
+) -> Response {
+    super::intake::serve_asset(&app, &origin, &name)
+}

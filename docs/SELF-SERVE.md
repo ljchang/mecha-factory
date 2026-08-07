@@ -482,8 +482,22 @@ zone triggers neither.
    security), and an agent wanting real isolation gets its own `MECHA_HOME`
    and pairs as its own machine. `connect` warns when it finds a release key
    on the machine, and never installs one.
-5. **The tenant surface**: artifacts owned, make public, connected machines,
-   `factory-publish disconnect`.
+5. ~~**The tenant surface**~~ *Built 2026-08-07* — `/account` on the gate:
+   magic-link sign-in (no passwords, oracle-free, budgeted per account per
+   day), a `__Host-`-prefixed session cookie (the prefix is what stops a
+   tenant's page tossing a `Domain=` cookie onto the gate, deferring the
+   §14.2 domain move), CSRF tokens derived from the session on top of
+   `SameSite=Lax`. The page is the second release door: release/unrelease
+   drives the same `alias_set` the release key drives. Machines-connected
+   is the keys ledger with `last_used_at` stamped on every authenticated
+   call — a silent compromise shows as life where none was expected — with
+   per-key revoke, and pairing codes minted from the page. A session
+   deliberately cannot publish: uploading stays with the machines' scoped
+   keys. `factory-publish disconnect` closes the loop — each installed key
+   revokes itself (`POST /v1/disconnect`, authenticated by the key being
+   revoked, no extra privilege) and leaves the disk; a key that could not
+   be revoked keeps its file, because deleting the local copy of a live
+   credential is tidiness dressed as security.
 6. **The operator surface**, which is the last thing still living on an SSH
    session.
 
