@@ -104,7 +104,62 @@ those live on the gate. So the day a capability becomes a cookie — which is th
 day the argument stops being theoretical — the move has to happen before any
 form link is in circulation, not after.
 
-### If the DNS is at Cloudflare
+### Moving the zone to Cloudflare
+
+Worth doing, and it is not what unlocks wildcard certificates — that is
+foreclosed by `rustls-acme`, which speaks only HTTP-01 and TLS-ALPN-01 (see
+`SELF-SERVE.md`). The payoff is that **Squarespace has no API for custom
+records**, so every row is typed by hand: the five SES rows were, and a
+tenant's custom domain would be.
+
+**The risk is not the factory, it is the website.** The apex and `www` point at
+Squarespace's own hosting, and a nameserver change that drops them takes the
+site down. Capture the zone before touching anything:
+
+```sh
+for n in mecha-factory.ai www gate art compute mail; do
+  for t in A AAAA CNAME MX TXT; do dig +short $t ${n%.*}.mecha-factory.ai; done
+done
+```
+
+What has to survive, as of 2026-08-07:
+
+| Type | Name | Value |
+|---|---|---|
+| A | `@` | `198.49.23.144`, `198.49.23.145`, `198.185.159.144`, `198.185.159.145` (Squarespace) |
+| CNAME | `www` | `ext-sq.squarespace.com` |
+| A | `gate`, `art`, `compute` | `64.227.29.109` |
+| A | `*.art`, `*.compute` | `64.227.29.109` |
+| CNAME | ×3 `<token>._domainkey` | `<token>.dkim.amazonses.com` |
+| MX | `mail` | `10 feedback-smtp.us-east-1.amazonses.com` |
+| TXT | `mail` | `v=spf1 include:amazonses.com -all` |
+| TXT | `@` | `v=spf1 -all` |
+| TXT | `_dmarc` | `v=DMARC1; p=reject; sp=reject; adkim=s; aspf=s` |
+
+The order that avoids an outage:
+
+1. Add the zone at Cloudflare. Its scan imports most records — **check every
+   row against the table above**, because a scan infers from public DNS and
+   cannot see anything that was not resolving.
+2. **Set every record to DNS-only (grey cloud).** Proxying terminates TLS,
+   which means Cloudflare reads the plaintext of drained submissions, and it
+   breaks TLS-ALPN-01 because the proxy answers the handshake the challenge
+   lives in. §13.2 chose no CDN for exactly the first reason.
+3. Lower TTLs and let the old ones expire before switching nameservers, so a
+   rollback is minutes rather than hours.
+4. Change the nameservers at the registrar.
+5. Verify from outside: the website loads, `gate` still serves, and
+   `aws sesv2 get-email-identity --email-identity mecha-factory.ai` still
+   reports `SUCCESS` for DKIM and MAIL FROM. **A DKIM CNAME lost in the move
+   does not bounce mail — it silently fails DMARC under `p=reject`**, which is
+   the same as not sending.
+
+Any API token for the box later should be scoped to this one zone with
+`DNS:Edit`, and if DNS-01 is ever adopted, `_acme-challenge` should be
+delegated by CNAME to a separate zone so the box's token cannot reach these
+records at all.
+
+### If the DNS is proxied at Cloudflare
 
 Use **DNS only** — the grey cloud, not the orange one. Proxying changes two
 things that this design deliberately decided against:
