@@ -136,6 +136,67 @@ pub async fn share(
     }
 }
 
+/// `/b/<id>/v/` — the version switcher: every version of a publicly served
+/// bundle, each at its immutable URL, with the live one named.
+///
+/// A factory-owned page at a path the version scheme already reserves, so it
+/// can never collide with a file inside a bundle — and deliberately *not* a
+/// banner injected into the bundles themselves: published bytes are
+/// content-addressed, and what was verified locally must be what the world
+/// sees, byte for byte. Same access rule as the bytes: private and unknown
+/// answer identically, a takedown covers this page too.
+pub async fn versions_index(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(id): Path<String>,
+) -> Response {
+    if origin.role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
+        return missing();
+    }
+    let Some(user) = owner(&app, &origin) else {
+        return missing();
+    };
+    let live = match access(&app, &user.id, &id) {
+        Access::Nothing => return missing(),
+        Access::Gone => return gone(&id),
+        Access::Current(version) => version,
+    };
+    let versions = app.db.bundle_versions(&user.id, &id).unwrap_or_default();
+    let mut items = String::new();
+    for v in &versions {
+        items.push_str(&format!(
+            "<li><a href=\"/b/{id}/v/{v}/\">v{v}</a>{}</li>\n",
+            if *v == live {
+                " — what the share URL shows"
+            } else {
+                ""
+            },
+        ));
+    }
+    let body = format!(
+        "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{id} — versions</title></head>\n\
+         <body><h1><code>{id}</code></h1>\
+         <p>Every published version is immutable and stays reachable; \
+         <a href=\"/b/{id}/\">the share URL</a> follows the alias.</p>\
+         <ul>{items}</ul></body></html>\n",
+        id = escape(&id),
+    );
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // The list changes when a version is published or the alias
+            // moves, so it is never cached the way the versions themselves
+            // are.
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
 /// `/b/<id>/v/<n>/` — a version's index.
 pub async fn version_root(
     state: State<Shared>,

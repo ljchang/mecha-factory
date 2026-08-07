@@ -408,3 +408,51 @@ fn health_is_public_and_the_counts_are_not() {
     assert_eq!(reply.status, 200);
     assert!(!reply.body.contains("handle"));
 }
+
+/// The version switcher at the bare `v/`: every version linked, the live one
+/// named, and the same one-answer rule as the bytes.
+#[test]
+fn the_version_index_lists_what_a_reader_may_switch_between() {
+    let server = start();
+    publish(
+        &server,
+        "switchable",
+        1,
+        ContentClass::Static,
+        Visibility::Public,
+    );
+    publish(
+        &server,
+        "switchable",
+        2,
+        ContentClass::Static,
+        Visibility::Public,
+    );
+    // Pin the share URL to v1 so "live" and "latest" differ.
+    server
+        .db
+        .alias_set(&server.user.id, "switchable", Some(1), Visibility::Public, "t")
+        .unwrap();
+    let host = server.host(server.artifacts);
+
+    let index = get_host(server.artifacts, &host, "/b/switchable/v/", None);
+    assert_eq!(index.status, 200, "{}", index.body);
+    assert!(index.body.contains("/b/switchable/v/1/"), "{}", index.body);
+    assert!(index.body.contains("/b/switchable/v/2/"), "{}", index.body);
+    assert!(
+        index.body.contains("v1</a> \u{2014} what the share URL shows"),
+        "{}",
+        index.body
+    );
+    assert_eq!(index.header("cache-control").unwrap(), "no-store");
+
+    // Private: the index answers exactly like a bundle that never existed.
+    server
+        .db
+        .alias_set(&server.user.id, "switchable", Some(1), Visibility::Private, "t")
+        .unwrap();
+    let hidden = get_host(server.artifacts, &host, "/b/switchable/v/", None);
+    let absent = get_host(server.artifacts, &host, "/b/no-such-bundle/v/", None);
+    assert_eq!(hidden.status, 404);
+    assert_eq!(hidden.body, absent.body);
+}

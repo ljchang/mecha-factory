@@ -186,6 +186,10 @@ pub fn router(app: Shared) -> Router {
         .route("/account/a/{name}", get(account::asset))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
+        // The version switcher sits at the bare `v/`, a path the version
+        // scheme reserves and no bundle file can occupy.
+        .route("/b/{id}/v", get(artifacts::versions_index))
+        .route("/b/{id}/v/", get(artifacts::versions_index))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/{*path}", get(artifacts::version_file))
