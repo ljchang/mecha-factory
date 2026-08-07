@@ -339,6 +339,11 @@ pub struct Config {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub limits: Limits,
+    /// Where the documentation lives, when there is any to point at. Shown in
+    /// the gate's header and on its front page; absent means the links simply
+    /// do not render — a deployment with no docs has no dead link.
+    #[serde(default)]
+    pub docs_url: Option<String>,
     /// Which built-in palette forms are served in. See `mecha_manifest::theme`.
     ///
     /// A deployment-wide setting rather than a per-type one: a manifest
@@ -407,6 +412,7 @@ impl Config {
             },
             tls: None,
             limits: Limits::default(),
+            docs_url: None,
         }
     }
 
@@ -436,6 +442,7 @@ impl Config {
                 staging: true,
             }),
             limits: Limits::default(),
+            docs_url: None,
         }
     }
 

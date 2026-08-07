@@ -191,6 +191,7 @@ pub fn start() -> Server {
         },
         tls: None,
         limits: Limits::default(),
+        docs_url: None,
     };
     let db = Db::open(&config.db_path()).unwrap();
     let user = db

@@ -54,8 +54,9 @@ pub(crate) fn page(status: StatusCode, body: String) -> Response {
 /// suppresses chrome on that signal — one rule, structural, instead of two
 /// call-site decisions that could disagree.
 pub(crate) enum Chrome {
-    /// The mark, linked to the gate root. Signup, intake pages, the root.
-    Public,
+    /// The mark, linked to the gate root — plus a Docs link when the
+    /// deployment configured one. Signup, intake pages, the root.
+    Public(Option<String>),
     /// The mark plus the account dropdown. Exactly one page earns this.
     Account {
         handle: String,
@@ -63,17 +64,34 @@ pub(crate) enum Chrome {
         /// The session's CSRF token, because the dropdown holds the sign-out
         /// form and a form without it bounces off `mutating()`.
         csrf: String,
+        docs_url: Option<String>,
     },
 }
 
 impl Chrome {
     fn render(&self) -> String {
+        let docs_link = |docs: &Option<String>| match docs {
+            Some(url) => format!(
+                "<nav><a href=\"{}\">Docs</a></nav>",
+                mecha_manifest::escape_text(url)
+            ),
+            None => String::new(),
+        };
         match self {
-            Chrome::Public => mecha_manifest::site_header(),
+            Chrome::Public(docs) => match docs {
+                None => mecha_manifest::site_header(),
+                Some(_) => format!(
+                    "<header class=\"site\">\
+                     <a class=\"mark\" href=\"/\" aria-label=\"mecha\">{}</a>{}</header>\n",
+                    mecha_manifest::LOGO_MONO_SVG,
+                    docs_link(docs),
+                ),
+            },
             Chrome::Account {
                 handle,
                 email,
                 csrf,
+                docs_url,
             } => format!(
                 "<header class=\"site\">\
                  <a class=\"mark\" href=\"/account\" aria-label=\"mecha\">{logo}</a>\
@@ -82,7 +100,7 @@ impl Chrome {
                  <div class=\"menu\">\
                  <p>{email}</p>\
                  <nav><a href=\"#artifacts\">Artifacts</a>\
-                 <a href=\"#machines\">Machines</a></nav>\
+                 <a href=\"#machines\">Machines</a>{docs}</nav>\
                  <form method=\"post\" action=\"/account/pair\">\
                  <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
                  <button type=\"submit\">Connect a machine</button></form>\
@@ -94,6 +112,13 @@ impl Chrome {
                 handle = mecha_manifest::escape_text(handle),
                 email = mecha_manifest::escape_text(email),
                 csrf = mecha_manifest::escape_text(csrf),
+                docs = match docs_url {
+                    Some(url) => format!(
+                        "<a href=\"{}\">Docs</a>",
+                        mecha_manifest::escape_text(url)
+                    ),
+                    None => String::new(),
+                },
             ),
         }
     }
@@ -110,7 +135,7 @@ impl Chrome {
 /// exists should say — and such a page takes `Chrome::None` too, since a
 /// header referencing anything would be a second thing to prove identical.
 pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
-    shell_with(title, body, assets, &Chrome::Public)
+    shell_with(title, body, assets, &Chrome::Public(None))
 }
 
 pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome) -> String {

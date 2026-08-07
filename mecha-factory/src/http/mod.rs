@@ -248,17 +248,49 @@ async fn guard(
 
 /// The gate's own front page. Deliberately almost nothing: this origin exists
 /// to serve an API and, later, forms — not to say who runs it.
-async fn root(origin: Extension<Origin>) -> Response {
+async fn root(State(app): State<Shared>, origin: Extension<Origin>) -> Response {
     if origin.role != Role::Gate {
         return Failure::text(StatusCode::NOT_FOUND, "not found").into_response();
     }
+    // The splash: what this machine is, and where everything else lives. The
+    // GitHub links are ordinary anchors — navigation, which no CSP directive
+    // governs — so the no-external-references rule for *resources* holds
+    // untouched.
+    let docs = match &app.config.docs_url {
+        Some(url) => format!(
+            "<li><a href=\"{}\">Documentation</a> — how to run one of these.</li>",
+            mecha_manifest::escape_text(url)
+        ),
+        None => String::new(),
+    };
+    let body = format!(
+        "<h1>mecha factory</h1>\
+         <p class=\"intro\">The public surface for <strong>mecha</strong>, an \
+         agent harness: a place for what an agent makes to live, and a typed \
+         way for the outside world to get in.</p>\
+         <p>Artifacts published here are durable, versioned and permissioned — \
+         a report an agent rendered, released by a person. Requests arrive \
+         through typed forms, verified by email, and reach an agent's owner \
+         with the free text quarantined. Nothing on this box holds a \
+         credential that reaches anyone's home machine.</p>\
+         <ul>\
+         <li><a href=\"{repo}\">mecha-factory on GitHub</a> — this server, \
+         the publisher, and the manifest contract.</li>\
+         <li><a href=\"https://github.com/ljchang/mecha\">mecha on GitHub</a> \
+         — the agent harness this is the public surface of.</li>\
+         {docs}\
+         <li><a href=\"/account\">Your page</a> — if one of the handles here \
+         is yours.</li>\
+         </ul>",
+        repo = env!("CARGO_PKG_REPOSITORY"),
+    );
     intake::page(
         StatusCode::OK,
-        intake::shell(
-            "factory",
-            "<p>This is a mecha factory. Nothing here is for browsing — \
-             but if it is yours, <a href=\"/account\">your page</a> is.</p>",
+        intake::shell_with(
+            "mecha factory",
+            &body,
             "/account/a/",
+            &intake::Chrome::Public(app.config.docs_url.clone()),
         ),
     )
 }

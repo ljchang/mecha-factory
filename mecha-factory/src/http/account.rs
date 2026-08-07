@@ -259,6 +259,7 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
         handle: user.handle.clone(),
         email: user.email.clone(),
         csrf: csrf.clone(),
+        docs_url: app.config.docs_url.clone(),
     };
     page(
         StatusCode::OK,
