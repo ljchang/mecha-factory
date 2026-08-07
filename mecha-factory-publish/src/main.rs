@@ -241,6 +241,35 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// An instrument's availability: computed here, served by the box.
+    #[command(subcommand)]
+    Slots(SlotsAction),
+}
+
+#[derive(Subcommand)]
+enum SlotsAction {
+    /// Compute bookable slots and replace the instrument's cache on the box.
+    ///
+    /// The write half of the slot-refresh pipeline:
+    ///
+    ///   mecha-mail freebusy --days 60 --json | factory-publish slots push book --policy …
+    ///
+    /// stdin is `mecha-mail freebusy --json` output. A scheduled command
+    /// with no model anywhere — a systemd timer runs it every fifteen
+    /// minutes, and everything it refuses (a stale answer, busy data that
+    /// stops short of the horizon) it refuses loudly, because the failure
+    /// mode of pushing anyway is offering strangers time the user does not
+    /// have.
+    Push {
+        /// The instrument whose cache to replace.
+        id: String,
+        /// The availability policy TOML (the `[availability]` vocabulary).
+        #[arg(long)]
+        policy: PathBuf,
+        /// Compute and print the slots, pushing nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -486,6 +515,11 @@ fn main() -> Result<()> {
         Command::Disconnect => println!("{}", remote::disconnect()?),
 
         Command::Drain { out, dry_run, json } => drain_command(out, dry_run, json)?,
+        Command::Slots(SlotsAction::Push {
+            id,
+            policy,
+            dry_run,
+        }) => slots_push_command(&id, &policy, dry_run)?,
 
         Command::Remote => match remote::Remote::configured()? {
             Some(remote) => {
@@ -1323,5 +1357,113 @@ fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> 
             record.invalid_reason.as_deref().unwrap_or("")
         );
     }
+    Ok(())
+}
+
+/// Compute an instrument's slots from stdin's busy intervals and replace its
+/// cache on the box. Everything here fails closed: partial knowledge of the
+/// calendar must never become "free" on a public page.
+fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<()> {
+    use mecha_factory_publish::availability::{self, Interval};
+
+    let policy_text = std::fs::read_to_string(policy_path)
+        .with_context(|| format!("reading {}", policy_path.display()))?;
+    let policy = availability::Policy::from_toml(&policy_text)
+        .with_context(|| format!("{}", policy_path.display()))?;
+
+    let stdin = std::io::read_to_string(std::io::stdin()).context("reading stdin")?;
+    anyhow::ensure!(
+        !stdin.trim().is_empty(),
+        "nothing on stdin — pipe `mecha-mail freebusy --json` into this"
+    );
+    #[derive(serde::Deserialize)]
+    struct FreebusyDoc {
+        generated_at: String,
+        time_min: String,
+        time_max: String,
+        busy: Vec<Interval>,
+    }
+    let doc: FreebusyDoc =
+        serde_json::from_str(&stdin).context("stdin is not `mecha-mail freebusy --json` output")?;
+
+    let stamp = |raw: &str| -> Result<chrono::DateTime<chrono::Utc>> {
+        Ok(chrono::DateTime::parse_from_rfc3339(raw)
+            .with_context(|| format!("`{raw}` in the freebusy document"))?
+            .with_timezone(&chrono::Utc))
+    };
+    let generated_at = stamp(&doc.generated_at)?;
+    let time_min = stamp(&doc.time_min)?;
+    let time_max = stamp(&doc.time_max)?;
+
+    // Everything downstream is anchored to the freebusy document's own
+    // stamp, never this process's clock. Two clocks a second apart made
+    // `--days 60` structurally unable to satisfy a 60-day horizon (found by
+    // running the documented pipeline, not by reading it) — and the anchor
+    // buys the property the timer unit promises anyway: the same input
+    // produces the same slots. Staleness of the anchor is bounded first.
+    anyhow::ensure!(
+        chrono::Utc::now() - generated_at <= chrono::Duration::hours(1),
+        "this freebusy answer is from {generated_at}, over an hour old — refusing to \
+         push stale availability; re-run the pipeline"
+    );
+
+    // The busy data has to cover everything the policy would offer. Data
+    // that stops short of the horizon says nothing about the far weeks, and
+    // "nothing known" rendered as "nothing busy" is exactly the lie this
+    // refuses to tell.
+    let horizon_end = generated_at + chrono::Duration::days(i64::from(policy.horizon_days));
+    anyhow::ensure!(
+        time_max >= horizon_end,
+        "the freebusy window ends {time_max}, short of the {}-day horizon ({horizon_end}) — \
+         run `mecha-mail freebusy --days {}` or more",
+        policy.horizon_days,
+        policy.horizon_days
+    );
+    anyhow::ensure!(
+        time_min <= generated_at,
+        "the freebusy window starts at {time_min}, after its own generated_at — \
+         the busy data must cover the present"
+    );
+
+    // Holds (open group polls) and bookings (the local ledger) arrive with
+    // later build steps; today the calendar itself is the only subtraction.
+    let slots = availability::availability(&policy, &doc.busy, &[], &[], generated_at);
+
+    if dry_run {
+        println!(
+            "{} slot(s) from {} busy interval(s), horizon {} days",
+            slots.len(),
+            doc.busy.len(),
+            policy.horizon_days
+        );
+        for slot in &slots {
+            let local = slot.start.with_timezone(&policy.timezone);
+            println!(
+                "  {}  {:>3} min",
+                local.format("%a %Y-%m-%d %H:%M %Z"),
+                slot.duration_minutes
+            );
+        }
+        println!("\n(dry run: nothing pushed)");
+        return Ok(());
+    }
+
+    let Some(remote) = remote::Remote::configured_for(remote::Scope::Slots)? else {
+        bail!(
+            "no factory gate configured — write `gate = \"https://…\"` to \
+             ~/.mecha/factory/config.toml and install slots.key beside it"
+        );
+    };
+    let payload = serde_json::json!({
+        "generated_at": doc.generated_at,
+        "horizon_days": policy.horizon_days,
+        "slots": slots,
+    });
+    let reply = remote.slots_push(id, &payload)?;
+    println!(
+        "pushed {} slot(s) for `{id}` (generated {})",
+        reply["stored"].as_u64().unwrap_or(slots.len() as u64),
+        doc.generated_at,
+    );
     Ok(())
 }

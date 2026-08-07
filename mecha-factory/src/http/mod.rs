@@ -112,6 +112,7 @@ pub fn router(app: Shared) -> Router {
             )),
         )
         .route("/v1/bundles/{id}/alias", post(v1::alias))
+        .route("/v1/instruments/{id}/slots", axum::routing::put(v1::put_slots))
         .route("/v1/queue", get(v1::drain))
         .route("/v1/queue/ack", post(v1::ack))
         .route("/v1/queue/attachments/{id}", get(v1::attachment))

@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 7;
+const SCHEMA: i64 = 8;
 
 #[derive(Clone)]
 pub struct Db {
@@ -186,6 +186,13 @@ pub enum Scope {
     Release,
     /// Read the queue and acknowledge records.
     Drain,
+    /// Replace an instrument's slot cache — the availability a booking page
+    /// serves. Its own scope rather than a use of `Publish`, because the key
+    /// sits in a systemd timer's environment on a schedule with no human
+    /// near it: the worst a stolen one does is misstate when the user is
+    /// free, and it must not also be able to write versions, move aliases,
+    /// or read anything at all.
+    Slots,
     /// Run the box: users, invites, every key, withholds, queue depths.
     ///
     /// The operator's credential — what retires the SSH session from routine
@@ -204,13 +211,20 @@ impl Scope {
     /// adding a third minted tokens that nothing could parse: the key
     /// authenticated as no scope at all and the endpoint answered 401. A match
     /// would have caught it; a hand-copied list did not.
-    pub const ALL: [Scope; 4] = [Scope::Publish, Scope::Release, Scope::Drain, Scope::Operate];
+    pub const ALL: [Scope; 5] = [
+        Scope::Publish,
+        Scope::Release,
+        Scope::Drain,
+        Scope::Slots,
+        Scope::Operate,
+    ];
 
     pub fn as_str(&self) -> &'static str {
         match self {
             Scope::Publish => "publish",
             Scope::Release => "release",
             Scope::Drain => "drain",
+            Scope::Slots => "slots",
             Scope::Operate => "operate",
         }
     }
@@ -220,8 +234,11 @@ impl Scope {
             "publish" => Ok(Scope::Publish),
             "release" => Ok(Scope::Release),
             "drain" => Ok(Scope::Drain),
+            "slots" => Ok(Scope::Slots),
             "operate" => Ok(Scope::Operate),
-            other => anyhow::bail!("unknown scope `{other}` (publish | release | drain | operate)"),
+            other => anyhow::bail!(
+                "unknown scope `{other}` (publish | release | drain | slots | operate)"
+            ),
         }
     }
 
@@ -232,6 +249,7 @@ impl Scope {
             Scope::Publish => "mk_pub_",
             Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
+            Scope::Slots => "mk_slt_",
             Scope::Operate => "mk_opr_",
         }
     }
@@ -272,6 +290,20 @@ pub struct TypeRow {
     pub manifest: String,
     pub schema: String,
     pub updated_at: String,
+}
+
+/// One instrument's cached availability, exactly as home pushed it.
+#[derive(Debug, Clone)]
+pub struct SlotCacheRow {
+    pub user_id: String,
+    pub instrument_id: String,
+    /// Home's stamp: when the slots were computed, not when they arrived.
+    pub generated_at: String,
+    pub horizon_days: i64,
+    /// A JSON array of `{start, end, duration_minutes}`, shape-validated at
+    /// the endpoint before it is stored.
+    pub slots: String,
+    pub received_at: String,
 }
 
 /// A submission on its way in, before anybody has proved anything.
@@ -1147,6 +1179,55 @@ impl Db {
         })
     }
 
+    // ---- slot caches ----------------------------------------------------
+
+    /// Replace an instrument's slot cache. One statement, so a reader never
+    /// sees half an update; the previous cache is gone the moment this lands,
+    /// because two generations of availability shown together would offer
+    /// slots home has already withdrawn.
+    pub fn slots_put(&self, row: &SlotCacheRow) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO slot_cache \
+                 (user_id, instrument_id, generated_at, horizon_days, slots, received_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(user_id, instrument_id) DO UPDATE SET \
+                 generated_at = ?3, horizon_days = ?4, slots = ?5, received_at = ?6",
+                params![
+                    row.user_id,
+                    row.instrument_id,
+                    row.generated_at,
+                    row.horizon_days,
+                    row.slots,
+                    row.received_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn slots_get(&self, user_id: &str, instrument_id: &str) -> Result<Option<SlotCacheRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT user_id, instrument_id, generated_at, horizon_days, slots, \
+                     received_at FROM slot_cache WHERE user_id = ?1 AND instrument_id = ?2",
+                    params![user_id, instrument_id],
+                    |r| {
+                        Ok(SlotCacheRow {
+                            user_id: r.get(0)?,
+                            instrument_id: r.get(1)?,
+                            generated_at: r.get(2)?,
+                            horizon_days: r.get(3)?,
+                            slots: r.get(4)?,
+                            received_at: r.get(5)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
     // ---- the queue ------------------------------------------------------
 
     pub fn queue_add(
@@ -2016,6 +2097,22 @@ fn migrate(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL,
             expires_at  TEXT NOT NULL,
             used_at     TEXT
+        );
+
+        -- One instrument's availability, replaced wholesale on every push
+        -- from home and never computed here: the box subtracts from this
+        -- cache (its own holds and bookings), it may never add to it. The
+        -- slots column is a JSON array the endpoint shape-validated on the
+        -- way in; generated_at is home's stamp, served beside the slots so
+        -- a page can state its own staleness.
+        CREATE TABLE IF NOT EXISTS slot_cache (
+            user_id       TEXT NOT NULL,
+            instrument_id TEXT NOT NULL,
+            generated_at  TEXT NOT NULL,
+            horizon_days  INTEGER NOT NULL,
+            slots         TEXT NOT NULL,
+            received_at   TEXT NOT NULL,
+            PRIMARY KEY (user_id, instrument_id)
         );
 
         -- A signed-in browser. The cookie holds the token; this holds its

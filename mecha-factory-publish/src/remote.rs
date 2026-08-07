@@ -43,6 +43,11 @@ pub enum Scope {
     /// client's config and onto the credential.
     Release,
     Drain,
+    /// Replace an instrument's slot cache. Held by the slot-refresh timer —
+    /// a scheduled command with no model and no human — which is exactly why
+    /// it exists apart from `Publish`: the credential that lives in a
+    /// systemd unit's environment should open one narrow door.
+    Slots,
     /// Run the box. Held by the operator's own machine and never installed
     /// by pairing — `connect` mints publish and drain, full stop. The verbs
     /// behind it are CLI-only, never MCP tools: operator power stays off the
@@ -59,6 +64,7 @@ impl Scope {
             Scope::Publish => "mk_pub_",
             Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
+            Scope::Slots => "mk_slt_",
             Scope::Operate => "mk_opr_",
         }
     }
@@ -68,6 +74,7 @@ impl Scope {
             Scope::Publish => "publish.key",
             Scope::Release => "release.key",
             Scope::Drain => "drain.key",
+            Scope::Slots => "slots.key",
             Scope::Operate => "operate.key",
         }
     }
@@ -79,6 +86,7 @@ impl Scope {
             Scope::Publish => "FACTORY_PUBLISH_KEY",
             Scope::Release => "FACTORY_RELEASE_KEY",
             Scope::Drain => "FACTORY_DRAIN_KEY",
+            Scope::Slots => "FACTORY_SLOTS_KEY",
             Scope::Operate => "FACTORY_OPERATE_KEY",
         }
     }
@@ -88,6 +96,7 @@ impl Scope {
             Scope::Publish => "publish",
             Scope::Release => "release",
             Scope::Drain => "drain",
+            Scope::Slots => "slots",
             Scope::Operate => "operate",
         }
     }
@@ -257,6 +266,21 @@ impl Remote {
     /// What request types the box is serving forms for.
     pub fn type_list(&self) -> Result<serde_json::Value> {
         self.request("GET", "/v1/types", None)
+    }
+
+    /// Replace one instrument's slot cache on the box.
+    pub fn slots_push(
+        &self,
+        instrument_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.send(
+            "PUT",
+            &format!("/v1/instruments/{instrument_id}/slots"),
+            Some(payload.to_string().as_bytes()),
+            "application/json",
+        )
+        .with_context(|| format!("pushing slots for `{instrument_id}`"))
     }
 
     /// Take everything verified and not yet acknowledged, from `since` on.

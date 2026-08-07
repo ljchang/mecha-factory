@@ -27,8 +27,11 @@ forgetting is not "the site is down", it is "the site is someone else's".
 > renewal it finds nothing to do.
 
 Everything below assumes the box is **assumed lost**. Nothing on it reaches
-home, and every key it knows — publish, release, drain, operate — is an
-Argon2id hash of a token it can never reproduce.
+home, and every key it knows — publish, release, drain, slots, operate —
+is an Argon2id hash of a token it can never reproduce. (`slots` is the
+narrowest: it can only replace a booking instrument's availability cache,
+and it exists apart from `publish` because it lives beside a systemd timer
+with no human near it.)
 
 ## What runs where
 

@@ -555,6 +555,129 @@ pub async fn get_type(
     }
 }
 
+/// The slot push body, exactly and only these fields. Parsed into types
+/// rather than stored as-received: what lands in the ledger is a
+/// re-serialisation of what validated, so nothing rides along inside the
+/// JSON that this code did not look at.
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct SlotPush {
+    generated_at: String,
+    horizon_days: u32,
+    slots: Vec<PushedSlot>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+struct PushedSlot {
+    start: String,
+    end: String,
+    duration_minutes: u32,
+}
+
+/// More slots than a dense two-month horizon could honestly produce; above
+/// it the push is malformed, not ambitious.
+const MAX_SLOTS: usize = 5000;
+
+/// `PUT /v1/instruments/{id}/slots` — replace one instrument's availability.
+///
+/// `Scope::Slots` only: the pushing credential lives beside a systemd timer,
+/// so the endpoint it opens has to be worth exactly this little. The cache
+/// is data from home, replaced wholesale — the box never computes
+/// availability, and (in the booking page later) only ever *subtracts* from
+/// what was pushed. Every stamp is parse-checked and every slot's stated
+/// duration must equal its span: an interval that disagrees with itself is
+/// a bug upstream, and storing it would make the disagreement a stranger's
+/// problem.
+pub async fn put_slots(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match authorised(&app, &headers, Scope::Slots) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    let bad = |message: String| Failure::json(StatusCode::BAD_REQUEST, message).into_response();
+
+    let ok_id = !id.is_empty()
+        && id.len() <= 64
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !ok_id {
+        return bad(format!(
+            "instrument id `{id}` must be 1–64 of lowercase, digits, `-`, `_`"
+        ));
+    }
+
+    let push: SlotPush = match serde_json::from_str(&body) {
+        Ok(push) => push,
+        Err(e) => return bad(format!("slot push: {e}")),
+    };
+    let stamp = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw);
+    if stamp(&push.generated_at).is_err() {
+        return bad(format!(
+            "generated_at `{}` is not RFC 3339",
+            push.generated_at
+        ));
+    }
+    if push.horizon_days > 366 {
+        return bad(format!("horizon_days {} is over a year", push.horizon_days));
+    }
+    if push.slots.len() > MAX_SLOTS {
+        return bad(format!(
+            "{} slots is over the {MAX_SLOTS} cap",
+            push.slots.len()
+        ));
+    }
+    for (i, slot) in push.slots.iter().enumerate() {
+        let (Ok(start), Ok(end)) = (stamp(&slot.start), stamp(&slot.end)) else {
+            return bad(format!("slot {i}: unparseable start or end"));
+        };
+        if end <= start {
+            return bad(format!("slot {i}: end is not after start"));
+        }
+        let span = end - start;
+        if span != chrono::Duration::minutes(i64::from(slot.duration_minutes)) {
+            return bad(format!(
+                "slot {i}: duration_minutes {} disagrees with its own span",
+                slot.duration_minutes
+            ));
+        }
+    }
+
+    let row = crate::db::SlotCacheRow {
+        user_id: user.id.clone(),
+        instrument_id: id.clone(),
+        generated_at: push.generated_at.clone(),
+        horizon_days: i64::from(push.horizon_days),
+        slots: serde_json::to_string(&push.slots)
+            .unwrap_or_else(|_| "[]".into()),
+        received_at: crate::db::now(),
+    };
+    if let Err(e) = app.db.slots_put(&row) {
+        tracing::error!(%id, error = %e, "storing a slot cache");
+        return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+    }
+    tracing::info!(%id, slots = push.slots.len(), "slot cache replaced");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "instrument": id,
+            "stored": push.slots.len(),
+            "generated_at": push.generated_at,
+            "received_at": row.received_at,
+        })),
+    )
+        .into_response()
+}
+
 #[derive(serde::Deserialize)]
 pub struct DrainQuery {
     /// The highest sequence number home already holds.
