@@ -47,8 +47,8 @@ impl Credentials {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path)
             .with_context(|| format!("reading SES credentials from {}", path.display()))?;
-        let parsed: toml::Value = toml::from_str(&text)
-            .with_context(|| format!("parsing {}", path.display()))?;
+        let parsed: toml::Value =
+            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
         let field = |name: &str| -> Result<String> {
             parsed
                 .get(name)
@@ -115,7 +115,13 @@ impl SesMailer {
     /// One send, blocking. Errors are returned so the caller can decide; the
     /// caller in this crate logs and drops them, because what the stranger is
     /// told must not depend on whether the send worked.
-    fn send(&self, to: &str, subject: &str, text: &str, now: chrono::DateTime<chrono::Utc>) -> Result<()> {
+    fn send(
+        &self,
+        to: &str,
+        subject: &str,
+        text: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<()> {
         let payload = serde_json::json!({
             "FromEmailAddress": self.from,
             "Destination": { "ToAddresses": [to] },
@@ -299,7 +305,9 @@ mod tests {
         let a = mailer().sign(b"{}", at("2026-08-07T00:00:00Z"));
         let b = mailer().sign(b"{}", at("2026-08-07T00:00:00Z"));
         assert_eq!(a, b);
-        assert!(a.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/us-east-1/ses/aws4_request,"));
+        assert!(a.starts_with(
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260807/us-east-1/ses/aws4_request,"
+        ));
         assert!(a.contains("SignedHeaders=content-type;host;x-amz-date"));
     }
 
@@ -319,7 +327,10 @@ mod tests {
         let mut west = mailer();
         west.region = "us-west-2".into();
         let other_region = west.sign(b"{}", at("2026-08-07T00:00:00Z"));
-        assert_ne!(base, other_region, "the region is in the scope and the host");
+        assert_ne!(
+            base, other_region,
+            "the region is in the scope and the host"
+        );
     }
 
     /// The credential scope's date and `X-Amz-Date` are derived separately and

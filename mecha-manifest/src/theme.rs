@@ -237,9 +237,7 @@ mod tests {
                 let line = line.trim();
                 if line.ends_with('{') {
                     assert!(
-                        line.starts_with(":root")
-                            || line.starts_with("@media")
-                            || line == "{",
+                        line.starts_with(":root") || line.starts_with("@media") || line == "{",
                         "theme `{}` opened a rule that is not a token scope: {line}",
                         theme.name
                     );

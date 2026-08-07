@@ -399,7 +399,10 @@ mod tests {
         let types = home.path().join("factory").join("types");
         std::fs::create_dir_all(&types).unwrap();
         std::fs::copy(
-            concat!(env!("CARGO_MANIFEST_DIR"), "/../mecha-manifest/types/meeting.toml"),
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../mecha-manifest/types/meeting.toml"
+            ),
             types.join("meeting.toml"),
         )
         .unwrap();

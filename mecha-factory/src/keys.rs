@@ -281,7 +281,9 @@ mod tests {
                 minted.token
             );
             let row = authenticate(&db, Some(&format!("Bearer {}", minted.token)), scope)
-                .unwrap_or_else(|e| panic!("{scope:?} did not authenticate for its own scope: {e}"));
+                .unwrap_or_else(|e| {
+                    panic!("{scope:?} did not authenticate for its own scope: {e}")
+                });
             assert_eq!(row.scope, scope);
         }
     }

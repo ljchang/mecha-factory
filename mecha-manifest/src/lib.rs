@@ -55,27 +55,27 @@
 //! browser did not show it, so the server cannot insist on it. See
 //! [`RequestType::visible_fields`].
 
+pub mod brand;
 mod bundle;
 mod condition;
-pub mod brand;
 mod csp;
-pub mod theme;
 mod digest;
 mod form;
 mod media;
 mod request;
 mod schema;
+pub mod theme;
 mod validate;
 
+pub use brand::{FAVICON_DATA_URI, FAVICON_LINK};
 pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};
-pub use brand::{FAVICON_DATA_URI, FAVICON_LINK};
 pub use csp::{gate_headers, Header};
-pub use theme::{Palette, Theme, BUILT_IN as BUILT_IN_THEMES};
 pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::FormOptions;
 pub use media::content_type;
 pub use request::{valid_id, Acknowledgment, Field, FieldKind, RequestType, Step};
+pub use theme::{Palette, Theme, BUILT_IN as BUILT_IN_THEMES};
 pub use validate::{Submission, ValidationError};
 
 /// Anything wrong with a manifest itself, as opposed to with a submission

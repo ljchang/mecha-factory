@@ -232,14 +232,16 @@ pub async fn submit(
         Ok(submission) => submission,
         // Their own form back, with the errors on it. This is the only thing
         // the response varies on, deliberately.
-        Err(errors) => return render_form(
+        Err(errors) => {
+            return render_form(
                 &request_type,
                 &handle,
                 &type_id,
                 &app.config.theme,
                 raw,
                 &errors,
-            ),
+            )
+        }
     };
 
     let Some(address) = submission
@@ -401,7 +403,11 @@ pub async fn confirm(
     };
     page(
         StatusCode::OK,
-        shell(&request_type.title, &body, &format!("/f/{handle}/{type_id}/")),
+        shell(
+            &request_type.title,
+            &body,
+            &format!("/f/{handle}/{type_id}/"),
+        ),
     )
 }
 
