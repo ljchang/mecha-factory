@@ -166,6 +166,26 @@ impl Remote {
         Ok(Some(Remote { gate, key, scope }))
     }
 
+    /// The configured remote presenting this credential — or `None` when the
+    /// key simply is not on this machine.
+    ///
+    /// The distinction from [`Remote::configured_for`] is which absence is
+    /// ordinary. A missing *publish* key on a machine with a gate configured
+    /// is a broken setup and stays a loud error — a push that silently did
+    /// not happen is the degrading shape. A missing *release* key is the
+    /// designed state of every paired agent machine, and the callers that
+    /// look one up want "not here" as an answer, not a failure: the alias
+    /// stays put and the caller says where to release from. Before this, the
+    /// graceful arm existed and the lookup could not reach it — the first
+    /// machine to hold publish-without-release found that out.
+    pub fn installed(scope: Scope) -> Result<Option<Remote>> {
+        let has_env = std::env::var(scope.env()).is_ok_and(|p| !p.is_empty());
+        if !has_env && !Self::dir()?.join(scope.file()).exists() {
+            return Ok(None);
+        }
+        Self::configured_for(scope)
+    }
+
     pub fn gate(&self) -> &str {
         &self.gate
     }
@@ -367,7 +387,7 @@ pub fn mirror(
     // published — which is the shape an agent should have: it can do all the
     // work and cannot be the one who decides the world sees it.
     if let Some(target) = alias_to {
-        match Remote::configured_for(Scope::Release)? {
+        match Remote::installed(Scope::Release)? {
             Some(releaser) => {
                 releaser.alias(id, Some(target), visibility)?;
             }
@@ -400,7 +420,7 @@ pub fn mirror_alias(
     version: Option<u32>,
     visibility: Visibility,
 ) -> Result<Option<String>> {
-    let Some(remote) = Remote::configured_for(Scope::Release)? else {
+    let Some(remote) = Remote::installed(Scope::Release)? else {
         return Ok(None);
     };
     Ok(Some(remote.alias(id, version, visibility)?))
@@ -887,5 +907,40 @@ mod connect_tests {
         std::env::remove_var("MECHA_HOME");
         assert!(err.contains("already exists"), "{err}");
         assert!(err.contains("--replace"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod installed_tests {
+    use super::*;
+
+    /// The paired-machine state: gate configured, publish key present, no
+    /// release key. `installed` answers "not here" where `configured_for`
+    /// answers with an error — and the error stays right for the publish
+    /// key, whose absence on a configured machine is a broken setup.
+    #[test]
+    fn a_missing_release_key_is_an_answer_and_a_missing_publish_key_is_an_error() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let dir = home.path().join("factory");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "gate = \"https://gate.example.org\"\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("publish.key"), "mk_pub_id.secret\n").unwrap();
+
+        assert!(Remote::installed(Scope::Release).unwrap().is_none());
+        assert!(Remote::installed(Scope::Publish).unwrap().is_some());
+        assert!(Remote::configured_for(Scope::Release).is_err());
+
+        // The push path deliberately keeps `configured_for`: a machine with
+        // a gate and no publish key is broken, not unpaired, and `mirror`
+        // must keep saying so loudly rather than skipping the push.
+        std::fs::remove_file(dir.join("publish.key")).unwrap();
+        assert!(Remote::configured_for(Scope::Publish).is_err());
+        std::env::remove_var("MECHA_HOME");
     }
 }
