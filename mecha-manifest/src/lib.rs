@@ -57,7 +57,9 @@
 
 mod bundle;
 mod condition;
+pub mod brand;
 mod csp;
+pub mod theme;
 mod digest;
 mod form;
 mod media;
@@ -67,7 +69,9 @@ mod validate;
 
 pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};
-pub use csp::Header;
+pub use brand::{FAVICON_DATA_URI, FAVICON_LINK};
+pub use csp::{gate_headers, Header};
+pub use theme::{Palette, Theme, BUILT_IN as BUILT_IN_THEMES};
 pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::FormOptions;
 pub use media::content_type;

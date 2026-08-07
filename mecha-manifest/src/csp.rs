@@ -93,6 +93,10 @@ impl ContentClass {
     }
 
     /// Every header a bundle of this class is served with.
+    ///
+    /// **Not for the gate.** These describe an *artifact* — something a reader
+    /// looks at and which submits nothing anywhere. The gate serves forms, and
+    /// a form has to POST. See [`gate_headers`].
     pub fn headers(&self) -> Vec<Header> {
         let mut out = vec![
             ("Content-Security-Policy", self.csp()),
@@ -113,9 +117,86 @@ impl ContentClass {
     }
 }
 
+/// The policy the **gate** serves its own pages under.
+///
+/// The gate is not an artifact origin, and applying the artifact policy to it
+/// was a real, silent breakage: `form-action 'none'` means a browser refuses to
+/// submit the form, and `script-src 'none'` blocks the conditional-field script
+/// the generator emits. Neither showed up in testing, because every test
+/// submitted with `curl` — which enforces no policy at all. A stranger with a
+/// browser could read the form and never send it.
+///
+/// It stays as narrow as a page that submits can be:
+///
+/// - **`form-action 'self'`** — it may POST back to us, and nowhere else. That
+///   is the directive that matters: it is what stops injected markup pointing
+///   the form at somebody else's collector.
+/// - **`script-src 'self'`** — our own `form.js`, which hides fields whose
+///   `show_when` is unmet. A convenience and never a control: the server
+///   evaluates the same rules, and a submission that ignores the script is
+///   refused there.
+/// - **`default-src 'none'` and `connect-src 'none'`** — the form fetches
+///   nothing at runtime and must not start.
+pub fn gate_headers() -> Vec<Header> {
+    let csp = [
+        "default-src 'none'",
+        "style-src 'self'",
+        "script-src 'self'",
+        "img-src 'self' data:",
+        "font-src 'self'",
+        "connect-src 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+        "base-uri 'none'",
+    ]
+    .join("; ");
+    vec![
+        ("Content-Security-Policy", csp),
+        ("X-Content-Type-Options", "nosniff".into()),
+        // A form carries somebody's name and address in its URL history but
+        // not in a referer we hand to anyone else.
+        ("Referrer-Policy", "no-referrer".into()),
+        ("Cross-Origin-Resource-Policy", "same-origin".into()),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A form has to be able to submit, and the artifact policy forbids it.
+    ///
+    /// This shipped: the gate served `ContentClass::Static`, so a browser
+    /// refused the POST and a stranger could fill the form in and never send
+    /// it. Nothing caught it because every test submitted with `curl`, which
+    /// enforces no policy — so the assertion is written against the directive
+    /// rather than against a request that appears to succeed.
+    #[test]
+    fn the_gate_can_submit_a_form_and_the_artifact_policy_cannot() {
+        let gate = gate_headers()
+            .into_iter()
+            .find(|(name, _)| *name == "Content-Security-Policy")
+            .map(|(_, value)| value)
+            .expect("a policy");
+
+        assert!(
+            gate.contains("form-action 'self'"),
+            "the gate must be able to POST to itself: {gate}"
+        );
+        assert!(
+            gate.contains("script-src 'self'"),
+            "the conditional-field script is ours and same-origin: {gate}"
+        );
+        // Narrow everywhere else: a form fetches nothing at runtime.
+        assert!(gate.contains("default-src 'none'"), "{gate}");
+        assert!(gate.contains("connect-src 'none'"), "{gate}");
+        assert!(gate.contains("frame-ancestors 'none'"), "{gate}");
+
+        // And the policy it used to be served under would have blocked both.
+        let artifact = ContentClass::Static.csp();
+        assert!(artifact.contains("form-action 'none'"));
+        assert!(artifact.contains("script-src 'none'"));
+    }
 
     /// The claim the whole artifact model rests on, as an assertion rather than
     /// a sentence in a design document.

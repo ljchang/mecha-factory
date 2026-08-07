@@ -169,6 +169,7 @@ pub fn start() -> Server {
     let addresses: Vec<SocketAddr> = listeners.iter().map(|l| l.local_addr().unwrap()).collect();
 
     let config = Config {
+        theme: "nocturne".into(),
         data_dir: dir.path().to_path_buf(),
         origins: Origins {
             gate: addresses[0].to_string(),

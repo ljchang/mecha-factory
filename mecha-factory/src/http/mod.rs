@@ -157,15 +157,25 @@ async fn guard(
         return Failure::text(StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response();
     }
 
+    let role = origin.role;
     let mut request = request;
     request.extensions_mut().insert(origin);
     let mut response = next.run(request).await;
 
     // The default policy, applied only where a handler did not already declare
-    // one. A bundle response carries its class's headers; everything else is
-    // `static`, under which nothing executes.
+    // one. A bundle response carries its class's headers; an artifact origin
+    // falls back to `static`, under which nothing executes.
+    //
+    // The gate is the exception, and it was a real breakage rather than a
+    // nicety: `static` carries `form-action 'none'`, so a browser silently
+    // refused to submit the one kind of page this origin exists to serve.
+    let defaults = if role == Role::Gate {
+        mecha_manifest::gate_headers()
+    } else {
+        ContentClass::Static.headers()
+    };
     let headers = response.headers_mut();
-    for (name, value) in ContentClass::Static.headers() {
+    for (name, value) in defaults {
         if !headers.contains_key(name) {
             if let Ok(value) = HeaderValue::from_str(&value) {
                 headers.insert(name, value);

@@ -296,6 +296,18 @@ pub struct Config {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub limits: Limits,
+    /// Which built-in palette forms are served in. See `mecha_manifest::theme`.
+    ///
+    /// A deployment-wide setting rather than a per-type one: a manifest
+    /// describes *a request*, and what it looks like is a property of whose
+    /// front door it is. An unknown name falls back to the default rather than
+    /// refusing to start — a typo here must not take the forms down.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+}
+
+fn default_theme() -> String {
+    "nocturne".into()
 }
 
 impl Config {
@@ -315,6 +327,7 @@ impl Config {
     /// `Host: 127.0.0.1:8401`, which is a name the origin table knows.
     pub fn dev(data_dir: PathBuf, base_port: u16) -> Self {
         Config {
+            theme: default_theme(),
             data_dir,
             origins: Origins {
                 gate: format!("127.0.0.1:{base_port}"),

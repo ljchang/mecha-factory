@@ -47,11 +47,28 @@ fn page(status: StatusCode, body: String) -> Response {
     (status, Html(body)).into_response()
 }
 
-fn shell(title: &str, body: &str) -> String {
+/// The wrapper every non-form page uses.
+///
+/// `assets` is a **root-relative** prefix, for the same reason the form's is:
+/// these pages are served at three different depths — `/f/<h>/<t>` for the
+/// "check your email" page and `/f/<h>/<t>/c/<token>` for the confirmation —
+/// and a relative `form.css` resolved differently from each, which is to say
+/// wrongly from all of them. An empty prefix means "no stylesheet worth
+/// resolving", which is what a 404 that must not reveal whether a handle
+/// exists should say.
+fn shell(title: &str, body: &str, assets: &str) -> String {
+    let style = if assets.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<link rel=\"stylesheet\" href=\"{}form.css\">",
+            mecha_manifest::escape_text(assets)
+        )
+    };
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title><link rel=\"stylesheet\" href=\"form.css\"></head>\n\
+         <title>{}</title>{style}</head>\n\
          <body><main>{body}</main></body></html>\n",
         mecha_manifest::escape_text(title)
     )
@@ -78,9 +95,13 @@ fn resolve(app: &Shared, handle: &str, type_id: &str) -> Option<(UserRow, Reques
 fn nothing_here() -> Response {
     page(
         StatusCode::NOT_FOUND,
+        // No stylesheet: this page is served for an unknown handle, an
+        // unknown type and a suspended user alike, so it must not resolve an
+        // asset path that would tell them apart.
         shell(
             "Not found",
             "<h1>Not found</h1><p>There is no form here.</p>",
+            "",
         ),
     )
 }
@@ -97,18 +118,31 @@ pub async fn form(
     let Some((_, request_type)) = resolve(&app, &handle, &type_id) else {
         return nothing_here();
     };
-    render_form(&request_type, &handle, &type_id, Default::default(), &[])
+    render_form(
+        &request_type,
+        &handle,
+        &type_id,
+        &app.config.theme,
+        Default::default(),
+        &[],
+    )
 }
 
 fn render_form(
     request_type: &RequestType,
     handle: &str,
     type_id: &str,
+    theme: &str,
     values: serde_json::Map<String, serde_json::Value>,
     errors: &[mecha_manifest::ValidationError],
 ) -> Response {
     let rendered = request_type.form(&FormOptions {
         action: format!("/f/{handle}/{type_id}"),
+        // Root-relative, so the same document works wherever it is served
+        // from — the form URL, a re-render after validation errors, and the
+        // confirmation page, which sits one path segment deeper.
+        assets: format!("/f/{handle}/{type_id}/"),
+        theme: mecha_manifest::Theme::by_name(theme),
         token: None,
         values,
         errors: errors.to_vec(),
@@ -134,6 +168,7 @@ fn render_form(
 /// stylesheet, it ships in the binary, and a form that renders differently
 /// depending on what is on the box would be a form nobody could check.
 pub async fn asset(
+    State(app): State<Shared>,
     Extension(origin): Extension<Origin>,
     Path((_handle, _type_id, name)): Path<(String, String, String)>,
 ) -> Response {
@@ -152,7 +187,10 @@ pub async fn asset(
         verification: None,
         confirmation: None,
     }
-    .form(&FormOptions::default());
+    .form(&FormOptions {
+        theme: mecha_manifest::Theme::by_name(&app.config.theme),
+        ..FormOptions::default()
+    });
     for (asset_name, body) in page.assets() {
         if asset_name == name {
             return (
@@ -161,7 +199,9 @@ pub async fn asset(
                     header::CONTENT_TYPE,
                     mecha_manifest::content_type(asset_name),
                 )],
-                body,
+                // Owned: the stylesheet is built from the theme, so it does
+                // not outlive the page it came from.
+                body.to_string(),
             )
                 .into_response();
         }
@@ -192,7 +232,14 @@ pub async fn submit(
         Ok(submission) => submission,
         // Their own form back, with the errors on it. This is the only thing
         // the response varies on, deliberately.
-        Err(errors) => return render_form(&request_type, &handle, &type_id, raw, &errors),
+        Err(errors) => return render_form(
+                &request_type,
+                &handle,
+                &type_id,
+                &app.config.theme,
+                raw,
+                &errors,
+            ),
     };
 
     let Some(address) = submission
@@ -229,6 +276,7 @@ pub async fn submit(
                     shell(
                         "Too many",
                         "<h1>Too many requests</h1><p>Please try again tomorrow.</p>",
+                        &format!("/f/{handle}/{type_id}/"),
                     ),
                 );
             }
@@ -284,6 +332,7 @@ pub async fn submit(
                  works once.</p>",
                 mecha_manifest::escape_text(address)
             ),
+            &format!("/f/{handle}/{type_id}/"),
         ),
     )
 }
@@ -318,6 +367,7 @@ pub async fn confirm(
                     "<h1>That link has expired</h1><p>Confirmation links work \
                      once and for a limited time. Submitting the form again \
                      will send a new one.</p>",
+                    &format!("/f/{handle}/{type_id}/"),
                 ),
             );
         }
@@ -349,7 +399,10 @@ pub async fn confirm(
         // click is how somebody submits three times.
         None => "<h1>Confirmed</h1><p>Thank you — that is now with a person.</p>".to_string(),
     };
-    page(StatusCode::OK, shell(&request_type.title, &body))
+    page(
+        StatusCode::OK,
+        shell(&request_type.title, &body, &format!("/f/{handle}/{type_id}/")),
+    )
 }
 
 /// `a=1&b=hello%20there` → a map of strings.
