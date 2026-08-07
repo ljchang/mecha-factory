@@ -222,7 +222,7 @@ churn suggests.
 | **B** — one ACME state per user, dispatch by SNI | **no** | ~50 new per week; thousands total | moderate, all our own code |
 | **C** — DNS-01 wildcard | no | unlimited | replace `rustls-acme` **and** move DNS |
 
-**B was the plan, and it is harder than it looks.** The idea survives:
+**B is the plan, via HTTP-01.** The idea always survived:
 `state.resolver()` returns an `Arc<ResolvesServerCertAcme>`, which *is* a
 `ResolvesServerCert`, and its `resolve` already dispatches the TLS-ALPN-01
 challenge by SNI — so a wrapper holding `HashMap<sni, resolver>` serves both
@@ -242,7 +242,42 @@ It is `pub(crate)`, and it takes the library's concrete resolver rather than a
 certificates cannot be handed a wrapper that does. `state.acceptor()` yields an
 acceptor bound to a single state, and there is no way to combine several.
 
-Three ways past it, none of them a day's work:
+**And then the way past it, which is to stop using that challenge.** The
+acceptor exists only because TLS-ALPN-01 arrives as a TLS connection on 443
+that must be answered and then dropped. HTTP-01 does not: the challenge is an
+ordinary GET on port 80, and both pieces needed to serve it are public API —
+
+```rust
+AcmeConfig::challenge_type(UseChallenge::Http01)          // config.rs:212
+ResolvesServerCertAcme::get_http_01_key_auth(&self, tok)  // resolver.rs:48
+```
+
+so the plan becomes:
+
+- One `AcmeState` per certificate group — the three base names, then one per
+  user — each configured for HTTP-01.
+- A `ServerConfig` built with `with_cert_resolver`, holding our own wrapper
+  over `HashMap<sni, Arc<ResolvesServerCertAcme>>`. Plain `tokio-rustls`; no
+  `AcmeAcceptor` anywhere.
+- One route on the port-80 listener for
+  `/.well-known/acme-challenge/{token}`, asking each resolver in turn and
+  answering with the first `Some`. The redirect listener already exists.
+- Creating a user spawns a state, inserts a resolver, and **nothing restarts**.
+
+The cost is one property, and it should be stated rather than discovered:
+DEPLOY.md currently says *"TLS-ALPN-01 does its challenge on 443, so port 80 is
+never part of issuance — it exists because a human types a bare hostname."*
+That stops being true. Port 80 becomes load-bearing for certificates, so
+whoever can answer on it can obtain them. The mitigation is that anyone who can
+answer on port 80 of this host has already won, and 443 was never less exposed
+— but the sentence in DEPLOY.md has to change with the code, or it becomes a
+claim the deployment no longer earns.
+
+HTTP-01 still cannot issue wildcards. Nothing is lost there, since
+TLS-ALPN-01 could not either.
+
+Three ways past it *without* changing challenge type, kept for the record and
+all worse:
 
 - **Do the TLS layer here**: `tokio-rustls` with our own `ServerConfig`, our
   own dispatching resolver, and our own detection of the `acme-tls/1` ALPN so a
@@ -256,10 +291,10 @@ Three ways past it, none of them a day's work:
   it unblocks everything downstream of the certificate while the real answer is
   chosen.
 
-Worth noticing: the second option is most of the work option **C** needs
-anyway. If we are going to own a renewal loop, owning it once and getting
-wildcards — which need DNS-01, which no crate here speaks — may beat owning it
-twice. That is an argument for A now and C later, with B skipped.
+None of those three are needed now. They are recorded because the reasoning
+that produced them — that owning the TLS layer is most of what option C needs
+anyway — is still true, and is the argument to reach for if HTTP-01 ever stops
+being enough.
 
 **C is the better end state and is deliberately deferred.** One certificate for
 `*.art` and `*.compute`, no per-user work at all. It means swapping to
@@ -339,11 +374,9 @@ zone triggers neither.
    is accepted.
 1. **The zone move**, which is independent of everything else and stops the
    manual-DNS tax immediately.
-2. **A certificate that arrives without an operator.** Nothing self-serve
-   works until a new handle resolves on its own — and B turned out to be
-   blocked on a `pub(crate)` constructor, so this step is now a choice between
-   A as an interim and owning the ACME loop outright. See the certificates
-   section.
+2. **B over HTTP-01**: a state and a resolver per user, a challenge route on
+   the port-80 listener, and no restart when somebody signs up. Nothing
+   self-serve works until a new handle resolves on its own.
 3. **Signup**: invite → magic link → handle claim. Reuses `intake.rs`.
 4. **Pairing**: the code, `factory-publish connect`, and the confirmation that
    names the handle.
