@@ -37,6 +37,11 @@ enum Command {
         /// Overrides the first `# heading`.
         #[arg(long)]
         title: Option<String>,
+        /// The palette to bake in. Match the box's `theme` so a report and the
+        /// forms beside it read as one surface. An unknown name falls back to
+        /// the default rather than refusing, exactly as the box's config does.
+        #[arg(long, default_value = "nocturne")]
+        theme: String,
     },
     /// Take a rendered directory in as a new immutable version, and point the
     /// share URL at it.
@@ -222,8 +227,18 @@ fn main() -> Result<()> {
     let now = chrono::Utc::now().to_rfc3339();
 
     match cli.command {
-        Command::Render { source, out, title } => {
-            let rendered = render::report(&source, &out, title.as_deref())?;
+        Command::Render {
+            source,
+            out,
+            title,
+            theme,
+        } => {
+            let rendered = render::report(
+                &source,
+                &out,
+                title.as_deref(),
+                mecha_manifest::Theme::by_name(&theme),
+            )?;
             // Run at render time too, so the cheap verb is where you find out.
             // Discovering it at publish — the expensive one, the one that costs
             // a review — would mean the review queue is where broken bundles

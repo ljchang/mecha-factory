@@ -243,6 +243,22 @@ fn visibility_arg(args: &Value) -> Result<Option<mecha_manifest::Visibility>> {
     }
 }
 
+/// The palette this deployment renders in, from the environment rather than
+/// from the model.
+///
+/// `MECHA_FACTORY_THEME` is set beside the box's own `theme`, in the `[[mcp]]`
+/// `env` that starts this server — the same place `MECHA_TZ` is set for the
+/// mail servers, and for the same reason: it is a fact about the deployment
+/// that the model should neither supply nor be able to override. Unset means
+/// the default, and an unknown name falls back rather than failing, because a
+/// typo in a unit file must not stop briefings from rendering.
+fn configured_theme() -> mecha_manifest::Theme {
+    match std::env::var("MECHA_FACTORY_THEME") {
+        Ok(name) => mecha_manifest::Theme::by_name(&name),
+        Err(_) => mecha_manifest::Theme::default(),
+    }
+}
+
 fn confined(root: &Path, supplied: &str) -> Result<PathBuf> {
     let candidate = {
         let p = PathBuf::from(supplied);
@@ -393,7 +409,13 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             let source = confined(root, &string("source")?)?;
             let out = confined(root, &string("out")?)?;
             let title = args.get("title").and_then(Value::as_str);
-            let rendered = crate::render::report(&source, &out, title)?;
+            // Deliberately not an argument on the tool. A palette is a property
+            // of whose front door this is — the same reason the box's `theme`
+            // is deployment-wide rather than per-request — and letting a model
+            // pick one per report is the "an agent designs the form" failure
+            // the theme module opens by rejecting. Nine briefings would arrive
+            // in nine looks. The deployment sets it, out of the model's reach.
+            let rendered = crate::render::report(&source, &out, title, configured_theme())?;
             crate::vendor::gate_rendered(&rendered.dir, &source)?;
             Ok(format!(
                 "Rendered `{}` as a {} bundle in {}.\nOpen {} to read it. \
