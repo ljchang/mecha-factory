@@ -33,6 +33,58 @@ Naming these first, because each is a thing somebody will reasonably propose:
   when `keys.rs` is being changed for another reason; not worth a rewrite of
   its own.
 - **No open signup on day one.** See "Handles are forever".
+- **No separate repository for the box.** Tempting, since a client has no use
+  for the server's source. But `mecha-manifest` is the contract *both sides
+  run* — the box derives the schema and validates submissions, home validates
+  the drained record against the same code — and one workspace is what makes
+  drift impossible. Splitting means a published crate, pinned versions, and
+  skew that shows up as records validating differently on each side. **Split
+  the distribution instead**: publish `mecha-manifest` and
+  `mecha-factory-publish` to crates.io, so a client runs
+  `cargo install mecha-factory-publish` and never sees the box. Same benefit,
+  no skew, and the deploy story stays "clone one repo".
+
+## The client is not part of the security model
+
+`mecha-factory-publish` serves an MCP surface over stdio, and **any** MCP
+client can drive it — mecha, Claude Code, something not written yet. That is a
+feature, and it is also the reason for the scope split below.
+
+Two hops, with different mechanisms, and the distinction is worth holding:
+
+```
+agent ──stdio MCP, local subprocess, no auth──▶ factory-publish ──HTTPS + scoped key──▶ box
+```
+
+The agent never sees a credential. So swapping the client changes nothing about
+authentication — and exactly one thing about safety, which had to be fixed:
+
+> "An agent drafts, a human releases" was a property of mecha's
+> `[outbox] tools`. A different client, or a typo in that list, had no review
+> at all and nothing said so.
+
+A guarantee that depends on which program connected is the
+silently-degrading-sandbox shape. So it moved onto the credential, where no
+client can be missing it: `Scope::Publish` writes immutable versions nobody can
+read, and `Scope::Release` moves an alias or serves a form — the two acts that
+change what the world can see. *(Built 2026-08-07.)*
+
+That reframes the web interface too. **A signed-in session that can make an
+artifact public is a release credential**, reached through a different door
+than `release.key`. Which is the right shape: releasing is one narrow
+capability with two front doors, rather than something implied by holding any
+write key.
+
+## Two interfaces, and they must not be one
+
+- **Tenant**: settings, the artifacts they own, making one public, connected
+  machines, revocation. Authenticated as a user; carries release authority.
+- **Operator**: users and status, suspend and withhold, every key, queue
+  depths. Authenticated as the operator; today it is root over SSH, which is
+  tenable for one user and not for several.
+
+Separate surfaces on purpose. They need different authentication, and a mistake
+in the tenant one must not reach the operator one.
 
 ## Three problems, and only two are ours
 
@@ -51,7 +103,7 @@ The flow starts in the browser, because that is where a person signs up:
 
 1. A signed-in page mints a **pairing code** — short, high-entropy, single-use,
    expiring in minutes — and displays one command.
-2. The user runs `mecha factory connect <code>` on the machine that will hold
+2. The user runs `factory-publish connect <code>` on the machine that will hold
    the key.
 3. The CLI redeems the code over TLS and receives a publish key and a drain
    key, writing both at mode 0600.
@@ -115,7 +167,7 @@ Three interfaces, all ending in the same server-side revoke:
 | Where | Who | Notes |
 |---|---|---|
 | a signed-in page | the user | "machines connected", with first-seen and last-used |
-| `mecha factory disconnect` | the agent | authenticates with the key to revoke *that key*. Needs no extra privilege: a credential may always retire itself |
+| `factory-publish disconnect` | the agent | authenticates with the key to revoke *that key*. Needs no extra privilege: a credential may always retire itself |
 | `factory key revoke <id>` | the operator | break-glass, already built |
 
 The middle one is the reason a compromised laptop is recoverable by the person
@@ -186,6 +238,51 @@ assume is lost — has a standard answer: **delegate `_acme-challenge` by CNAME
 to a separate throwaway zone**, so the token on the box controls only challenge
 records and can never touch the real ones.
 
+### Considered and rejected: routes instead of hostnames
+
+The obvious escape, and it genuinely works: serve
+`art.mecha-factory.ai/u/alice/b/brief/` instead of
+`alice.art.mecha-factory.ai/b/brief/`, and **the certificate problem disappears
+entirely**. One certificate, three names, ordered once. A new user needs no
+certificate at all — no restart, no per-user ACME state, no SAN ceiling, no
+rate limit. Options A, B and C all evaporate. It is the largest simplification
+available anywhere in this document, and it is worth stating plainly before the
+reasons not to.
+
+**It cannot be done on the compute origin.** A `compute` bundle is served with
+`connect-src 'self'`, `worker-src 'self' blob:` and `wasm-unsafe-eval`. On a
+shared origin, `'self'` *is* the other tenants: Alice's notebook can
+`fetch('/u/bob/…')` and read Bob's bundle, and a service worker scoped to `/`
+intercepts every request every tenant makes. That is not a leak to be narrowed;
+it is every co-located account, at once.
+
+Note what the line actually is. It is **not** WebAssembly — plain JavaScript
+does all of the above, and `wasm-unsafe-eval` is only why compute needs the
+grant. The line is *executes* versus *does not execute*, which is exactly the
+distinction `ContentClass` already draws, and `Role::for_class` is already the
+one function that maps it to an origin. So the hybrid is expressible in a
+single place: paths for artifacts, which execute nothing, and hostnames for
+compute, which does.
+
+The hybrid is a real option and is rejected for a different reason than the
+first half. **A published URL has to stay resolvable forever.** Path-routing
+the artifact origin commits to that shape permanently — the day it has to
+become a hostname, every URL published in between breaks. `config.rs` chose
+per-user hostnames from the first row for precisely this, before any of the
+certificate work existed. So the hybrid is not "safe for artifacts, risky for
+notebooks". It is safe for artifacts *irreversibly*.
+
+There is also a property that would be quietly lost. Today an unclaimed handle
+has no certificate, so a stranger fails at the TLS handshake and never reaches
+the application; the 404 is the second line of defence. Under path routing
+every path is reachable and the 404 is the only one.
+
+So the trade is **a bounded problem against a one-way commitment**: per-user
+certificates are perhaps a day's work on machinery that already runs, while the
+URL shape cannot be taken back. That is why it is hostnames, and it should not
+need re-deriving the next time somebody meets the certificate work and wonders
+why it is not simpler.
+
 ## DNS
 
 Moving the zone to a provider with an API does **not** unlock wildcards on its
@@ -201,13 +298,22 @@ zone triggers neither.
 
 ## Build order
 
+0. ~~**The scope split.**~~ *Done 2026-08-07.* First because it was cheapest
+   before any key existed in the wild and steadily more expensive after — and
+   because it is what stops the review gate depending on the client. **Not yet
+   deployed**: the live box has one `publish` key that can currently alias, so
+   a release key has to be minted and placed before the binary ships, or
+   aliasing breaks.
 1. **The zone move**, which is independent of everything else and stops the
    manual-DNS tax immediately.
 2. **B**, the per-user certificate. Nothing self-serve is possible until a new
    user's hostname resolves without an operator.
 3. **Signup**: invite → magic link → handle claim. Reuses `intake.rs`.
-4. **Pairing**: the code, `mecha factory connect`, and the confirmation that
+4. **Pairing**: the code, `factory-publish connect`, and the confirmation that
    names the handle.
-5. **The connected-machines page**, and `mecha factory disconnect`.
+5. **The tenant surface**: artifacts owned, make public, connected machines,
+   `factory-publish disconnect`.
+6. **The operator surface**, which is the last thing still living on an SSH
+   session.
 
 1 and 2 do not block each other, so either can start.
