@@ -101,6 +101,10 @@ const RESERVED_HANDLES: &[&str] = &[
     "example",
     "factory",
     "mecha",
+    // The documentation site answers at `docs.<domain>`. A user holding this
+    // handle would serve at `docs.<artifacts-origin>`, which is close enough to
+    // read as ours — and reserving it is only free before the first signup.
+    "docs",
 ];
 
 /// A handle is a DNS label, so the rule is DNS's and not ours.
