@@ -274,6 +274,12 @@ enum SlotsAction {
 
 #[derive(Subcommand)]
 enum OperatorAction {
+    /// A one-time browser link for the admin panel at /admin.
+    ///
+    /// The operate key never enters a browser: this asks the box for a URL
+    /// that works once and expires in minutes, and the session it becomes
+    /// lives half a day.
+    Signin,
     /// Everyone, with status and queue depth.
     Users,
     /// Stop an account serving and publishing. Never a delete.
@@ -992,6 +998,15 @@ fn operator_command(action: OperatorAction) -> Result<()> {
         );
     };
     match action {
+        OperatorAction::Signin => {
+            let body = remote.json("POST", "/v1/admin/signin", Some(&serde_json::json!({})))?;
+            println!("{}", body["url"].as_str().unwrap_or("?"));
+            eprintln!(
+                "open it in a browser — it works once and expires {}",
+                body["expires_at"].as_str().unwrap_or("soon"),
+            );
+            Ok(())
+        }
         OperatorAction::Users => {
             let body = remote.json("GET", "/v1/admin/users", None)?;
             for user in body["users"].as_array().into_iter().flatten() {

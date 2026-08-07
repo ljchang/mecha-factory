@@ -56,6 +56,7 @@
 //! [`RequestType::visible_fields`].
 
 pub mod availability;
+mod booking;
 pub mod brand;
 mod bundle;
 mod condition;
@@ -68,6 +69,7 @@ mod schema;
 pub mod theme;
 mod validate;
 
+pub use booking::{booking_assets, week_of, BookingOptions, BookingPage};
 pub use brand::{FAVICON_DATA_URI, FAVICON_LINK, LOGO_MONO_SVG};
 pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};

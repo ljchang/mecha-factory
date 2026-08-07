@@ -20,6 +20,7 @@
 
 pub mod account;
 pub mod admin;
+pub mod booking;
 pub mod artifacts;
 pub mod intake;
 pub mod signup;
@@ -141,6 +142,22 @@ pub fn router(app: Shared) -> Router {
         .route("/v1/admin/keys", get(v1::admin_keys))
         .route("/v1/admin/keys/{id}/revoke", post(v1::admin_key_revoke))
         .route("/v1/admin/withhold", post(v1::admin_withhold))
+        // The operate key asking for a browser: the one bridge between the
+        // key surface and the operator's session surface below.
+        .route("/v1/admin/signin", post(admin::signin_link))
+        // The operator's panel — its own cookie, its own tables, and no way
+        // in but the link the CLI minted. See http/admin.rs.
+        .route("/admin", get(admin::overview))
+        .route(
+            "/admin/s/{token}",
+            get(admin::finish_page).post(admin::finish),
+        )
+        .route("/admin/signout", post(admin::signout))
+        .route("/admin/status", post(admin::status))
+        .route("/admin/invite", post(admin::invite))
+        .route("/admin/invite-revoke", post(admin::invite_revoke))
+        .route("/admin/key-revoke", post(admin::key_revoke))
+        .route("/admin/withhold", post(admin::withhold))
         // The typed way in. On the gate, path-scoped by handle rather than
         // subdomain-scoped: a form is server-rendered HTML with no script, so
         // it executes nothing and there is nothing for an origin to separate
@@ -151,6 +168,10 @@ pub fn router(app: Shared) -> Router {
             get(intake::form).post(intake::submit),
         )
         .route("/f/{handle}/{type_id}/{name}", get(intake::asset))
+        // The booking page: the same gate, the same no-script posture as the
+        // forms — server-rendered HTML whose scripts are same-origin files.
+        .route("/s/{handle}/{type_id}", get(booking::page))
+        .route("/s/{handle}/{type_id}/{name}", get(booking::asset))
         // GET is a page with a button and POST is the verification, because
         // mail scanners follow GETs — see `intake::confirm_page`.
         .route(

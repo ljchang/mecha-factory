@@ -157,6 +157,334 @@ fn an_operator_revokes_any_key_and_sees_them_all() {
     assert_eq!(dead.status, 401);
 }
 
+// ---- the browser panel --------------------------------------------------
+//
+// The property the page tests carry: **the way in is the CLI, and the
+// session is a stranger to tenant sessions.** The operate key mints a
+// one-time URL; the URL becomes its own cookie against its own tables; and
+// neither cookie means anything at the other surface.
+
+fn panel_get(server: &Server, target: &str, cookie: Option<&str>) -> Reply {
+    let mut request = Request::new("GET", target, server.gate.to_string());
+    if let Some(cookie) = cookie {
+        request = request.header("Cookie", &format!("__Host-factory-operator={cookie}"));
+    }
+    request.send(server.gate)
+}
+
+fn panel_post(server: &Server, target: &str, body: &str, cookie: Option<&str>) -> Reply {
+    let mut request = Request::new("POST", target, server.gate.to_string())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body.as_bytes().to_vec());
+    if let Some(cookie) = cookie {
+        request = request.header("Cookie", &format!("__Host-factory-operator={cookie}"));
+    }
+    request.send(server.gate)
+}
+
+/// The whole way in: the key asks for a URL, the URL's POST becomes the
+/// session. Returns the session token.
+fn panel_signed_in(server: &Server, operator: &str) -> String {
+    let minted = admin_post(server, "/v1/admin/signin", operator, serde_json::json!({}));
+    assert_eq!(minted.status, 200, "{}", minted.body);
+    let url = minted.json()["url"].as_str().unwrap().to_string();
+    let token = url.rsplit('/').next().unwrap().to_string();
+    // The person's path: interstitial first, which spends nothing.
+    let interstitial = panel_get(server, &format!("/admin/s/{token}"), None);
+    assert_eq!(interstitial.status, 200, "{}", interstitial.body);
+    let finished = panel_post(server, &format!("/admin/s/{token}"), "", None);
+    assert_eq!(finished.status, 303, "{}", finished.head);
+    let cookie = finished.header("set-cookie").expect("a session cookie");
+    for needed in [
+        "__Host-factory-operator",
+        "HttpOnly",
+        "Secure",
+        "SameSite=Lax",
+        "Path=/",
+    ] {
+        assert!(cookie.contains(needed), "cookie lacks {needed}: {cookie}");
+    }
+    cookie
+        .split_once('=')
+        .unwrap()
+        .1
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+/// The CSRF value the panel embeds.
+fn panel_csrf(server: &Server, session: &str) -> String {
+    let page = panel_get(server, "/admin", Some(session));
+    assert_eq!(page.status, 200, "{}", page.body);
+    let marker = "name=\"csrf\" value=\"";
+    let start = page.body.find(marker).expect("a csrf field") + marker.len();
+    page.body[start..].split('"').next().unwrap().to_string()
+}
+
+/// The way in is the CLI: a signed-out `/admin` has instructions and no
+/// form, a tenant key cannot mint the link, and the link works exactly once.
+#[test]
+fn the_panel_signs_in_from_a_cli_minted_link_once() {
+    let server = common::start();
+    let operator = operator_key(&server);
+
+    // Signed out: told to run the CLI, offered nothing to type into.
+    let out = panel_get(&server, "/admin", None);
+    assert_eq!(out.status, 200);
+    assert!(
+        out.body.contains("factory-publish operator signin"),
+        "{}",
+        out.body
+    );
+    assert!(!out.body.contains("<input"), "{}", out.body);
+
+    // A tenant key does not get a link.
+    let tenant = server.key(Scope::Publish);
+    let refused = admin_post(&server, "/v1/admin/signin", &tenant, serde_json::json!({}));
+    assert_eq!(refused.status, 403, "{}", refused.body);
+
+    let minted = admin_post(&server, "/v1/admin/signin", &operator, serde_json::json!({}));
+    assert_eq!(minted.status, 200);
+    let url = minted.json()["url"].as_str().unwrap().to_string();
+    let token = url.rsplit('/').next().unwrap().to_string();
+
+    // Spend the minted link: interstitial spends nothing, the POST does.
+    let interstitial = panel_get(&server, &format!("/admin/s/{token}"), None);
+    assert_eq!(interstitial.status, 200, "{}", interstitial.body);
+    let finished = panel_post(&server, &format!("/admin/s/{token}"), "", None);
+    assert_eq!(finished.status, 303, "{}", finished.head);
+    let session = finished
+        .header("set-cookie")
+        .expect("a session cookie")
+        .split_once('=')
+        .unwrap()
+        .1
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let page = panel_get(&server, "/admin", Some(&session));
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("Accounts"), "{}", page.body);
+    assert!(page.body.contains("alice"), "{}", page.body);
+
+    // The spent link is any dead token.
+    let again = panel_post(&server, &format!("/admin/s/{token}"), "", None);
+    assert_eq!(again.status, 404, "{}", again.head);
+}
+
+/// Neither session means anything at the other surface: the cookies are
+/// different names, the tables are different tables, and a token from one
+/// presented as the other is nobody.
+#[test]
+fn the_operator_session_and_a_tenant_session_are_strangers() {
+    let server = common::start();
+    let operator = operator_key(&server);
+    let op_session = panel_signed_in(&server, &operator);
+
+    // A real tenant session, planted the way sign-in plants one.
+    let tenant_token = mecha_factory::intake::mint_token();
+    server
+        .db
+        .session_create(
+            &server.user.id,
+            &mecha_factory::intake::hash_token(&tenant_token),
+            &mecha_factory::db::now(),
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap();
+
+    // The tenant token in the operator's cookie: the instructions page.
+    let crossed = panel_get(&server, "/admin", Some(&tenant_token));
+    assert!(
+        crossed.body.contains("factory-publish operator signin"),
+        "{}",
+        crossed.body
+    );
+    assert!(!crossed.body.contains("Accounts"), "{}", crossed.body);
+
+    // The operator token in the tenant's cookie: the sign-in form, and no
+    // account page — there is no user behind an operator session to find.
+    let reply = Request::new("GET", "/account", server.gate.to_string())
+        .header("Cookie", &format!("__Host-factory-session={op_session}"))
+        .send(server.gate);
+    assert!(reply.body.contains("Sign in"), "{}", reply.body);
+    assert!(!reply.body.contains("Machines"), "{}", reply.body);
+}
+
+/// The panel's verbs drive the same rows the JSON endpoints drive, behind
+/// the session's CSRF — and a stale form changes nothing.
+#[test]
+fn the_panel_suspends_invites_and_withholds_with_csrf() {
+    let server = common::start();
+    let operator = operator_key(&server);
+    let session = panel_signed_in(&server, &operator);
+    let csrf = panel_csrf(&server, &session);
+
+    // Wrong CSRF: refused, nothing moves.
+    let forged = panel_post(
+        &server,
+        "/admin/status",
+        "csrf=wrong&handle=alice&status=suspended",
+        Some(&session),
+    );
+    assert_eq!(forged.status, 403, "{}", forged.body);
+    assert!(server.db.user_by_handle("alice").unwrap().unwrap().active());
+
+    // Suspend, then restore — the same rows the CLI drives.
+    let off = panel_post(
+        &server,
+        "/admin/status",
+        &format!("csrf={csrf}&handle=alice&status=suspended"),
+        Some(&session),
+    );
+    assert_eq!(off.status, 200, "{}", off.body);
+    assert!(!server.db.user_by_handle("alice").unwrap().unwrap().active());
+    let on = panel_post(
+        &server,
+        "/admin/status",
+        &format!("csrf={csrf}&handle=alice&status=active"),
+        Some(&session),
+    );
+    assert_eq!(on.status, 200);
+    assert!(server.db.user_by_handle("alice").unwrap().unwrap().active());
+
+    // An invite minted from the page is mailed by the box and shows on the
+    // panel; revoking it kills the link.
+    let minted = panel_post(
+        &server,
+        "/admin/invite",
+        &format!("csrf={csrf}&email=casey%40example.org&note=from+the+panel"),
+        Some(&session),
+    );
+    assert_eq!(minted.status, 200);
+    assert!(
+        minted.body.contains("casey@example.org"),
+        "{}",
+        minted.body
+    );
+    let invites = server.db.invites().unwrap();
+    assert_eq!(invites.len(), 1);
+    let revoked = panel_post(
+        &server,
+        "/admin/invite-revoke",
+        &format!("csrf={csrf}&id={}", invites[0].id),
+        Some(&session),
+    );
+    assert!(revoked.body.contains("no longer works"), "{}", revoked.body);
+
+    // Withhold from the form; the row appears with a Restore button; undo
+    // through it puts the version back.
+    server
+        .db
+        .bundle_insert(&mecha_factory::db::BundleRow {
+            user_id: server.user.id.clone(),
+            id: "brief".into(),
+            version: 1,
+            digest: "d".into(),
+            class: mecha_manifest::ContentClass::Static,
+            title: "A briefing".into(),
+            description: None,
+            template: "report".into(),
+            published_at: None,
+            received_at: mecha_factory::db::now(),
+            withheld_at: None,
+            withheld_reason: None,
+        })
+        .unwrap();
+    let withheld = panel_post(
+        &server,
+        "/admin/withhold",
+        &format!("csrf={csrf}&handle=alice&id=brief&version=1&reason=reported"),
+        Some(&session),
+    );
+    assert_eq!(withheld.status, 200, "{}", withheld.body);
+    assert!(server
+        .db
+        .bundle(&server.user.id, "brief", 1)
+        .unwrap()
+        .unwrap()
+        .withheld_at
+        .is_some());
+    assert!(withheld.body.contains("reported"), "{}", withheld.body);
+    let restored = panel_post(
+        &server,
+        "/admin/withhold",
+        &format!("csrf={csrf}&handle=alice&id=brief&version=1&undo=1"),
+        Some(&session),
+    );
+    assert_eq!(restored.status, 200);
+    assert!(server
+        .db
+        .bundle(&server.user.id, "brief", 1)
+        .unwrap()
+        .unwrap()
+        .withheld_at
+        .is_none());
+}
+
+/// Break-glass ends the browser too: the session rides its key, so revoking
+/// the key — even from the panel it signed in — is the last thing the
+/// session does.
+#[test]
+fn the_panel_session_dies_with_its_key() {
+    let server = common::start();
+    let operator = operator_key(&server);
+    let session = panel_signed_in(&server, &operator);
+    let csrf = panel_csrf(&server, &session);
+
+    let key_id = server
+        .db
+        .keys()
+        .unwrap()
+        .into_iter()
+        .find(|k| k.scope == Scope::Operate)
+        .unwrap()
+        .id;
+    let last = panel_post(
+        &server,
+        "/admin/key-revoke",
+        &format!("csrf={csrf}&id={key_id}"),
+        Some(&session),
+    );
+    assert_eq!(last.status, 200, "{}", last.body);
+
+    // The very next look: signed out, structurally.
+    let after = panel_get(&server, "/admin", Some(&session));
+    assert!(
+        after.body.contains("factory-publish operator signin"),
+        "{}",
+        after.body
+    );
+    // And the dead key mints no more links.
+    let refused = admin_post(&server, "/v1/admin/signin", &operator, serde_json::json!({}));
+    assert_eq!(refused.status, 401, "{}", refused.body);
+}
+
+/// Sign-out revokes the row, not just the cookie.
+#[test]
+fn the_panel_signs_out_server_side() {
+    let server = common::start();
+    let operator = operator_key(&server);
+    let session = panel_signed_in(&server, &operator);
+    let csrf = panel_csrf(&server, &session);
+    let out = panel_post(
+        &server,
+        "/admin/signout",
+        &format!("csrf={csrf}"),
+        Some(&session),
+    );
+    assert_eq!(out.status, 303);
+    let after = panel_get(&server, "/admin", Some(&session));
+    assert!(
+        after.body.contains("factory-publish operator signin"),
+        "{}",
+        after.body
+    );
+}
+
 /// Withholding from afar flips the same reversible switch the CLI does.
 #[test]
 fn an_operator_withholds_and_restores_a_version() {

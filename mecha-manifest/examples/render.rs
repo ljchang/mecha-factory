@@ -29,6 +29,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let request_type = RequestType::from_toml(&std::fs::read_to_string(&manifest)?)?;
     std::fs::create_dir_all(&out)?;
 
+    // A booking manifest previews as its weekly page, with slots computed
+    // from its own [availability] against an empty calendar — what the page
+    // looks like on the best possible week, with no credential and no box.
+    if request_type.kind == mecha_manifest::RequestKind::Booking {
+        let policy = request_type
+            .availability_policy()
+            .expect("checked booking")?;
+        let now = chrono::Utc::now();
+        let slots = mecha_manifest::availability::availability(&policy, &[], &[], &[], now);
+        let page = request_type.booking_page(
+            &slots,
+            &mecha_manifest::BookingOptions {
+                action: format!("/s/preview/{}", request_type.id),
+                now,
+                ..mecha_manifest::BookingOptions::default()
+            },
+        )?;
+        std::fs::write(out.join("index.html"), &page.html)?;
+        for (name, contents) in page.assets() {
+            std::fs::write(out.join(name), contents)?;
+        }
+        println!(
+            "{} v{} (booking) → {}\n  {} slot(s) over {} days from the manifest's own windows\n  open {}",
+            request_type.id,
+            request_type.version,
+            out.display(),
+            slots.len(),
+            policy.horizon_days,
+            out.join("index.html").display()
+        );
+        return Ok(());
+    }
+
     let page = request_type.form(&FormOptions {
         action: format!("/r/{}", request_type.id),
         ..FormOptions::default()
