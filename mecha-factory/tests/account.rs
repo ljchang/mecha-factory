@@ -324,7 +324,14 @@ fn the_header_knows_who_it_is_for() {
     let page = get(&server, "/account", Some(&cookie));
     assert!(page.body.contains("account-menu"), "{}", page.body);
     assert!(page.body.contains("/account/signout"));
+    assert!(page.body.contains("/account#artifacts"), "dropdown links are absolute");
+    assert!(page.body.contains("menu.js"), "the dropdown gets its close script");
     assert!(page.body.contains("alice"));
+
+    // The script the page references is served, as JavaScript.
+    let script = server.get(server.gate, "/account/a/menu.js");
+    assert_eq!(script.status, 200);
+    assert!(script.body.contains("account-menu"), "{}", script.body);
 
     // A 404 that must not distinguish handles carries no chrome at all.
     let missing = server.get(server.gate, "/f/nobody/nothing");

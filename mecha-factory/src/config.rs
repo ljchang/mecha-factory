@@ -339,6 +339,11 @@ pub struct Config {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub limits: Limits,
+    /// Hostnames that 301 to the gate — the apex domain, `www`. They ride
+    /// the base certificate, so the redirect is served over TLS like
+    /// everything else; DNS for each still has to point at this box.
+    #[serde(default)]
+    pub redirect_hosts: Vec<String>,
     /// Where the documentation lives, when there is any to point at. Shown in
     /// the gate's header and on its front page; absent means the links simply
     /// do not render — a deployment with no docs has no dead link.
@@ -413,6 +418,7 @@ impl Config {
             tls: None,
             limits: Limits::default(),
             docs_url: None,
+            redirect_hosts: Vec::new(),
         }
     }
 
@@ -443,6 +449,7 @@ impl Config {
             }),
             limits: Limits::default(),
             docs_url: None,
+            redirect_hosts: Vec::new(),
         }
     }
 

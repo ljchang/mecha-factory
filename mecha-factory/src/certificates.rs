@@ -365,9 +365,13 @@ pub fn groups(config: &Config, users: &[UserRow]) -> Vec<Vec<String>> {
     out
 }
 
-/// The three base origins, which travel on one certificate.
+/// The three base origins — plus any redirect hosts, which travel on the
+/// same certificate: a redirect the browser refuses over a bad cert is a
+/// redirect that does not exist.
 fn base_group(config: &Config) -> Vec<String> {
-    config.origins.names()
+    let mut names = config.origins.names();
+    names.extend(config.redirect_hosts.iter().cloned());
+    names
 }
 
 /// A group's canonical names and its identity, or nothing for an empty group.

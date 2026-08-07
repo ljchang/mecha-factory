@@ -65,6 +65,7 @@ fn start() -> Port80 {
         }),
         limits: Limits::default(),
         docs_url: None,
+        redirect_hosts: vec![],
     };
     let db = Db::open(&config.db_path()).unwrap();
     db.user_create("alice", "alice@example.org", "2026-08-07T00:00:00Z")

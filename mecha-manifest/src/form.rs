@@ -752,11 +752,33 @@ body {
 }
 
 main {
-  /* Narrower than prose. A form is read one line at a time, and a long
-     measure makes a column of inputs feel like a table. */
-  max-width: 34rem;
+  /* A readable measure, not a mobile one. Forms narrow themselves below;
+     pages that carry tables widen themselves further down. */
+  max-width: 46rem;
   margin: 0 auto;
-  padding: 4rem 1.5rem 6rem;
+  padding: 3rem 1.5rem 6rem;
+}
+
+/* A form is read one line at a time, and a long measure makes a column of
+   inputs feel like a table — so the form element keeps the old narrow
+   measure inside whatever page it is on. */
+main > form { max-width: 34rem; }
+
+/* The account page's ledgers are tables, and tables want room. `:has` is
+   the page classifying itself: no markup change, no second stylesheet. */
+main:has(table) { max-width: 72rem; }
+
+/* Commands a person copies — the pairing instruction — wrap instead of
+   walking off the edge of the screen. */
+pre {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 0.75rem 1rem;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 h1 {
@@ -991,18 +1013,21 @@ main > h1:only-of-type + p { color: var(--muted); }
 
 /* The site header: mark on the left, account on the right. Present on the
    gate's own pages and on rendered forms; never on artifact origins, whose
-   bytes are content-addressed and not ours to decorate. */
+   bytes are content-addressed and not ours to decorate. A full-width band
+   with its own rule underneath, so the chrome reads as chrome and the page
+   starts where the border ends. */
 header.site {
-  max-width: 34rem;
-  margin: 0 auto;
-  padding: 1rem 1.5rem 0;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding: 0.875rem 2rem;
+  border-bottom: 1px solid var(--line);
   color: var(--text);
 }
-header.site a.mark { color: var(--text); display: inline-flex; }
-header.site a.mark:hover { color: var(--accent); }
+/* The mark wears the brand's accent — it sits on the page ground, where the
+   theme's own light/dark accent pair is exactly the contrast rule. */
+header.site a.mark { color: var(--accent); display: inline-flex; }
+header.site a.mark:hover { opacity: .8; }
 header.site > nav { display: flex; gap: 1rem; align-items: center; }
 header.site > nav a {
   font-size: 0.875rem;

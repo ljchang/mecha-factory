@@ -109,8 +109,8 @@ impl Chrome {
                  <summary>{handle}</summary>\
                  <div class=\"menu\">\
                  <p>{email}</p>\
-                 <nav><a href=\"#artifacts\">Artifacts</a>\
-                 <a href=\"#machines\">Machines</a>{docs}</nav>\
+                 <nav><a href=\"/account#artifacts\">Artifacts</a>\
+                 <a href=\"/account#machines\">Machines</a>{docs}</nav>\
                  <form method=\"post\" action=\"/account/pair\">\
                  <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
                  <button type=\"submit\">Connect a machine</button></form>\
@@ -156,6 +156,25 @@ pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
     )
 }
 
+/// The account dropdown's one behaviour: close on an outside click or
+/// Escape, which a bare `<details>` does not do. Served as its own file
+/// under `script-src 'self'` — never inline — and referenced only by pages
+/// that render the dropdown, so the stranger-facing pages stay script-free.
+pub(crate) const MENU_JS: &str = r#"(function () {
+  function closeAll(except) {
+    document.querySelectorAll('details.account-menu[open]').forEach(function (menu) {
+      if (menu !== except) menu.removeAttribute('open');
+    });
+  }
+  document.addEventListener('click', function (event) {
+    closeAll(event.target.closest('details.account-menu'));
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') closeAll(null);
+  });
+})();
+"#;
+
 pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome) -> String {
     let style = if assets.is_empty() {
         String::new()
@@ -164,6 +183,15 @@ pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome)
             "<link rel=\"stylesheet\" href=\"{}form.css\">",
             mecha_manifest::escape_text(assets)
         )
+    };
+    // The dropdown's close-on-outside-click, only where the dropdown is.
+    let script = if !assets.is_empty() && matches!(chrome, Chrome::Account { .. }) {
+        format!(
+            "<script src=\"{}menu.js\" defer></script>",
+            mecha_manifest::escape_text(assets)
+        )
+    } else {
+        String::new()
     };
     // No stylesheet means a 404-class page; whatever the caller said, chrome
     // that references an asset universe the page has opted out of is wrong.
@@ -175,7 +203,7 @@ pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome)
     format!(
         "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n\
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
-         <title>{}</title>{style}</head>\n\
+         <title>{}</title>{style}{script}</head>\n\
          <body>{chrome}<main>{body}</main></body></html>\n",
         mecha_manifest::escape_text(title)
     )
@@ -291,6 +319,17 @@ pub async fn asset(
 pub(crate) fn serve_asset(app: &Shared, origin: &Origin, name: &str) -> Response {
     if v1::not_on_gate(origin).is_some() {
         return nothing_here();
+    }
+    // The gate's own script, not one of the manifest's form assets: the
+    // dropdown is this server's chrome, so its behaviour lives here rather
+    // than in the contract crate every published bundle also draws from.
+    if name == "menu.js" {
+        return (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, mecha_manifest::content_type("menu.js"))],
+            MENU_JS.to_string(),
+        )
+            .into_response();
     }
     let page = RequestType {
         id: "x".into(),

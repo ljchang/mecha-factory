@@ -209,6 +209,31 @@ async fn guard(
         .unwrap_or_default()
         .to_string();
     let Some(origin) = app.config.origins.role_of(&host) else {
+        // A configured redirect host — the apex, `www` — sends the browser to
+        // the gate and keeps the path: `mecha-factory.ai/account` should land
+        // on the account page, not the splash.
+        let bare = host
+            .split(':')
+            .next()
+            .unwrap_or(&host)
+            .to_ascii_lowercase();
+        if app
+            .config
+            .redirect_hosts
+            .iter()
+            .any(|h| h.to_ascii_lowercase() == bare)
+        {
+            let target = format!(
+                "{}{}",
+                app.config.base_url(Role::Gate),
+                request.uri().path()
+            );
+            return (
+                StatusCode::MOVED_PERMANENTLY,
+                [(axum::http::header::LOCATION, target)],
+            )
+                .into_response();
+        }
         // Not "misdirected request": a name we do not serve is told nothing
         // about what we do serve.
         tracing::debug!(%host, "request for an unserved name");
