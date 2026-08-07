@@ -7,9 +7,14 @@ forgetting is not "the site is down", it is "the site is someone else's".
 > **Done once, on 2026-08-06.** A DigitalOcean droplet in NYC —
 > Ubuntu 24.04, 1 vCPU, 1 GB RAM, x86_64 — serving
 > `gate` / `art` / `compute` under `mecha-factory.ai`, with a Let's Encrypt
-> certificate the binary obtained for itself over TLS-ALPN-01. What follows is
-> the procedure as it was actually run, including the two things that went
-> wrong.
+> certificate the binary obtained for itself. What follows is the procedure as
+> it was actually run, including the two things that went wrong.
+>
+> **Issuance moved to HTTP-01 on 2026-08-07**, and with it one certificate per
+> user ordered while the server runs. The consequence for a deployment is one
+> sentence: **port 80 is now part of issuance and `[listen] http` is required
+> beside `[tls]`.** A configuration without it is refused at startup rather
+> than serving what it has cached and quietly never renewing.
 
 Everything below assumes the box is **assumed lost**. Nothing on it reaches
 home, and the two keys it holds are Argon2id hashes of tokens minted elsewhere.
@@ -76,20 +81,28 @@ compute.example.org        A    203.0.113.10
 *.compute.example.org      A    203.0.113.10
 ```
 
-The wildcards are how `alice.artifacts.example.org` resolves. The
-*certificate* is a separate matter: TLS-ALPN-01 cannot issue a wildcard, so the
-server orders one name per active user at startup and **a user created while it
-is running needs a restart before their hostname has a certificate**. That is
-fine for tens of users. Beyond that it wants a real wildcard certificate, which
-needs DNS-01 and therefore a zone-scoped API token on the box — recorded in
-§14.2 with the mitigation, and deliberately not done yet.
+The wildcards are how `alice.artifacts.example.org` resolves, and they are what
+lets a brand-new handle answer an ACME challenge with no DNS work at all. The
+*certificate* is a separate matter: neither challenge `rustls-acme` speaks can
+issue a wildcard, so the server orders **one certificate per active user** —
+two names, artifacts and compute — and reconciles the set against the ledger
+every thirty seconds. A user created while it is running gets a certificate
+without a restart, which is the whole of `SELF-SERVE.md` step 2.
 
-**One consequence of that is a security property rather than a limitation.** A
-handle nobody owns has no certificate, so a request for one fails at the TLS
-handshake — a stranger cannot reach the application at all. The 404 the server
-would have returned is the *second* line of defence here, behind one the
-certificate gives for free. A wildcard certificate would remove that first
-line, which is worth knowing before treating DNS-01 as a pure upgrade.
+The ceiling is Let's Encrypt's, and it is on signups rather than on the fleet:
+50 *new* certificates per registered domain per week, refilling at one per 202
+minutes. **Renewals are exempt**, so a large deployment costs nothing to keep
+running — only to grow. A real wildcard certificate would remove even that, and
+it needs DNS-01, and therefore a zone-scoped API token on the box; recorded in
+§14.2 with its mitigation and deliberately not done.
+
+**One consequence is a security property rather than a limitation, and it
+survived the change.** A handle nobody owns has no certificate and no resolver,
+so a request for one fails at the TLS handshake — a stranger cannot reach the
+application at all. The 404 the server would have returned is the *second* line
+of defence here, behind one the certificate gives for free. A wildcard
+certificate would remove that first line, which is worth knowing before
+treating DNS-01 as a pure upgrade.
 
 ### On collapsing to one registrable domain
 
@@ -142,9 +155,11 @@ The order that avoids an outage:
    row against the table above**, because a scan infers from public DNS and
    cannot see anything that was not resolving.
 2. **Set every record to DNS-only (grey cloud).** Proxying terminates TLS,
-   which means Cloudflare reads the plaintext of drained submissions, and it
-   breaks TLS-ALPN-01 because the proxy answers the handshake the challenge
-   lives in. §13.2 chose no CDN for exactly the first reason.
+   which means Cloudflare reads the plaintext of drained submissions. §13.2
+   chose no CDN for exactly that reason, and note that it is now the *only*
+   reason: HTTP-01 is an ordinary GET that a proxy forwards, so issuance would
+   survive proxying where TLS-ALPN-01 did not. The objection got narrower and
+   it did not get weaker — plaintext was always the serious half.
 3. Lower TTLs and let the old ones expire before switching nameservers, so a
    rollback is minutes rather than hours.
 4. Change the nameservers at the registrar.
@@ -168,9 +183,12 @@ things that this design deliberately decided against:
   response, including drained submissions. §13.2 of the design document chose
   no CDN specifically to avoid that; the honest cost is no DDoS absorption, and
   for a personal booking page that is an annoyance rather than a crisis.
-- **TLS-ALPN-01 stops working**, because the proxy answers the handshake the
-  challenge lives in. Issuance would have to move to DNS-01, which means an API
-  token for the whole zone sitting on the box we assume is lost.
+- **Issuance survives, which it would not have before.** HTTP-01 is a plain GET
+  on port 80 and a proxy forwards it; TLS-ALPN-01 lived inside the handshake
+  the proxy answers, and would have forced DNS-01 and a zone-scoped API token
+  onto the box we assume is lost. Worth stating because it *removes* an
+  objection, and an argument that quietly keeps a retired reason is one nobody
+  can check.
 
 Turning the proxy on later changes nothing about the origin — that is the point
 of keeping it a plain program — but it is a decision to make deliberately, not
@@ -556,8 +574,10 @@ endpoint owes anyone.
 - **Capability URLs for private bundles.** A private bundle is served to nobody
   and answers exactly what a bundle that never existed answers. The gate issuing
   short-lived URLs comes with the same step.
-- **A real wildcard certificate**, and with it users who can sign up without a
-  restart. See "The three names".
+- **A real wildcard certificate.** Not needed for signup any more — one
+  certificate per user, reconciled from the ledger, closed that. It would raise
+  the ceiling from 50 new certificates a week to none at all, and it needs
+  DNS-01. See "The three names".
 - **Backups.** The published bytes are also mirrored at home under
   `~/.mecha/bundles/`, so the box is not the only copy of anything that matters
   — but the ledger and the queue are only here. A nightly `sqlite3 .backup` of

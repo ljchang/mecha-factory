@@ -1,15 +1,19 @@
 # Self-serve: a second person, without an SSH session
 
-Today the factory has exactly one user, and creating a second is a root SSH
-command followed by a service restart. That is not a gap in the implementation
-— it is what the design assumed, and the log says so out loud on every start:
+The factory has one user, and creating a second was a root SSH command followed
+by a service restart. That was not a gap in the implementation — it was what the
+design assumed, and the log said so out loud on every start:
 
 ```
 ordering certificates; a user created after this needs a restart to get one
 ```
 
-This document is the plan for removing that assumption. It is written before
-the code so the decisions can be argued about while they are still cheap.
+This document is the plan for removing that assumption. It was written before
+the code so the decisions could be argued about while they were still cheap;
+the build order at the end says which parts have since been built. **The
+restart is gone** as of 2026-08-07 — that line now reads *"a user created from
+here on gets one without a restart"* — so what remains between here and a
+second person is signup, pairing, and the two interfaces.
 
 ## What we are not building
 
@@ -222,7 +226,10 @@ churn suggests.
 | **B** — one ACME state per user, dispatch by SNI | **no** | ~50 new per week; thousands total | moderate, all our own code |
 | **C** — DNS-01 wildcard | no | unlimited | replace `rustls-acme` **and** move DNS |
 
-**B is the plan, via HTTP-01.** The idea always survived:
+**B is the plan, via HTTP-01** — and it is what shipped, on 2026-08-07. What
+follows is the reasoning that produced it, kept because the constraints it
+names are the ones to re-read before changing any of it. The idea always
+survived:
 `state.resolver()` returns an `Arc<ResolvesServerCertAcme>`, which *is* a
 `ResolvesServerCert`, and its `resolve` already dispatches the TLS-ALPN-01
 challenge by SNI — so a wrapper holding `HashMap<sni, resolver>` serves both
@@ -265,13 +272,21 @@ so the plan becomes:
 - Creating a user spawns a state, inserts a resolver, and **nothing restarts**.
 
 The cost is one property, and it should be stated rather than discovered:
-DEPLOY.md currently says *"TLS-ALPN-01 does its challenge on 443, so port 80 is
+DEPLOY.md used to say *"TLS-ALPN-01 does its challenge on 443, so port 80 is
 never part of issuance — it exists because a human types a bare hostname."*
-That stops being true. Port 80 becomes load-bearing for certificates, so
+That stopped being true. Port 80 is load-bearing for certificates now, so
 whoever can answer on it can obtain them. The mitigation is that anyone who can
 answer on port 80 of this host has already won, and 443 was never less exposed
-— but the sentence in DEPLOY.md has to change with the code, or it becomes a
-claim the deployment no longer earns.
+— but the sentence had to change with the code, or it would have become a claim
+the deployment no longer earns. *(Changed, along with the two Cloudflare
+paragraphs that turned on the same fact: proxying no longer breaks issuance,
+because a proxy forwards a plain GET. Plaintext was always the serious half of
+that objection and it is untouched.)*
+
+And one more that is a refusal rather than a note: **`[listen] http` is
+required beside `[tls]`**, checked in `Config::check`. A box that comes up
+serving TLS and cannot renew works for sixty days and then does not, which is
+the failure shape this project keeps finding.
 
 HTTP-01 still cannot issue wildcards. Nothing is lost there, since
 TLS-ALPN-01 could not either.
@@ -373,10 +388,25 @@ zone triggers neither.
    `/alias` with "this key does not cover this endpoint", and the release key
    is accepted.
 1. **The zone move**, which is independent of everything else and stops the
-   manual-DNS tax immediately.
-2. **B over HTTP-01**: a state and a resolver per user, a challenge route on
-   the port-80 listener, and no restart when somebody signs up. Nothing
-   self-serve works until a new handle resolves on its own.
+   manual-DNS tax immediately. It turned out not to gate 2 either — the
+   wildcard `A` records the deployment already had are enough for a new handle
+   to answer an HTTP-01 challenge.
+2. ~~**B over HTTP-01**~~ *Built 2026-08-07* — `src/certificates.rs`. A state
+   and a resolver per user behind an SNI-dispatching wrapper, a challenge route
+   ahead of the redirect on port 80, and the certificate set reconciled against
+   the ledger every thirty seconds. Four things worth carrying forward:
+   - **A reconcile loop, not a notification.** `factory user create` runs in
+     another process, so a channel would only have served the signup endpoint
+     that does not exist yet and left the SSH path needing its restart.
+   - **The wildcard DNS records were already there**, which is why 1 turned out
+     not to gate this: a brand-new handle resolves and can answer a challenge
+     with no zone work at all.
+   - **`[listen] http` is now required beside `[tls]`**, refused at startup.
+     Port 80 is where certificates come from; a box without it serves its cache
+     for sixty days and then stops.
+   - The property §14.3 asked us to keep survived: an unclaimed handle has no
+     resolver, so it still dies at the TLS handshake and the 404 is still the
+     second line of defence.
 3. **Signup**: invite → magic link → handle claim. Reuses `intake.rs`.
 4. **Pairing**: the code, `factory-publish connect`, and the confirmation that
    names the handle.

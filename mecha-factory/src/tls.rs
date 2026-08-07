@@ -6,108 +6,77 @@
 //! mostly a claim about exactly that. So the program does its own ACME, and the
 //! private key exists in one process on one box.
 //!
-//! **TLS-ALPN-01, not HTTP-01 and not DNS-01.** The challenge is answered
-//! inside the TLS handshake on 443, which means:
+//! **HTTP-01, not TLS-ALPN-01 and not DNS-01.** This changed when a second
+//! person had to be able to sign up without an operator; [`crate::certificates`]
+//! carries the argument in full. What it means here:
 //!
-//! - Port 80 is not part of issuance. It exists here only because people type
-//!   bare hostnames, and it serves one redirect and nothing else.
+//! - **Port 80 is part of issuance**, which it deliberately was not before. It
+//!   still serves the redirect a human typing a bare hostname needs, and now
+//!   also `/.well-known/acme-challenge/{token}`. `[listen] http` is therefore
+//!   no longer optional beside a `[tls]` block, and `Config::check` refuses the
+//!   combination — a box that comes up serving TLS and quietly cannot renew is
+//!   the silently-degrading shape this project keeps naming.
+//! - **The challenge is answered on 80 directly, never redirected.** Let's
+//!   Encrypt does follow redirects, but the HTTPS side has no valid certificate
+//!   for a name being issued for the first time, which is the only case that
+//!   matters here.
 //! - No DNS credential lives on the box. DNS-01 would put an API token for the
 //!   whole zone on the machine we have agreed to assume is lost, and it buys
-//!   nothing until per-bundle wildcard subdomains exist (§7.6).
-//! - **Nothing may terminate TLS in front of this.** A proxy that answers the
-//!   handshake answers the challenge, and issuance stops working. That is worth
-//!   knowing before anybody turns on Cloudflare's orange cloud: proxied means
-//!   moving to DNS-01 *and* handing the plaintext to somebody else.
+//!   nothing until wildcards do — which `rustls-acme` forecloses anyway, since
+//!   `UseChallenge` is `Http01 | TlsAlpn01`.
+//! - **Nothing may terminate TLS in front of this.** Still true, and now for a
+//!   second reason: a proxy on 80 answers the challenge as well.
 //!
 //! The account key and the certificates are cached in the data directory, so a
-//! restart does not re-issue. Let's Encrypt's rate limits are per-week and
-//! generous but not infinite; `staging = true` points at the directory whose
+//! restart re-issues nothing. `staging = true` points at the directory whose
 //! certificates nobody trusts and whose limits are large, which is how you find
 //! out the path works without spending a week's budget discovering it does not.
 
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
-use rustls_acme::caches::DirCache;
-use rustls_acme::AcmeConfig;
+use axum_server::tls_rustls::{RustlsAcceptor, RustlsConfig};
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
+use crate::certificates::{self, Acme, Registry};
 use crate::config::Config;
 use crate::http::{router, App};
 
-/// Every name the certificate has to cover.
+/// How often the ledger is re-read for handles that have no certificate.
 ///
-/// The three base origins **plus one artifact hostname per active user**,
-/// because artifacts are served from `<handle>.<origin>` and a certificate
-/// that covered only the bases would fail the handshake for every actual user
-/// — silently, and only in a browser.
-///
-/// The honest limitation: TLS-ALPN-01 issues for a fixed list, so **a new user
-/// needs a restart before their hostname has a certificate**. That is
-/// acceptable for tens of users and not for thousands; the fix is a wildcard,
-/// which requires DNS-01 and a zone-scoped token on the box (§14.2). Stated
-/// here rather than discovered later, because "works for the operator and not
-/// for the first person who signs up" is the shape of failure this project
-/// keeps naming.
-fn certificate_names(app: &App, config: &Config) -> Vec<String> {
-    let mut names = config.origins.names();
-    if let Ok(users) = app.db.users() {
-        for user in users.iter().filter(|u| u.active()) {
-            for role in [crate::config::Role::Artifacts, crate::config::Role::Compute] {
-                names.push(config.origins.host_for(role, &user.handle));
-            }
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
-}
+/// A person who has just signed up is waiting on this plus an ACME round trip,
+/// so it is short — and it costs one indexed `SELECT` against a local SQLite
+/// file, which is cheaper than the timer that schedules it.
+const RECONCILE_EVERY: Duration = Duration::from_secs(30);
 
 /// Serve HTTPS on `listen.https`, with certificates this process obtains.
 pub async fn serve(app: Arc<App>, config: &Config) -> Result<()> {
-    let tls = config
-        .tls
-        .as_ref()
-        .context("serve_tls called without a [tls] block")?;
-    let names = certificate_names(&app, config);
+    let acme = Acme::from_config(config).context("serve_tls called without a [tls] block")?;
+    let staging = acme.staging;
+    let http = config.listen.http.context(
+        "a [tls] block needs [listen] http: certificates are issued over HTTP-01, \
+         which is answered on port 80",
+    )?;
     std::fs::create_dir_all(config.acme_cache())?;
 
-    let mut state = AcmeConfig::new(names.clone())
-        .contact([tls.contact.clone()])
-        .cache(DirCache::new(config.acme_cache()))
-        .directory_lets_encrypt(!tls.staging)
-        .state();
-    let acceptor = state.axum_acceptor(state.default_rustls_config());
-
-    // The ACME state machine is a stream that has to be polled for anything to
-    // be ordered or renewed. Its events are logged rather than swallowed: a
-    // certificate that silently failed to renew is a site that goes down in
-    // sixty days for a reason nobody wrote down.
-    tokio::spawn(async move {
-        loop {
-            match state.next().await {
-                Some(Ok(event)) => tracing::info!(?event, "acme"),
-                Some(Err(e)) => tracing::error!(error = %e, "acme"),
-                None => {
-                    tracing::error!("the acme state machine ended; certificates will not renew");
-                    break;
-                }
-            }
-        }
-    });
-
+    let registry = Registry::new(acme);
+    certificates::reconcile(&registry, &app.db, config)?;
     tracing::info!(
-        count = names.len(),
-        "ordering certificates; a user created after this needs a restart to get one"
+        groups = registry.groups(),
+        "ordering certificates over http-01; a user created from here on gets one without a restart"
     );
-    if tls.staging {
+    if staging {
         tracing::warn!(
             "using the Let's Encrypt staging directory — browsers will refuse \
              these certificates"
         );
     }
-    tracing::info!(names = ?names, address = %config.listen.https, "serving tls");
+    tracing::info!(address = %config.listen.https, "serving tls");
 
+    // ALPN is deliberately left unset, which is what the acceptor this replaced
+    // did too: the server advertises nothing and clients arrive over HTTP/1.1.
+    // Turning on h2 is a change with its own consequences and is not this one.
+    let acceptor = RustlsAcceptor::new(RustlsConfig::from_config(registry.server_config()));
     let service = router(app.clone()).into_make_service_with_connect_info::<SocketAddr>();
     let https = tokio::spawn(
         axum_server::bind(config.listen.https)
@@ -115,27 +84,97 @@ pub async fn serve(app: Arc<App>, config: &Config) -> Result<()> {
             .serve(service),
     );
 
-    let redirect = config.listen.http.map(|address| {
-        let app = app.clone();
-        tokio::spawn(async move { redirect_to_https(app, address).await })
-    });
+    let port80 = tokio::spawn(challenge_and_redirect(app.clone(), registry.clone(), http));
+    let reconcile = tokio::spawn(reconcile_forever(app.clone(), registry));
 
     https.await.context("the tls listener panicked")??;
-    if let Some(redirect) = redirect {
-        redirect.abort();
-    }
+    port80.abort();
+    reconcile.abort();
     Ok(())
 }
 
-/// Port 80: one redirect, and nothing else.
+/// Re-read the ledger, and order for whatever is in it that we do not have.
 ///
-/// It answers only for names we serve. Redirecting an unknown `Host` would make
-/// this an open redirector — a small thing on its own and a real one when the
-/// same origin later hands out capability URLs.
-async fn redirect_to_https(app: Arc<App>, address: SocketAddr) -> Result<()> {
-    use axum::extract::State;
+/// **This is why a signup needs no restart**, and why it needs no notification
+/// either: `factory user create` runs in another process, so a channel would
+/// only ever fire for the endpoint that does not exist yet. A failure is
+/// logged and the next pass retries — the ledger is the truth, so a pass that
+/// could not read it has lost nothing.
+async fn reconcile_forever(app: Arc<App>, registry: Arc<Registry>) {
+    let mut ticker = tokio::time::interval(RECONCILE_EVERY);
+    // The first tick is immediate and `serve` has already reconciled.
+    ticker.tick().await;
+    loop {
+        ticker.tick().await;
+        match certificates::reconcile(&registry, &app.db, &app.config) {
+            Ok(0) => {}
+            Ok(started) => tracing::info!(
+                started,
+                groups = registry.groups(),
+                "a new handle appeared; ordering its certificate"
+            ),
+            Err(e) => tracing::warn!(error = %e, "reading the ledger to reconcile certificates"),
+        }
+    }
+}
+
+/// Serve [`port_80`] on `address`.
+async fn challenge_and_redirect(
+    app: Arc<App>,
+    registry: Arc<Registry>,
+    address: SocketAddr,
+) -> Result<()> {
+    let listener = tokio::net::TcpListener::bind(address)
+        .await
+        .with_context(|| format!("binding {address}"))?;
+    tracing::info!(%address, "serving acme challenges and redirecting to https");
+    axum::serve(listener, port_80(app, registry)).await?;
+    Ok(())
+}
+
+/// Port 80: the ACME challenge, and one redirect.
+///
+/// The challenge route is registered ahead of the redirect, and that ordering
+/// is the whole of it — a challenge redirected to a name with no certificate
+/// yet is an order that never completes. Let's Encrypt does follow
+/// redirects, which is exactly why this is easy to get wrong and impossible to
+/// notice: it would keep working for every name that already has a certificate
+/// and fail only for the ones being issued for the first time, which is every
+/// signup.
+///
+/// The redirect answers only for names we serve. Redirecting an unknown `Host`
+/// would make this an open redirector — a small thing on its own and a real one
+/// when the same origin later hands out capability URLs.
+///
+/// Built here rather than inline so a test can drive it: see
+/// `tests/certificates.rs`.
+pub fn port_80(app: Arc<App>, registry: Arc<Registry>) -> axum::Router {
+    use axum::extract::{Path, State};
     use axum::http::{header, HeaderMap, StatusCode, Uri};
     use axum::response::{IntoResponse, Redirect, Response};
+
+    /// The key authorization for a token some order is waiting on.
+    ///
+    /// Deliberately not host-scoped: the token is the secret, it is
+    /// per-authorization, and a resolver that does not know it says nothing. A
+    /// `Host` check here would only add a way for a validation from an
+    /// unexpected vantage point to fail.
+    async fn challenge(
+        State(registry): State<Arc<Registry>>,
+        Path(token): Path<String>,
+    ) -> Response {
+        match registry.http_01_key_auth(&token) {
+            Some(key_auth) => (
+                [(header::CONTENT_TYPE, "application/octet-stream")],
+                key_auth,
+            )
+                .into_response(),
+            None => {
+                tracing::debug!(%token, "an acme challenge nobody is waiting on");
+                (StatusCode::NOT_FOUND, "not found").into_response()
+            }
+        }
+    }
 
     // The `Host` extractor left axum in 0.8; the header is what it read anyway,
     // and reading it here keeps this resolving names exactly the way the real
@@ -167,15 +206,17 @@ async fn redirect_to_https(app: Arc<App>, address: SocketAddr) -> Result<()> {
         }
     }
 
-    let router = axum::Router::new()
-        .fallback(axum::routing::any(handler))
-        .with_state(app);
-    let listener = tokio::net::TcpListener::bind(address)
-        .await
-        .with_context(|| format!("binding {address}"))?;
-    tracing::info!(%address, "redirecting to https");
-    axum::serve(listener, router).await?;
-    Ok(())
+    axum::Router::new()
+        .route(
+            "/.well-known/acme-challenge/{token}",
+            axum::routing::get(challenge),
+        )
+        .with_state(registry)
+        .merge(
+            axum::Router::new()
+                .fallback(axum::routing::any(handler))
+                .with_state(app),
+        )
 }
 
 /// What `factory check` prints about the certificate situation, without
@@ -188,7 +229,8 @@ pub fn describe(config: &Config) -> String {
                 .map(|entries| entries.flatten().count())
                 .unwrap_or(0);
             format!(
-                "acme tls-alpn-01 for {} ({}{} cached files in {}), contact {}",
+                "acme http-01 for {} plus one certificate per active user \
+                 ({}{} cached files in {}), contact {}",
                 config.origins.names().join(", "),
                 if tls.staging { "staging, " } else { "" },
                 cached,
@@ -217,53 +259,24 @@ mod tests {
             },
             listen: Listen {
                 https: ([0, 0, 0, 0], 443).into(),
-                http: None,
+                http: Some(([0, 0, 0, 0], 80).into()),
             },
             tls,
             limits: Limits::default(),
         }
     }
 
-    /// The certificate covers every origin *and* every user, or the first
-    /// person who signs up gets a TLS error nobody sees until a browser shows
-    /// it to them.
+    /// `check` names the challenge type, because it is the sentence somebody
+    /// reads before deciding whether port 80 may be firewalled off.
     #[test]
-    fn the_order_covers_every_origin_and_every_user() {
-        let config = config(None);
-        assert_eq!(
-            config.origins.names(),
-            vec!["art.example.org", "compute.example.org", "gate.example.org"]
-        );
-
-        let db = crate::db::Db::open_in_memory().unwrap();
-        db.user_create("alice", "a@example.org", "t").unwrap();
-        let suspended = db.user_create("bob", "b@example.org", "t").unwrap();
-        db.user_status(&suspended.id, "suspended").unwrap();
-        let app = App::new(config.clone(), db).unwrap();
-
-        let names = certificate_names(&app, &config);
-        assert!(
-            names.contains(&"alice.art.example.org".to_string()),
-            "{names:?}"
-        );
-        assert!(
-            names.contains(&"alice.compute.example.org".to_string()),
-            "{names:?}"
-        );
-        // A suspended account serves nothing, so it needs no certificate — and
-        // ordering one would spend issuance budget on a name with no pages.
-        assert!(!names.iter().any(|n| n.starts_with("bob.")), "{names:?}");
-        assert!(names.contains(&"gate.example.org".to_string()));
-    }
-
-    #[test]
-    fn the_staging_directory_is_named_in_what_check_prints() {
+    fn the_staging_directory_and_the_challenge_type_are_named_in_what_check_prints() {
         let staging = describe(&config(Some(Tls {
             contact: "mailto:someone@example.org".into(),
             staging: true,
         })));
         assert!(staging.contains("staging"), "{staging}");
-        assert!(staging.contains("tls-alpn-01"), "{staging}");
+        assert!(staging.contains("http-01"), "{staging}");
+        assert!(staging.contains("per active user"), "{staging}");
         assert!(describe(&config(None)).contains("loopback"));
     }
 }

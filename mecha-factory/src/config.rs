@@ -262,9 +262,12 @@ pub struct Tls {
 pub struct Listen {
     /// Where TLS is served. Ignored in dev.
     pub https: SocketAddr,
-    /// Redirects to HTTPS and serves nothing else. TLS-ALPN-01 does its
-    /// challenge on 443, so port 80 is never part of issuance — it exists
-    /// because a human types a bare hostname.
+    /// The ACME challenge, and a redirect to HTTPS.
+    ///
+    /// **Required beside a `[tls]` block**, and that is a change: issuance is
+    /// HTTP-01 now, so this port is where certificates come from and not merely
+    /// where a human typing a bare hostname lands. Optional only when there is
+    /// no TLS at all, which is loopback.
     pub http: Option<SocketAddr>,
 }
 
@@ -384,6 +387,18 @@ impl Config {
                  serving plain HTTP publishes every reader's request in the \
                  clear and cannot be what was meant",
                 self.listen.https
+            );
+        }
+        // Refused rather than warned about, and refused *here* rather than
+        // discovered sixty days later. Certificates are issued over HTTP-01, so
+        // a box with [tls] and no port 80 comes up serving whatever it has
+        // cached and can never renew — it works for two months and then does
+        // not, which is the worst shape of failure this project keeps finding.
+        if self.tls.is_some() && self.listen.http.is_none() {
+            bail!(
+                "[tls] is set but [listen] http is not — certificates are \
+                 issued over HTTP-01, which is answered on port 80, so this \
+                 box could serve what it has cached and would never renew"
             );
         }
         Ok(())
@@ -535,6 +550,24 @@ mod tests {
         config.listen.https = ([0, 0, 0, 0], 443).into();
         let err = config.check().unwrap_err().to_string();
         assert!(err.contains("plain HTTP"), "{err}");
+    }
+
+    /// Issuance is HTTP-01, so port 80 is where certificates come from. A box
+    /// without it serves its cached certificate for sixty days and then stops
+    /// — which is why this is a refusal at startup and not a warning.
+    #[test]
+    fn tls_without_port_80_is_refused_because_nothing_could_ever_renew() {
+        let mut config = Config::dev(PathBuf::from("/tmp/x"), 8400);
+        config.listen.https = ([0, 0, 0, 0], 443).into();
+        config.tls = Some(Tls {
+            contact: "mailto:someone@example.org".into(),
+            staging: true,
+        });
+        let err = config.check().unwrap_err().to_string();
+        assert!(err.contains("HTTP-01"), "{err}");
+
+        config.listen.http = Some(([0, 0, 0, 0], 80).into());
+        config.check().unwrap();
     }
 
     #[test]

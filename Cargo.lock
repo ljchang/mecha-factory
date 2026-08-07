@@ -1093,6 +1093,7 @@ dependencies = [
  "hmac",
  "mecha-manifest",
  "rusqlite",
+ "rustls",
  "rustls-acme",
  "serde",
  "serde_json",
@@ -1504,7 +1505,6 @@ dependencies = [
  "async-io",
  "async-trait",
  "async-web-client",
- "axum-server",
  "base64",
  "blocking",
  "chrono",
@@ -1520,7 +1520,6 @@ dependencies = [
  "thiserror 2.0.19",
  "tokio",
  "tokio-util",
- "tower-service",
  "webpki-roots 1.0.9",
  "x509-parser",
 ]

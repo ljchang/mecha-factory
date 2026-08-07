@@ -27,17 +27,21 @@ compute   = "compute.example.org"    # notebooks — `wasm-unsafe-eval` lives he
 
 [listen]
 https = "0.0.0.0:443"
-# Serves one redirect and nothing else. TLS-ALPN-01 does its challenge on 443,
-# so port 80 is never part of issuance — this exists because people type bare
-# hostnames.
+# **Required whenever [tls] is set**, and the server refuses to start without
+# it. Certificates are issued over HTTP-01, so this port answers
+# `/.well-known/acme-challenge/{token}` as well as the redirect people typing a
+# bare hostname need. A box with TLS and no port 80 would serve whatever it had
+# cached and never renew, which is why this is a refusal and not a warning.
 http = "0.0.0.0:80"
 
 # Remove this block to serve plain HTTP on loopback (which is all it will let
 # you do: a public address without TLS is refused at startup).
-# The certificate covers the three base names plus one hostname per active
-# user. TLS-ALPN-01 issues for a fixed list, so a user created while the server
-# is running needs a restart before their name has a certificate — fine for
-# tens of users, and the reason a wildcard (which needs DNS-01) is on the list.
+#
+# One certificate covers the three base names; each active user gets their own,
+# covering their artifacts and compute hostnames. The set is reconciled against
+# the ledger every thirty seconds, so a user created while the server is running
+# gets a certificate **without a restart** — which is what makes signup
+# something a second person can do without an operator.
 [tls]
 contact = "mailto:you@example.org"
 # Start here. These certificates are trusted by nobody and rate-limited by

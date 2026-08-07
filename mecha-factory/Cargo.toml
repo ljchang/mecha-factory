@@ -63,14 +63,33 @@ flate2 = "1"
 # The certificate, obtained by the binary itself — no proxy terminating TLS.
 # `ring` rather than the default `aws-lc-rs`, so building the box's binary
 # needs no cmake and no C toolchain.
+#
+# The `axum` feature is gone with the acceptor it provided. `AcmeAcceptor` is
+# `pub(crate)` and takes the library's concrete resolver, so it cannot be handed
+# the SNI-dispatching wrapper that serves one certificate per user — which is
+# why issuance moved to HTTP-01, where both halves are public API. See
+# `src/certificates.rs`.
 rustls-acme = { version = "0.15", default-features = false, features = [
     "ring",
     "tls12",
     "webpki-roots",
-    "axum",
     "tokio",
 ] }
-axum-server = "0.8"
+# The TLS layer is ours now: our own `ServerConfig` over our own resolver,
+# accepted by `axum-server` rather than by anything from `rustls-acme`.
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
+# Named rather than inherited. `rustls` arrives anyway underneath `rustls-acme`,
+# but `certificates.rs` calls `crypto::ring::default_provider()` directly, and a
+# feature we depend on has to be one we asked for — otherwise a dependency bump
+# that stops enabling `ring` breaks the build somewhere that never mentions it.
+# `default-features = false` keeps `aws-lc-rs` out, for the toolchain reason
+# above.
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+    "logging",
+] }
 futures-util = "0.3"
 
 [dev-dependencies]
