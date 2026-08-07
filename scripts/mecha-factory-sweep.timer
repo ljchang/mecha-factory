@@ -1,0 +1,17 @@
+# Install: cp scripts/mecha-factory-sweep.{service,timer} /etc/systemd/system/
+#          systemctl daemon-reload
+#          systemctl enable --now mecha-factory-sweep.timer
+#
+# Hourly, because the shortest window the sweep enforces is the upload
+# token's, measured in hours — and Persistent, so a reboot owes one sweep
+# rather than skipping the slot.
+[Unit]
+Description=Run the mecha factory retention sweep hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=5m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

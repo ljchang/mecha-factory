@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 6;
+const SCHEMA: i64 = 7;
 
 #[derive(Clone)]
 pub struct Db {
@@ -296,6 +296,35 @@ pub struct QueueRow {
     pub state: String,
     pub payload: String,
     pub created_at: String,
+}
+
+/// One uploaded file's ledger row. The bytes live in the attachment store
+/// under `id`; everything here is what the box measured about them, plus the
+/// stranger's claimed filename, carried for the human who will open the file
+/// and for nobody else.
+#[derive(Debug, Clone)]
+pub struct AttachmentRow {
+    pub id: String,
+    pub user_id: String,
+    pub seq: i64,
+    pub field: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+    pub sha256: String,
+    pub created_at: String,
+}
+
+/// Where a spent verification token sends the row: straight to the queue, or
+/// through the upload step first. The caller decides — it holds the manifest
+/// and knows whether the type asks for files — and the ledger just moves.
+#[derive(Debug, Clone)]
+pub enum VerifyNext {
+    Queued,
+    AwaitingUpload {
+        upload_hash: String,
+        upload_expires: String,
+    },
 }
 
 impl Db {
@@ -1161,18 +1190,34 @@ impl Db {
     /// By list rather than by watermark: a watermark deletes rows nobody named,
     /// and the failure is silent. Scoped by user for the obvious reason —
     /// acknowledging somebody else's record would delete it.
-    pub fn queue_ack(&self, user_id: &str, seqs: &[i64]) -> Result<usize> {
+    ///
+    /// Returns the removed count and the attachment blob ids the caller must
+    /// now delete from disk: attachment rows die in the same transaction as
+    /// their queue row, and the files follow — with the orphan sweep as the
+    /// backstop when a crash lands between the two.
+    pub fn queue_ack(&self, user_id: &str, seqs: &[i64]) -> Result<(usize, Vec<String>)> {
         self.with(|conn| {
             let mut removed = 0;
+            let mut blobs = Vec::new();
             let tx = conn.unchecked_transaction()?;
             for seq in seqs {
+                let mut stmt = tx.prepare(
+                    "SELECT id FROM attachments WHERE user_id = ?1 AND seq = ?2",
+                )?;
+                let ids = stmt.query_map(params![user_id, seq], |r| r.get::<_, String>(0))?;
+                blobs.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
+                drop(stmt);
+                tx.execute(
+                    "DELETE FROM attachments WHERE user_id = ?1 AND seq = ?2",
+                    params![user_id, seq],
+                )?;
                 removed += tx.execute(
                     "DELETE FROM queue WHERE user_id = ?1 AND seq = ?2",
                     params![user_id, seq],
                 )?;
             }
             tx.commit()?;
-            Ok(removed)
+            Ok((removed, blobs))
         })
     }
 
@@ -1204,6 +1249,156 @@ impl Db {
             )?;
             let rows = stmt.query_map(params![now], queue_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    // ---- attachments -----------------------------------------------------
+
+    /// The attachments of one queue row, in field order as inserted.
+    pub fn attachments_for(&self, user_id: &str, seq: i64) -> Result<Vec<AttachmentRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, user_id, seq, field, filename, content_type, size, sha256, \
+                 created_at FROM attachments WHERE user_id = ?1 AND seq = ?2 ORDER BY rowid",
+            )?;
+            let rows = stmt.query_map(params![user_id, seq], attachment_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// One attachment by its minted id, scoped by user: someone else's id and
+    /// a nonexistent one are the same absence.
+    pub fn attachment_get(&self, user_id: &str, id: &str) -> Result<Option<AttachmentRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id, user_id, seq, field, filename, content_type, size, sha256, \
+                     created_at FROM attachments WHERE user_id = ?1 AND id = ?2",
+                    params![user_id, id],
+                    attachment_row,
+                )
+                .optional()?)
+        })
+    }
+
+    /// Whether any attachment row claims this blob id, whoever owns it. The
+    /// orphan sweep's question, and only its: everything else is user-scoped.
+    pub fn attachment_exists(&self, id: &str) -> Result<bool> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT 1 FROM attachments WHERE id = ?1",
+                    params![id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some())
+        })
+    }
+
+    /// Complete an upload: attachment rows in, payload replaced, the row
+    /// queued, the token spent — one transaction, so a crash leaves either
+    /// the row still awaiting its files or fully done, never something drain
+    /// would deliver half-made.
+    ///
+    /// Keyed on the hashed upload token exactly like [`submission_verify`] is
+    /// on its token, with the same property: zero matched rows is the whole
+    /// of "already done", "expired" and "never existed".
+    pub fn upload_complete(
+        &self,
+        user_id: &str,
+        upload_hash: &str,
+        now: &str,
+        payload: &str,
+        attachments: &[AttachmentRow],
+    ) -> Result<Option<i64>> {
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let seq: Option<i64> = tx
+                .query_row(
+                    "SELECT seq FROM queue WHERE user_id = ?1 AND upload_hash = ?2 \
+                     AND state = 'awaiting_upload' AND upload_expires > ?3",
+                    params![user_id, upload_hash, now],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let Some(seq) = seq else {
+                return Ok(None);
+            };
+            for a in attachments {
+                tx.execute(
+                    "INSERT INTO attachments (id, user_id, seq, field, filename, \
+                     content_type, size, sha256, created_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                    params![
+                        a.id,
+                        user_id,
+                        seq,
+                        a.field,
+                        a.filename,
+                        a.content_type,
+                        a.size,
+                        a.sha256,
+                        a.created_at
+                    ],
+                )?;
+            }
+            let changed = tx.execute(
+                "UPDATE queue SET state = 'queued', payload = ?1, upload_hash = NULL, \
+                 upload_expires = NULL WHERE seq = ?2 AND state = 'awaiting_upload'",
+                params![payload, seq],
+            )?;
+            tx.commit()?;
+            Ok((changed > 0).then_some(seq))
+        })
+    }
+
+    /// Verified rows whose upload window closed with no files. Deleted like
+    /// unverified rows, for the same reason — and they hold no blobs by
+    /// construction, since blobs are written only in [`upload_complete`]'s
+    /// transaction.
+    pub fn expire_unuploaded(&self, now: &str) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM queue WHERE state = 'awaiting_upload' \
+                 AND upload_expires IS NOT NULL AND upload_expires <= ?1",
+                params![now],
+            )?)
+        })
+    }
+
+    /// Bytes this address has uploaded today.
+    pub fn upload_bytes_today(&self, ip_hash: &str, day: &str) -> Result<i64> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT bytes FROM upload_budget WHERE day = ?1 AND ip_hash = ?2",
+                    params![day, ip_hash],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(0))
+        })
+    }
+
+    pub fn upload_bytes_add(&self, ip_hash: &str, day: &str, bytes: i64) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO upload_budget (day, ip_hash, bytes) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT (day, ip_hash) DO UPDATE SET bytes = bytes + ?3",
+                params![day, ip_hash, bytes],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Drop budget rows for days gone by — yesterday's counts bound nothing.
+    pub fn expire_upload_budget(&self, today: &str) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM upload_budget WHERE day < ?1",
+                params![today],
+            )?)
         })
     }
 
@@ -1253,6 +1448,7 @@ impl Db {
         user_id: &str,
         hash: &str,
         now: &str,
+        next: VerifyNext,
     ) -> Result<Option<QueueRow>> {
         self.with(|conn| {
             let tx = conn.unchecked_transaction()?;
@@ -1268,16 +1464,30 @@ impl Db {
             let Some(mut row) = found else {
                 return Ok(None);
             };
-            let changed = tx.execute(
-                "UPDATE queue SET state = 'queued', verify_hash = NULL, verify_expires = NULL \
-                 WHERE seq = ?1 AND state = 'submitted'",
-                params![row.seq],
-            )?;
+            let changed = match &next {
+                VerifyNext::Queued => tx.execute(
+                    "UPDATE queue SET state = 'queued', verify_hash = NULL, \
+                     verify_expires = NULL WHERE seq = ?1 AND state = 'submitted'",
+                    params![row.seq],
+                )?,
+                VerifyNext::AwaitingUpload {
+                    upload_hash,
+                    upload_expires,
+                } => tx.execute(
+                    "UPDATE queue SET state = 'awaiting_upload', verify_hash = NULL, \
+                     verify_expires = NULL, upload_hash = ?2, upload_expires = ?3 \
+                     WHERE seq = ?1 AND state = 'submitted'",
+                    params![row.seq, upload_hash, upload_expires],
+                )?,
+            };
             tx.commit()?;
             if changed == 0 {
                 return Ok(None);
             }
-            row.state = "queued".into();
+            row.state = match next {
+                VerifyNext::Queued => "queued".into(),
+                VerifyNext::AwaitingUpload { .. } => "awaiting_upload".into(),
+            };
             Ok(Some(row))
         })
     }
@@ -1305,24 +1515,50 @@ impl Db {
     /// **Deleted rather than kept**: an abandoned submission is a stranger's
     /// personal data with no consent behind it, and "never verified" is the
     /// one state where keeping the record serves nobody. Returns what went, so
-    /// the sweep can say it.
-    pub fn expire_unverified(&self, now: &str) -> Result<usize> {
-        self.with(|conn| {
-            Ok(conn.execute(
-                "DELETE FROM queue WHERE state = 'submitted' AND verify_expires IS NOT NULL \
-                 AND verify_expires <= ?1",
-                params![now],
-            )?)
-        })
+    /// the sweep can say it — and the owner-qualified blob ids to delete,
+    /// though a `submitted` row holds none by construction. The shape stays uniform with
+    /// [`expire_retained`] anyway: a deletion helper whose blob handling
+    /// depends on a state name is the silently-degrading kind.
+    pub fn expire_unverified(&self, now: &str) -> Result<(usize, Vec<(String, String)>)> {
+        self.delete_queue_where(
+            "state = 'submitted' AND verify_expires IS NOT NULL AND verify_expires <= ?1",
+            now,
+        )
     }
 
     /// Drop everything past its retention window.
-    pub fn expire_retained(&self, now: &str) -> Result<usize> {
+    pub fn expire_retained(&self, now: &str) -> Result<(usize, Vec<(String, String)>)> {
+        self.delete_queue_where("retain_until IS NOT NULL AND retain_until <= ?1", now)
+    }
+
+    /// Delete queue rows matching a `?1 = now` predicate, their attachment
+    /// rows with them, returning the count and the owner-qualified blob ids
+    /// for the caller's file deletion — the expiry sweeps cross users, so a
+    /// bare id would not name a path.
+    fn delete_queue_where(
+        &self,
+        predicate: &str,
+        now: &str,
+    ) -> Result<(usize, Vec<(String, String)>)> {
         self.with(|conn| {
-            Ok(conn.execute(
-                "DELETE FROM queue WHERE retain_until IS NOT NULL AND retain_until <= ?1",
+            let tx = conn.unchecked_transaction()?;
+            let mut stmt = tx.prepare(&format!(
+                "SELECT a.user_id, a.id FROM attachments a JOIN queue q \
+                 ON a.user_id = q.user_id AND a.seq = q.seq WHERE q.{predicate}"
+            ))?;
+            let ids = stmt.query_map(params![now], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            let blobs = ids.collect::<rusqlite::Result<Vec<(String, String)>>>()?;
+            drop(stmt);
+            tx.execute(
+                &format!(
+                    "DELETE FROM attachments WHERE (user_id, seq) IN \
+                     (SELECT user_id, seq FROM queue WHERE {predicate})"
+                ),
                 params![now],
-            )?)
+            )?;
+            let removed = tx.execute(&format!("DELETE FROM queue WHERE {predicate}"), params![now])?;
+            tx.commit()?;
+            Ok((removed, blobs))
         })
     }
 
@@ -1456,6 +1692,20 @@ fn queue_row(r: &rusqlite::Row) -> rusqlite::Result<QueueRow> {
     })
 }
 
+fn attachment_row(r: &rusqlite::Row) -> rusqlite::Result<AttachmentRow> {
+    Ok(AttachmentRow {
+        id: r.get(0)?,
+        user_id: r.get(1)?,
+        seq: r.get(2)?,
+        field: r.get(3)?,
+        filename: r.get(4)?,
+        content_type: r.get(5)?,
+        size: r.get(6)?,
+        sha256: r.get(7)?,
+        created_at: r.get(8)?,
+    })
+}
+
 fn bundle_row(r: &rusqlite::Row) -> rusqlite::Result<BundleRow> {
     Ok(BundleRow {
         user_id: r.get(0)?,
@@ -1540,6 +1790,22 @@ fn migrate(conn: &Connection) -> Result<()> {
         if let Err(e) = conn.execute_batch("ALTER TABLE keys ADD COLUMN last_used_at TEXT;") {
             if !e.to_string().contains("duplicate column") {
                 return Err(e.into());
+            }
+        }
+    }
+    // Schema 7: the upload step. A verified queue row that is still owed its
+    // files carries an upload token the same way a `submitted` row carries
+    // its verification one. Same duplicate-column tolerance as above, for the
+    // same reason.
+    if (3..7).contains(&version) {
+        for alter in [
+            "ALTER TABLE queue ADD COLUMN upload_hash TEXT;",
+            "ALTER TABLE queue ADD COLUMN upload_expires TEXT;",
+        ] {
+            if let Err(e) = conn.execute_batch(alter) {
+                if !e.to_string().contains("duplicate column") {
+                    return Err(e.into());
+                }
             }
         }
     }
@@ -1639,11 +1905,44 @@ fn migrate(conn: &Connection) -> Result<()> {
             -- second copy of their address.
             recipient_hash TEXT,
             -- The day it was submitted, for the send budgets.
-            submitted_on TEXT
+            submitted_on TEXT,
+            -- The upload step, for types with file fields: a verified row
+            -- that is still owed its files is `awaiting_upload` and carries
+            -- this token, hashed and expiring like the verification one.
+            upload_hash TEXT,
+            upload_expires TEXT
         );
         CREATE INDEX IF NOT EXISTS queue_by_state ON queue (user_id, state, seq);
         CREATE INDEX IF NOT EXISTS queue_by_verify ON queue (user_id, verify_hash);
         CREATE INDEX IF NOT EXISTS queue_by_sends ON queue (user_id, submitted_on, recipient_hash);
+        CREATE INDEX IF NOT EXISTS queue_by_upload ON queue (user_id, upload_hash);
+
+        -- One row per uploaded file, created in the same transaction that
+        -- completes its queue row, so blob lifetime is row lifetime and every
+        -- queue deletion extends to blobs by construction. `id` is minted by
+        -- us and is the on-disk name — a stranger's filename never touches
+        -- the filesystem.
+        CREATE TABLE IF NOT EXISTS attachments (
+            id           TEXT PRIMARY KEY,
+            user_id      TEXT NOT NULL,
+            seq          INTEGER NOT NULL,
+            field        TEXT NOT NULL,
+            filename     TEXT NOT NULL,
+            content_type TEXT NOT NULL,
+            size         INTEGER NOT NULL,
+            sha256       TEXT NOT NULL,
+            created_at   TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS attachments_by_seq ON attachments (user_id, seq);
+
+        -- Bytes accepted per address per day, in the spirit of the send
+        -- budgets: countable without keeping a copy of the address.
+        CREATE TABLE IF NOT EXISTS upload_budget (
+            day     TEXT NOT NULL,
+            ip_hash TEXT NOT NULL,
+            bytes   INTEGER NOT NULL,
+            PRIMARY KEY (day, ip_hash)
+        );
 
         CREATE TABLE IF NOT EXISTS idempotency (
             key         TEXT PRIMARY KEY,
@@ -1924,7 +2223,7 @@ mod tests {
         );
         assert_eq!(db.queue_depth(Some(&u)).unwrap(), 2);
 
-        assert_eq!(db.queue_ack(&u, &[a]).unwrap(), 1);
+        assert_eq!(db.queue_ack(&u, &[a]).unwrap().0, 1);
         assert_eq!(
             db.drain(&u, 0, 10)
                 .unwrap()
@@ -1935,6 +2234,76 @@ mod tests {
         );
         // And the watermark form of the same question.
         assert!(db.drain(&u, b, 10).unwrap().is_empty());
+    }
+
+    /// Blob lifetime is row lifetime: attachment rows ride the completion
+    /// transaction in, and every queue deletion carries them out, naming the
+    /// blob ids so the caller can take the files with them.
+    #[test]
+    fn attachment_rows_live_and_die_with_their_queue_row() {
+        let (db, u) = db_with_user();
+        let submission = Submission {
+            user_id: u.clone(),
+            type_id: "letterish".into(),
+            payload: "{}".into(),
+            created_at: "2026-08-07T00:00:00Z".into(),
+            retain_until: Some("2026-09-01T00:00:00Z".into()),
+            verify_hash: "vh".into(),
+            verify_expires: "2999-01-01T00:00:00Z".into(),
+            recipient_hash: "rh".into(),
+        };
+        let seq = db.submission_add(&submission).unwrap();
+
+        // The upload step: verified into `awaiting_upload`, which drain does
+        // not see, then completed into `queued`, which it does.
+        db.submission_verify(
+            &u,
+            "vh",
+            "2026-08-07T00:01:00Z",
+            VerifyNext::AwaitingUpload {
+                upload_hash: "uh".into(),
+                upload_expires: "2999-01-01T00:00:00Z".into(),
+            },
+        )
+        .unwrap()
+        .expect("verifies");
+        assert!(db.drain(&u, 0, 10).unwrap().is_empty(), "not yet uploaded");
+
+        let row = AttachmentRow {
+            id: "blob1".into(),
+            user_id: u.clone(),
+            seq,
+            field: "cv".into(),
+            filename: "cv.pdf".into(),
+            content_type: "application/pdf".into(),
+            size: 5,
+            sha256: format!("sha256:{}", "cd".repeat(32)),
+            created_at: now(),
+        };
+        let completed = db
+            .upload_complete(&u, "uh", "2026-08-07T00:02:00Z", r#"{"done":1}"#, &[row])
+            .unwrap();
+        assert_eq!(completed, Some(seq));
+        assert_eq!(
+            db.upload_complete(&u, "uh", "2026-08-07T00:02:00Z", "{}", &[])
+                .unwrap(),
+            None,
+            "the token spends once"
+        );
+        assert_eq!(db.drain(&u, 0, 10).unwrap().len(), 1);
+        assert_eq!(db.attachments_for(&u, seq).unwrap().len(), 1);
+        assert!(db.attachment_get(&u, "blob1").unwrap().is_some());
+        assert!(
+            db.attachment_get("someone-else", "blob1").unwrap().is_none(),
+            "someone else's id and a nonexistent one are the same absence"
+        );
+
+        // Retention expiry takes the row, the attachment row, and names the
+        // blob with its owner.
+        let (removed, blobs) = db.expire_retained("2030-01-01T00:00:00Z").unwrap();
+        assert_eq!(removed, 1);
+        assert_eq!(blobs, vec![(u.clone(), "blob1".to_string())]);
+        assert!(db.attachment_get(&u, "blob1").unwrap().is_none());
     }
 
     #[test]

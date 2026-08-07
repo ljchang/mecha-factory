@@ -364,8 +364,17 @@ pub async fn confirm(
 
     // Looked up by the hash of what was presented, so the stored value is a
     // verifier rather than a link somebody could replay off the disk.
+    //
+    // Straight to the queue for now, even for types with file fields: the
+    // upload page is the next stage of this feature, and routing rows to
+    // `awaiting_upload` before it exists would strand them.
     let hash = crate::intake::hash_token(&token);
-    let verified = match app.db.submission_verify(&user.id, &hash, &crate::db::now()) {
+    let verified = match app.db.submission_verify(
+        &user.id,
+        &hash,
+        &crate::db::now(),
+        crate::db::VerifyNext::Queued,
+    ) {
         Ok(Some(row)) => row,
         Ok(None) => {
             // One page for expired, already-used, and never-existed. Which of

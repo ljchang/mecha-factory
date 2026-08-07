@@ -184,13 +184,13 @@ fn an_unverified_submission_expires_and_is_deleted() {
 
     // Nothing expires yet.
     assert_eq!(
-        server.db.expire_unverified("2026-08-06T00:00:00Z").unwrap(),
+        server.db.expire_unverified("2026-08-06T00:00:00Z").unwrap().0,
         0
     );
 
     // Well past the 48-hour window.
     assert_eq!(
-        server.db.expire_unverified("2030-01-01T00:00:00Z").unwrap(),
+        server.db.expire_unverified("2030-01-01T00:00:00Z").unwrap().0,
         1
     );
     let token = server.verification_token();

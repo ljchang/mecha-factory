@@ -650,7 +650,11 @@ pub async fn ack(
         }
     };
     match app.db.queue_ack(&user.id, &request.seqs) {
-        Ok(deleted) => {
+        Ok((deleted, blobs)) => {
+            // An acked row's files go with it — home confirmed its copies
+            // before asking. Best-effort after the commit; the orphan sweep
+            // is the backstop if this process dies mid-list.
+            app.attachments.delete_all(&user.id, &blobs);
             tracing::info!(deleted, asked = request.seqs.len(), "acknowledged");
             (
                 StatusCode::OK,

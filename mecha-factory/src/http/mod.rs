@@ -44,6 +44,8 @@ pub struct App {
     pub db: Db,
     pub config: Config,
     pub files: Files,
+    /// Uploaded form attachments, keyed by minted id. See `crate::attachments`.
+    pub attachments: crate::attachments::Store,
     /// Everything a stranger can reach without a key.
     pub api_limit: RateLimiter,
     /// Static reads, which are the same reader many times: one page of a
@@ -77,10 +79,12 @@ impl App {
         mailer: Box<dyn crate::intake::Mailer>,
     ) -> anyhow::Result<App> {
         let files = Files::new(config.bundle_root())?;
+        let attachments = crate::attachments::Store::new(config.attachments_root())?;
         Ok(App {
             api_limit: RateLimiter::new(config.limits.rate_per_minute),
             asset_limit: RateLimiter::new(config.limits.rate_per_minute.saturating_mul(10)),
             files,
+            attachments,
             config,
             db,
             mailer,

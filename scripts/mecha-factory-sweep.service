@@ -1,0 +1,37 @@
+[Unit]
+# Retention as a policy rather than a column: unverified rows past their
+# link, verified rows past their upload window, records past retention —
+# each with its files — and attachment blobs no ledger row claims. Manual
+# `factory sweep` was tolerable while expiry only reclaimed rows; attachments
+# made the un-run sweep a disk-fill vector, which is why this unit exists.
+Description=mecha factory retention sweep
+After=mecha-factory.service
+
+[Service]
+Type=oneshot
+User=factory
+Group=factory
+ExecStart=/usr/local/bin/factory --config /etc/mecha-factory/factory.toml sweep
+# The subset of the server unit's hardening that fits a oneshot with no
+# sockets: same writable surface, no network at all — a sweep reads a clock
+# and a disk.
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/mecha-factory
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+
+StandardOutput=journal
+StandardError=journal

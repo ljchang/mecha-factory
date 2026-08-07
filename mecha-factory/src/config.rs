@@ -284,6 +284,34 @@ pub struct Limits {
     pub rate_per_minute: u32,
     /// How many records one drain returns.
     pub drain_batch: usize,
+    /// The ceiling on one upload-page POST. The real cap is the request
+    /// type's declared attachment budget; this is the route-level backstop
+    /// above it. Per-field serde defaults on these three, so a deployed
+    /// `[limits]` table written before they existed still parses.
+    #[serde(default = "default_max_submission_bytes")]
+    pub max_submission_bytes: u64,
+    /// Attachment bytes accepted per address per day — the verified-email
+    /// gate is the front line; this bounds a verified address that turns
+    /// hostile.
+    #[serde(default = "default_daily_upload_bytes")]
+    pub daily_upload_bytes_per_ip: u64,
+    /// Refuse uploads when the disk has less than this free: a 503 now beats
+    /// a full disk taking down everything else later. No silent degradation —
+    /// the refusal is loud and temporary.
+    #[serde(default = "default_min_free_bytes")]
+    pub min_free_bytes: u64,
+}
+
+fn default_max_submission_bytes() -> u64 {
+    40 * 1024 * 1024
+}
+
+fn default_daily_upload_bytes() -> u64 {
+    64 * 1024 * 1024
+}
+
+fn default_min_free_bytes() -> u64 {
+    1024 * 1024 * 1024
 }
 
 impl Default for Limits {
@@ -293,6 +321,9 @@ impl Default for Limits {
             max_bundle_files: 20_000,
             rate_per_minute: 120,
             drain_batch: 100,
+            max_submission_bytes: default_max_submission_bytes(),
+            daily_upload_bytes_per_ip: default_daily_upload_bytes(),
+            min_free_bytes: default_min_free_bytes(),
         }
     }
 }
@@ -439,6 +470,10 @@ impl Config {
 
     pub fn bundle_root(&self) -> PathBuf {
         self.data_dir.join("bundles")
+    }
+
+    pub fn attachments_root(&self) -> PathBuf {
+        self.data_dir.join("attachments")
     }
 
     pub fn acme_cache(&self) -> PathBuf {

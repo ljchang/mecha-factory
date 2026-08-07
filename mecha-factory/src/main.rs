@@ -634,15 +634,32 @@ fn serve(cli: &Cli, dev: bool, port: u16) -> Result<()> {
 fn sweep(cli: &Cli) -> Result<()> {
     let db = open_db(cli)?;
     let now = db::now();
-    let unverified = db.expire_unverified(&now)?;
-    let retained = db.expire_retained(&now)?;
+    // Attachments made retention a matter of files as well as rows, so the
+    // sweep now needs to know where they live — the same resolution rule as
+    // `open_db`: an explicit --data-dir wins, the config otherwise.
+    let attachments_root = match &cli.data_dir {
+        Some(dir) => dir.join("attachments"),
+        None => load_config(cli)?.attachments_root(),
+    };
+    let store = mecha_factory::attachments::Store::new(attachments_root)?;
+
+    let (unverified, unverified_blobs) = db.expire_unverified(&now)?;
+    let (retained, retained_blobs) = db.expire_retained(&now)?;
+    store.delete_owned(&unverified_blobs);
+    store.delete_owned(&retained_blobs);
+    let unuploaded = db.expire_unuploaded(&now)?;
+    let orphans = store.orphan_sweep(&db)?;
+    let budget_rows = db.expire_upload_budget(&now[..10.min(now.len())])?;
     let pairings = db.expire_pairings(&now)?;
     let sessions = db.expire_sessions(&now)?;
     println!("{unverified} unverified submission(s) past their link's expiry, removed");
-    println!("{retained} record(s) past their retention window, removed");
+    println!("{retained} record(s) past their retention window, removed (with their files)");
+    println!("{unuploaded} verified submission(s) whose upload window closed, removed");
+    println!("{orphans} attachment file(s) no ledger row claims, removed");
+    println!("{budget_rows} spent upload-budget day(s), removed");
     println!("{pairings} expired pairing code(s) nobody redeemed, removed");
     println!("{sessions} expired session(s) and sign-in link(s), removed");
-    if unverified + retained + pairings + sessions == 0 {
+    if unverified + retained + unuploaded + orphans + budget_rows + pairings + sessions == 0 {
         println!("(nothing was due)");
     }
     Ok(())
