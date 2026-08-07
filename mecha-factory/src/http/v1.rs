@@ -1030,8 +1030,12 @@ pub async fn admin_users(
     if let Err(refusal) = authorised_operator(&app, &headers) {
         return *refusal;
     }
-    let users = match app.db.users() {
-        Ok(users) => users,
+    // One grouped read for the queue counts rather than one per user, and a
+    // failed read is a failure — a zero rendered over an error would say
+    // "nothing queued" about a queue nobody managed to count.
+    let fetched = (|| -> anyhow::Result<_> { Ok((app.db.users()?, app.db.queue_depths()?)) })();
+    let (users, queue_depths) = match fetched {
+        Ok(data) => data,
         Err(e) => {
             tracing::error!(error = %e, "listing users");
             return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
@@ -1046,7 +1050,7 @@ pub async fn admin_users(
                 "status": user.status,
                 "created_at": user.created_at,
                 "quota_bytes": user.quota_bytes,
-                "queued": app.db.queue_depth(Some(&user.id)).unwrap_or(0),
+                "queued": queue_depths.get(&user.id).copied().unwrap_or(0),
             })
         })
         .collect();

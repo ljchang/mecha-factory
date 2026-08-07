@@ -109,21 +109,48 @@ pub async fn signin_link(
         .into_response()
 }
 
-/// The signed-in operate key, plus the raw token the CSRF value derives from.
-fn session(app: &Shared, headers: &HeaderMap) -> Option<(String, KeyRow)> {
-    let token = headers
-        .get(header::COOKIE)?
-        .to_str()
-        .ok()?
-        .split(';')
-        .filter_map(|pair| pair.trim().split_once('='))
-        .find(|(name, _)| *name == COOKIE)
-        .map(|(_, value)| value.to_string())?;
-    let key = app
+/// The signed-in operate key, plus the raw token the CSRF value derives
+/// from. `Ok(None)` is signed out; `Err` is the ledger failing, which must
+/// answer 5xx rather than the sign-in page — a valid session rendered as
+/// expired sends the operator back to the CLI to work around a database
+/// fault, with the fault never logged.
+fn session(
+    app: &Shared,
+    headers: &HeaderMap,
+) -> Result<Option<(String, KeyRow)>, Box<Response>> {
+    let Some(token) = headers
+        .get(header::COOKIE)
+        .and_then(|header| header.to_str().ok())
+        .and_then(|cookies| {
+            cookies
+                .split(';')
+                .filter_map(|pair| pair.trim().split_once('='))
+                .find(|(name, _)| *name == COOKIE)
+                .map(|(_, value)| value.to_string())
+        })
+    else {
+        return Ok(None);
+    };
+    match app
         .db
         .operator_session_key(&crate::intake::hash_token(&token), &crate::db::now())
-        .ok()??;
-    Some((token, key))
+    {
+        Ok(Some(key)) => {
+            // The stamp every bearer call gets (`keys::authenticate`), on
+            // the same contract: a panel session is the key acting, and the
+            // liveness ledger must not miss exactly the most powerful
+            // activity on the box. Best-effort there, best-effort here.
+            app.db.key_touch(&key.id, &crate::db::now());
+            Ok(Some((token, key)))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => {
+            tracing::error!(error = %e, "reading an operator session");
+            Err(Box::new(
+                Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+            ))
+        }
+    }
 }
 
 /// The signed-out page: instructions, and deliberately nothing to type into.
@@ -152,10 +179,11 @@ pub async fn overview(
     if v1::not_on_gate(&origin).is_some() {
         return nothing_here();
     }
-    let Some((token, key)) = session(&app, &headers) else {
-        return how_to_sign_in();
-    };
-    render_panel(&app, &token, &key, None)
+    match session(&app, &headers) {
+        Ok(Some((token, key))) => render_panel(&app, &token, &key, None),
+        Ok(None) => how_to_sign_in(),
+        Err(refusal) => *refusal,
+    }
 }
 
 /// `GET /admin/s/<token>` — one button, no database read; see the module doc
@@ -188,10 +216,19 @@ pub async fn finish(
         return nothing_here();
     }
     let now = crate::db::now();
-    let key_id = match app
-        .db
-        .operator_link_redeem(&crate::intake::hash_token(&token), &now)
-    {
+    let session_token = crate::intake::mint_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::hours(SESSION_EXPIRY_HOURS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // One transaction spends the link and mints the session, so a failure
+    // between the two cannot burn the link — a retried click still works,
+    // and the "expired" page below is only ever the truth. The same redeem
+    // refuses a link whose key has died or lost `operate` since minting.
+    let key_id = match app.db.operator_signin(
+        &crate::intake::hash_token(&token),
+        &crate::intake::hash_token(&session_token),
+        &now,
+        &expires,
+    ) {
         Ok(Some(key_id)) => key_id,
         Ok(None) => {
             return page(
@@ -206,30 +243,12 @@ pub async fn finish(
             );
         }
         Err(e) => {
-            tracing::error!(error = %e, "redeeming an operator link");
+            tracing::error!(error = %e, "signing an operator in");
             return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
                 .into_response();
         }
     };
-    // The link was minted by a live key; make sure it still is one. A key
-    // revoked between minting and clicking is a dead link, not a session.
-    match app.db.key_by_id(&key_id) {
-        Ok(Some(key)) if key.revoked_at.is_none() && key.scope == crate::db::Scope::Operate => {}
-        _ => return nothing_here(),
-    }
-
-    let session_token = crate::intake::mint_token();
-    let expires = (chrono::Utc::now() + chrono::Duration::hours(SESSION_EXPIRY_HOURS))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    if let Err(e) = app.db.operator_session_create(
-        &key_id,
-        &crate::intake::hash_token(&session_token),
-        &now,
-        &expires,
-    ) {
-        tracing::error!(error = %e, "creating an operator session");
-        return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
-    }
+    tracing::info!(key = %key_id, "operator signed in from a link");
     // 303, like the tenant finish: a refresh must land on the panel, never
     // re-redeem a dead link.
     (
@@ -238,11 +257,7 @@ pub async fn finish(
             (header::LOCATION, "/admin".to_string()),
             (
                 header::SET_COOKIE,
-                format!(
-                    "{COOKIE}={session_token}; Path=/; HttpOnly; Secure; \
-                     SameSite=Lax; Max-Age={}",
-                    SESSION_EXPIRY_HOURS * 60 * 60
-                ),
+                super::session_cookie(COOKIE, &session_token, SESSION_EXPIRY_HOURS * 60 * 60),
             ),
         ],
     )
@@ -260,8 +275,10 @@ fn mutating(
     if v1::not_on_gate(origin).is_some() {
         return Err(Box::new(nothing_here()));
     }
-    let Some((token, key)) = session(app, headers) else {
-        return Err(Box::new(how_to_sign_in()));
+    let (token, key) = match session(app, headers) {
+        Ok(Some(pair)) => pair,
+        Ok(None) => return Err(Box::new(how_to_sign_in())),
+        Err(refusal) => return Err(refusal),
     };
     let values = form_values(body);
     let sent = values.get("csrf").and_then(|v| v.as_str()).unwrap_or("");
@@ -290,17 +307,21 @@ pub async fn signout(
         Ok(ok) => ok,
         Err(response) => return *response,
     };
-    let _ = app
+    // Sign-out's claim is server-side revocation, so a failed revoke must
+    // not answer as success: the cookie would be gone from this browser
+    // while the session stayed alive for anyone who captured it.
+    if let Err(e) = app
         .db
-        .operator_session_revoke(&crate::intake::hash_token(&token), &crate::db::now());
+        .operator_session_revoke(&crate::intake::hash_token(&token), &crate::db::now())
+    {
+        tracing::error!(error = %e, "revoking an operator session");
+        return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+    }
     (
         StatusCode::SEE_OTHER,
         [
             (header::LOCATION, "/admin".to_string()),
-            (
-                header::SET_COOKIE,
-                format!("{COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"),
-            ),
+            (header::SET_COOKIE, super::session_cookie(COOKIE, "", 0)),
         ],
     )
         .into_response()
@@ -366,18 +387,24 @@ pub async fn invite(
     };
     let email = field(&values, "email");
     let note = field(&values, "note");
-    let notice = match v1::mint_invite(&app, &email, &note) {
-        Ok(minted) => format!(
-            "Invited {email} — mailed via {}, expires {}. The link, if you \
-             need to pass it another way: {}",
-            app.mailer.describe(),
-            minted.expires_at,
-            minted.link
-        ),
-        Err(v1::InviteRefused::BadAddress) => "An email address is required.".to_string(),
-        Err(v1::InviteRefused::Unavailable) => "Unavailable — nothing minted.".to_string(),
-    };
-    render_panel(&app, &token, &key, Some(&notice))
+    match v1::mint_invite(&app, &email, &note) {
+        // Post-redirect-get, because this verb mails a stranger: the
+        // render-after-POST the idempotent verbs share would let a refresh
+        // mint and mail a second invite. The new pending row on the panel
+        // is the confirmation; the copyable link stays a CLI affordance
+        // (`factory-publish operator invite`).
+        Ok(_) => (
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, "/admin".to_string())],
+        )
+            .into_response(),
+        Err(v1::InviteRefused::BadAddress) => {
+            render_panel(&app, &token, &key, Some("An email address is required."))
+        }
+        Err(v1::InviteRefused::Unavailable) => {
+            render_panel(&app, &token, &key, Some("Unavailable — nothing minted."))
+        }
+    }
 }
 
 /// `POST /admin/invite-revoke`.
@@ -494,6 +521,30 @@ pub async fn withhold(
 /// The panel: every ledger the admin API serves, with the verb beside the
 /// row it acts on.
 fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -> Response {
+    // The panel is the security ledger, so a failed read must answer as a
+    // failure: an empty Accounts or Keys table rendered over a database
+    // error reads as "nothing there", which is the one lie this page is
+    // for. Everything is fetched before any HTML exists — one refusal
+    // covers all five reads, and the queue counts come grouped so N
+    // tenants are one query rather than N.
+    let fetched = (|| -> anyhow::Result<_> {
+        Ok((
+            app.db.users()?,
+            app.db.queue_depths()?,
+            app.db.invites()?,
+            app.db.keys()?,
+            app.db.withheld()?,
+        ))
+    })();
+    let (users, queue_depths, invites, keys, withheld) = match fetched {
+        Ok(data) => data,
+        Err(e) => {
+            tracing::error!(error = %e, "reading the operator ledgers");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+
     let csrf = account::csrf(token);
     let esc = mecha_manifest::escape_text;
 
@@ -520,7 +571,6 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
         )
     };
 
-    let users = app.db.users().unwrap_or_default();
     let mut accounts = String::from(
         "<table><tr><th>handle</th><th>email</th><th>status</th>\
          <th>since</th><th>queued</th><th></th></tr>",
@@ -546,13 +596,12 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
             email = esc(&user.email),
             status = esc(&user.status),
             since = esc(&user.created_at),
-            queued = app.db.queue_depth(Some(&user.id)).unwrap_or(0),
+            queued = queue_depths.get(&user.id).copied().unwrap_or(0),
         ));
     }
     accounts.push_str("</table>");
 
     let now = crate::db::now();
-    let invites = app.db.invites().unwrap_or_default();
     let mut invites_out = format!(
         "<form method=\"post\" action=\"/admin/invite\">\
          <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
@@ -590,7 +639,6 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
         invites_out.push_str("</table>");
     }
 
-    let keys = app.db.keys().unwrap_or_default();
     let mut keys_out = String::from(
         "<table><tr><th>key</th><th>whose</th><th>scope</th><th>label</th>\
          <th>last used</th><th></th></tr>",
@@ -621,7 +669,6 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
     }
     keys_out.push_str("</table>");
 
-    let withheld = app.db.withheld().unwrap_or_default();
     let mut withheld_out = String::new();
     if !withheld.is_empty() {
         withheld_out.push_str(

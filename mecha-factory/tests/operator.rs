@@ -359,12 +359,11 @@ fn the_panel_suspends_invites_and_withholds_with_csrf() {
         &format!("csrf={csrf}&email=casey%40example.org&note=from+the+panel"),
         Some(&session),
     );
-    assert_eq!(minted.status, 200);
-    assert!(
-        minted.body.contains("casey@example.org"),
-        "{}",
-        minted.body
-    );
+    // Post-redirect-get: minting mails a stranger, so a refresh of the
+    // response must re-submit nothing.
+    assert_eq!(minted.status, 303, "{}", minted.head);
+    let panel = panel_get(&server, "/admin", Some(&session));
+    assert!(panel.body.contains("casey@example.org"), "{}", panel.body);
     let invites = server.db.invites().unwrap();
     assert_eq!(invites.len(), 1);
     let revoked = panel_post(

@@ -466,10 +466,10 @@ pub async fn finish(
             (header::LOCATION, "/account".to_string()),
             (
                 header::SET_COOKIE,
-                format!(
-                    "{COOKIE}={session_token}; Path=/; HttpOnly; Secure; \
-                     SameSite=Lax; Max-Age={}",
-                    crate::intake::SESSION_EXPIRY_DAYS * 24 * 60 * 60
+                super::session_cookie(
+                    COOKIE,
+                    &session_token,
+                    crate::intake::SESSION_EXPIRY_DAYS * 24 * 60 * 60,
                 ),
             ),
         ],
@@ -495,10 +495,7 @@ pub async fn signout(
         StatusCode::SEE_OTHER,
         [
             (header::LOCATION, "/account".to_string()),
-            (
-                header::SET_COOKIE,
-                format!("{COOKIE}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0"),
-            ),
+            (header::SET_COOKIE, super::session_cookie(COOKIE, "", 0)),
         ],
     )
         .into_response()

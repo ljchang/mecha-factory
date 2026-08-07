@@ -384,6 +384,15 @@ async fn fallback(request: Request) -> Response {
 
 pub use axum::Extension;
 
+/// A session cookie wearing its armour, single-sourced. The attributes are
+/// the security — the tests assert them one by one — so no surface
+/// hand-writes the list: a copy that dropped `HttpOnly` or `SameSite` would
+/// ship a weaker cookie with no compiler help. Max-Age 0 is the deletion
+/// spelling, with an empty value.
+pub(crate) fn session_cookie(name: &str, value: &str, max_age_secs: i64) -> String {
+    format!("{name}={value}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={max_age_secs}")
+}
+
 /// A refusal, in the shape the caller can read.
 ///
 /// JSON on the API because a program is reading it; text everywhere else

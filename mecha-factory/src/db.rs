@@ -953,38 +953,43 @@ impl Db {
         })
     }
 
-    /// Spend an operator link: single-use, in one statement, like every
-    /// other token here. Returns the key it was minted by.
-    pub fn operator_link_redeem(&self, token_hash: &str, now: &str) -> Result<Option<String>> {
+    /// Spend an operator link and mint its session — one transaction, so a
+    /// failure after the redeem cannot burn the link: it is consumed only
+    /// when the session lands, and retrying a failed click still works. The
+    /// redeem also demands the minting key still live and still `operate`,
+    /// so a link whose key died between minting and clicking is a dead link
+    /// that never spends. Returns the key id, for the log line.
+    pub fn operator_signin(
+        &self,
+        link_hash: &str,
+        session_hash: &str,
+        now: &str,
+        session_expires: &str,
+    ) -> Result<Option<String>> {
+        let id = crate::keys::random_id();
         self.with(|conn| {
-            let key_id: Option<String> = conn
+            let tx = conn.unchecked_transaction()?;
+            let key_id: Option<String> = tx
                 .query_row(
                     "UPDATE operator_links SET used_at = ?2 \
                      WHERE token_hash = ?1 AND used_at IS NULL AND expires_at > ?2 \
+                     AND key_id IN (SELECT id FROM keys \
+                                    WHERE revoked_at IS NULL AND scope = 'operate') \
                      RETURNING key_id",
-                    params![token_hash, now],
+                    params![link_hash, now],
                     |r| r.get(0),
                 )
                 .optional()?;
+            if let Some(key_id) = &key_id {
+                tx.execute(
+                    "INSERT INTO operator_sessions \
+                     (id, key_id, token_hash, created_at, expires_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, key_id, session_hash, now, session_expires],
+                )?;
+            }
+            tx.commit()?;
             Ok(key_id)
-        })
-    }
-
-    pub fn operator_session_create(
-        &self,
-        key_id: &str,
-        token_hash: &str,
-        now: &str,
-        expires_at: &str,
-    ) -> Result<()> {
-        let id = crate::keys::random_id();
-        self.with(|conn| {
-            conn.execute(
-                "INSERT INTO operator_sessions (id, key_id, token_hash, created_at, expires_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, key_id, token_hash, now, expires_at],
-            )?;
-            Ok(())
         })
     }
 
@@ -1568,6 +1573,20 @@ impl Db {
                 [],
                 |r| r.get(0),
             )?),
+        })
+    }
+
+    /// Everyone's queue depth in one read — the per-user counts the operator
+    /// surfaces render beside each account, grouped so a page over N tenants
+    /// is one query rather than N.
+    pub fn queue_depths(&self) -> Result<std::collections::HashMap<String, i64>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT user_id, COUNT(*) FROM queue WHERE state = 'queued' \
+                 GROUP BY user_id",
+            )?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
     }
 
