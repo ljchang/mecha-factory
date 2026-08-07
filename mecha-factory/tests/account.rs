@@ -314,10 +314,13 @@ fn a_key_can_disconnect_itself_and_only_itself() {
 fn the_header_knows_who_it_is_for() {
     let server = common::start();
 
-    // Signed out: public chrome — the mark, no dropdown.
+    // Signed out: the same corner holds a Sign in dropdown with the email
+    // form — and nothing only a session gets.
     let signin = server.get(server.gate, "/account");
     assert!(signin.body.contains("header class=\"site\""), "{}", signin.body);
-    assert!(!signin.body.contains("account-menu"));
+    assert!(signin.body.contains("<summary>Sign in</summary>"), "{}", signin.body);
+    assert!(signin.body.contains("action=\"/account/signin\""));
+    assert!(!signin.body.contains("/account/signout"));
 
     // Signed in: the dropdown, holding the identity and the sign-out.
     let cookie = signed_in(&server);

@@ -125,7 +125,7 @@ fn mutating(
 fn signin_form() -> Response {
     page(
         StatusCode::OK,
-        shell(
+        shell_with(
             "Sign in",
             "<h1>Sign in</h1>\
              <p>Your account page is reached by a link, not a password.</p>\
@@ -135,6 +135,10 @@ fn signin_form() -> Response {
              <button type=\"submit\">Send the link</button>\
              </form>",
             "/account/a/",
+            &crate::http::intake::Chrome::Public {
+                docs_url: None,
+                sign_in: true,
+            },
         ),
     )
 }

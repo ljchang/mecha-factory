@@ -76,23 +76,36 @@ impl Chrome {
     fn render(&self) -> String {
         match self {
             Chrome::Public { docs_url, sign_in } => {
-                let mut nav = String::new();
+                let mut right = String::new();
                 if let Some(url) = docs_url {
-                    nav.push_str(&format!(
-                        "<a href=\"{}\">Docs</a>",
+                    right.push_str(&format!(
+                        "<nav><a href=\"{}\">Docs</a></nav>",
                         mecha_manifest::escape_text(url)
                     ));
                 }
                 if *sign_in {
-                    nav.push_str("<a href=\"/account\">Sign in</a>");
+                    // The same dropdown, the same corner, whichever side of a
+                    // session you are on: signed out it holds the email form,
+                    // signed in it holds the account.
+                    right.push_str(
+                        "<details class=\"account-menu\">\
+                         <summary>Sign in</summary>\
+                         <div class=\"menu\">\
+                         <p>Your page is reached by a link, not a password.</p>\
+                         <form method=\"post\" action=\"/account/signin\">\
+                         <label for=\"signin-email\">Email</label>\
+                         <input id=\"signin-email\" name=\"email\" type=\"email\" required>\
+                         <button type=\"submit\">Send the link</button>\
+                         </form></div></details>",
+                    );
                 }
-                if nav.is_empty() {
+                if right.is_empty() {
                     mecha_manifest::site_header()
                 } else {
                     format!(
                         "<header class=\"site\">\
                          <a class=\"mark\" href=\"/\" aria-label=\"mecha\">{}</a>\
-                         <nav>{nav}</nav></header>\n",
+                         <div class=\"site-right\">{right}</div></header>\n",
                         mecha_manifest::LOGO_MONO_SVG,
                     )
                 }
@@ -184,8 +197,16 @@ pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome)
             mecha_manifest::escape_text(assets)
         )
     };
-    // The dropdown's close-on-outside-click, only where the dropdown is.
-    let script = if !assets.is_empty() && matches!(chrome, Chrome::Account { .. }) {
+    // The dropdown's close-on-outside-click, only where a dropdown is.
+    let has_dropdown = matches!(chrome, Chrome::Account { .. })
+        || matches!(
+            chrome,
+            Chrome::Public {
+                sign_in: true,
+                ..
+            }
+        );
+    let script = if !assets.is_empty() && has_dropdown {
         format!(
             "<script src=\"{}menu.js\" defer></script>",
             mecha_manifest::escape_text(assets)

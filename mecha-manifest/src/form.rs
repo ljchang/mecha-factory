@@ -1029,6 +1029,11 @@ header.site {
 header.site a.mark { color: var(--accent); display: inline-flex; }
 header.site a.mark:hover { opacity: .8; }
 header.site > nav { display: flex; gap: 1rem; align-items: center; }
+.site-right { display: flex; gap: 1rem; align-items: center; }
+.site-right nav a { font-size: 0.875rem; color: var(--muted); text-decoration: none; }
+.site-right nav a:hover { color: var(--accent); text-decoration: underline; }
+.account-menu .menu label { font-size: 0.8125rem; }
+.account-menu .menu input { margin: 0.25rem 0 0.625rem; }
 header.site > nav a {
   font-size: 0.875rem;
   color: var(--muted);
