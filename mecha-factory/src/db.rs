@@ -316,6 +316,25 @@ pub struct SlotCacheRow {
     pub received_at: String,
 }
 
+/// One booking row, hold or later.
+#[derive(Debug, Clone)]
+pub struct BookingRow {
+    pub id: String,
+    pub user_id: String,
+    pub instrument_id: String,
+    pub slot_start: String,
+    pub slot_end: String,
+    pub duration_minutes: i64,
+    pub state: String,
+    pub hold_expires: Option<String>,
+    pub queue_seq: Option<i64>,
+    pub manage_hash: Option<String>,
+    pub ics_sequence: i64,
+    pub created_at: String,
+    pub confirmed_at: Option<String>,
+    pub cancelled_at: Option<String>,
+}
+
 /// A submission on its way in, before anybody has proved anything.
 #[derive(Debug, Clone)]
 pub struct Submission {
@@ -1364,6 +1383,105 @@ impl Db {
         })
     }
 
+    // ---- bookings -------------------------------------------------------
+
+    /// Take the soft hold, atomically: the INSERT lands only when no live
+    /// row overlaps the slot. One statement, so two strangers racing the
+    /// same afternoon cannot both win — the loser learns `false` and the
+    /// page offers what remains. Overlap is by time range, not slot
+    /// identity: a confirmed 60-minute meeting blocks both half-hours it
+    /// covers, whichever duration a later visitor picked.
+    pub fn booking_hold(
+        &self,
+        row: &BookingRow,
+        now: &str,
+    ) -> Result<bool> {
+        self.with(|conn| {
+            let inserted = conn.execute(
+                "INSERT INTO bookings (id, user_id, instrument_id, slot_start, slot_end,                  duration_minutes, state, hold_expires, queue_seq, ics_sequence, created_at)                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'held', ?7, ?8, 0, ?9                  WHERE NOT EXISTS (SELECT 1 FROM bookings                    WHERE user_id = ?2 AND instrument_id = ?3                      AND slot_start < ?5 AND ?4 < slot_end                      AND (state = 'confirmed' OR (state = 'held' AND hold_expires > ?10)))",
+                params![
+                    row.id,
+                    row.user_id,
+                    row.instrument_id,
+                    row.slot_start,
+                    row.slot_end,
+                    row.duration_minutes,
+                    row.hold_expires,
+                    row.queue_seq,
+                    row.created_at,
+                    now,
+                ],
+            )?;
+            Ok(inserted == 1)
+        })
+    }
+
+    /// Convert a live hold into the booking, atomically re-proving the slot
+    /// is still clear of *other* live rows — a second hold cannot exist by
+    /// construction, but re-checking costs one clause and assumes less.
+    pub fn booking_confirm(
+        &self,
+        id: &str,
+        manage_hash: &str,
+        now: &str,
+    ) -> Result<bool> {
+        self.with(|conn| {
+            let updated = conn.execute(
+                "UPDATE bookings SET state = 'confirmed', confirmed_at = ?3,                  manage_hash = ?2, hold_expires = NULL                  WHERE id = ?1 AND state = 'held' AND hold_expires > ?3                    AND NOT EXISTS (SELECT 1 FROM bookings b2                      WHERE b2.user_id = bookings.user_id                        AND b2.instrument_id = bookings.instrument_id                        AND b2.id != bookings.id                        AND b2.slot_start < bookings.slot_end                        AND bookings.slot_start < b2.slot_end                        AND (b2.state = 'confirmed'                             OR (b2.state = 'held' AND b2.hold_expires > ?3)))",
+                params![id, manage_hash, now],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
+    /// Every interval a stranger may not book right now: confirmed rows and
+    /// unexpired holds, as `(start, end)` pairs for the page to subtract.
+    pub fn bookings_blocking(
+        &self,
+        user_id: &str,
+        instrument_id: &str,
+        now: &str,
+    ) -> Result<Vec<(String, String)>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT slot_start, slot_end FROM bookings                  WHERE user_id = ?1 AND instrument_id = ?2                    AND (state = 'confirmed' OR (state = 'held' AND hold_expires > ?3))",
+            )?;
+            let rows = stmt.query_map(params![user_id, instrument_id, now], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub fn booking_get(&self, id: &str) -> Result<Option<BookingRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id, user_id, instrument_id, slot_start, slot_end,                      duration_minutes, state, hold_expires, queue_seq, manage_hash,                      ics_sequence, created_at, confirmed_at, cancelled_at                      FROM bookings WHERE id = ?1",
+                    params![id],
+                    |r| {
+                        Ok(BookingRow {
+                            id: r.get(0)?,
+                            user_id: r.get(1)?,
+                            instrument_id: r.get(2)?,
+                            slot_start: r.get(3)?,
+                            slot_end: r.get(4)?,
+                            duration_minutes: r.get(5)?,
+                            state: r.get(6)?,
+                            hold_expires: r.get(7)?,
+                            queue_seq: r.get(8)?,
+                            manage_hash: r.get(9)?,
+                            ics_sequence: r.get(10)?,
+                            created_at: r.get(11)?,
+                            confirmed_at: r.get(12)?,
+                            cancelled_at: r.get(13)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
     // ---- the queue ------------------------------------------------------
 
     pub fn queue_add(
@@ -2250,6 +2368,33 @@ fn migrate(conn: &Connection) -> Result<()> {
             received_at   TEXT NOT NULL,
             PRIMARY KEY (user_id, instrument_id)
         );
+
+        -- One booking, from soft hold to its end state. The hold is the
+        -- claim's first phase: it exists from the details POST until the
+        -- magic-link click converts it or its expiry frees the slot. What
+        -- blocks a slot is a *live* row — confirmed, or held and unexpired —
+        -- and liveness is judged against the clock at query time, so an
+        -- abandoned hold frees its slot with no sweeper needed. The
+        -- stranger's details live on the queue row (queue_seq), not here:
+        -- this table is time arithmetic, that one is quarantined prose.
+        CREATE TABLE IF NOT EXISTS bookings (
+            id               TEXT PRIMARY KEY,
+            user_id          TEXT NOT NULL,
+            instrument_id    TEXT NOT NULL,
+            slot_start       TEXT NOT NULL,
+            slot_end         TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            state            TEXT NOT NULL,
+            hold_expires     TEXT,
+            queue_seq        INTEGER,
+            manage_hash      TEXT,
+            ics_sequence     INTEGER NOT NULL DEFAULT 0,
+            created_at       TEXT NOT NULL,
+            confirmed_at     TEXT,
+            cancelled_at     TEXT
+        );
+        CREATE INDEX IF NOT EXISTS bookings_by_slot
+            ON bookings (user_id, instrument_id, state, slot_start);
 
         -- A signed-in browser. The cookie holds the token; this holds its
         -- hash — reading the ledger off the box must not let anyone be

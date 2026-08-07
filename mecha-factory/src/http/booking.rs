@@ -71,11 +71,38 @@ pub async fn page(
     };
 
     let now = chrono::Utc::now();
+    let now_stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // The box subtracts, never adds: live holds and confirmed bookings come
+    // off whatever home pushed, judged against the clock at query time so an
+    // abandoned hold frees its slot with no sweeper anywhere.
+    let blocking = app
+        .db
+        .bookings_blocking(&user.id, &id, &now_stamp)
+        .unwrap_or_default();
+    let blocked = |start: &chrono::DateTime<chrono::Utc>,
+                   end: &chrono::DateTime<chrono::Utc>|
+     -> bool {
+        blocking.iter().any(|(b_start, b_end)| {
+            let parse = |raw: &str| {
+                chrono::DateTime::parse_from_rfc3339(raw)
+                    .map(|t| t.with_timezone(&chrono::Utc))
+            };
+            match (parse(b_start), parse(b_end)) {
+                (Ok(bs), Ok(be)) => bs < *end && *start < be,
+                // An unparseable row blocks nothing it can name — but it
+                // must not unblock anything either; treat it as covering
+                // everything, because a corrupt ledger row is a bug to
+                // surface, not free time.
+                _ => true,
+            }
+        })
+    };
     let cache = app.db.slots_get(&user.id, &id).ok().flatten();
     let (slots, stale_notice) = match &cache {
         Some(row) => {
-            let slots: Vec<mecha_manifest::availability::Slot> =
+            let mut slots: Vec<mecha_manifest::availability::Slot> =
                 serde_json::from_str(&row.slots).unwrap_or_default();
+            slots.retain(|s| !blocked(&s.start, &s.end));
             let stale = chrono::DateTime::parse_from_rfc3339(&row.generated_at)
                 .map(|g| now - g.with_timezone(&chrono::Utc)
                     > chrono::Duration::hours(STALE_AFTER_HOURS))

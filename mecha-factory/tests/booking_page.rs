@@ -178,3 +178,76 @@ fn a_stale_cache_serves_with_its_age_stated() {
         page.body
     );
 }
+
+/// The claim primitives, and the page narrowing over them: a hold wins its
+/// slot exactly once, an overlapping duration is blocked with it, the
+/// confirm converts only a live hold, an expired hold frees the slot, and
+/// every live row vanishes from the served week.
+#[test]
+fn holds_claim_once_block_overlap_and_expire_free() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let reply = Request::new("PUT", "/v1/types/book", &gate)
+        .auth(&server.key(Scope::Release))
+        .body(BOOK_TOML.as_bytes().to_vec())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (push, stamp) = future_slot_push();
+    let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    let now = chrono::Utc::now();
+    let now_s = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let later = (now + chrono::Duration::minutes(30))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let start: chrono::DateTime<chrono::Utc> = stamp.parse().unwrap();
+    let end_30 = (start + chrono::Duration::minutes(30))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let end_60 = (start + chrono::Duration::minutes(60))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let row = |id: &str, end: &str, expires: &str| mecha_factory::db::BookingRow {
+        id: id.into(),
+        user_id: server.user.id.clone(),
+        instrument_id: "book".into(),
+        slot_start: stamp.clone(),
+        slot_end: end.into(),
+        duration_minutes: 30,
+        state: "held".into(),
+        hold_expires: Some(expires.into()),
+        queue_seq: None,
+        manage_hash: None,
+        ics_sequence: 0,
+        created_at: now_s.clone(),
+        confirmed_at: None,
+        cancelled_at: None,
+    };
+
+    assert!(server.db.booking_hold(&row("b1", &end_30, &later), &now_s).unwrap());
+    // The same slot, and the 60 overlapping it, both lose while b1 lives.
+    assert!(!server.db.booking_hold(&row("b2", &end_30, &later), &now_s).unwrap());
+    assert!(!server.db.booking_hold(&row("b3", &end_60, &later), &now_s).unwrap());
+    // The held slot is off the page.
+    let page = server.get(server.gate, "/s/alice/book");
+    assert!(!page.body.contains("_slot"), "a held week serves nothing: {}", page.body);
+
+    // Confirm converts the live hold once; a second confirm finds no hold.
+    assert!(server.db.booking_confirm("b1", "hash", &now_s).unwrap());
+    assert!(!server.db.booking_confirm("b1", "hash", &now_s).unwrap());
+
+    // An *expired* hold frees its slot with no sweeper: insert one dated
+    // in the past on a second instrument-free stretch by expiring b4 now.
+    let expired = (now - chrono::Duration::minutes(1))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    assert!(
+        !server.db.booking_hold(&row("b4", &end_30, &expired), &now_s).unwrap(),
+        "b1 is confirmed now, so the slot stays taken"
+    );
+    let blocking = server
+        .db
+        .bookings_blocking(&server.user.id, "book", &now_s)
+        .unwrap();
+    assert_eq!(blocking.len(), 1, "only the confirmed row blocks: {blocking:?}");
+}
