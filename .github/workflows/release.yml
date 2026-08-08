@@ -77,3 +77,53 @@ jobs:
           files: |
             target/x86_64-unknown-linux-musl/release/factory-x86_64-linux-musl.tar.gz
             target/x86_64-unknown-linux-musl/release/factory-x86_64-linux-musl.tar.gz.sha256
+
+  # The same tag publishes the crates, so the binary on the box and the
+  # crates on crates.io can never name different code. Trusted Publishing
+  # (GitHub OIDC → a 30-minute token) instead of a long-lived API token in
+  # the secrets of a public repository; the one-time setup per crate is in
+  # CONTRIBUTING.md. Gated on the binary job: a tag whose build fails
+  # publishes nothing anywhere.
+  crates:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: binary
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      # A tag that does not match the workspace version would publish a
+      # crate whose version disagrees with its own git tag forever.
+      - name: The tag must be the workspace version
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          [[ "$TAG" == "$VERSION" ]] || {
+            echo "tag v$TAG != workspace version $VERSION" >&2; exit 1; }
+
+      - uses: rust-lang/crates-io-auth-action@v1
+        id: auth
+
+      # Dependency order, and "already uploaded" is success rather than
+      # failure: re-running a tag's workflow must be idempotent, and the
+      # first release is published by hand (Trusted Publishing can only be
+      # configured on a crate that exists).
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          for crate in mecha-manifest mecha-factory mecha-factory-publish; do
+            echo "== $crate"
+            if out=$(cargo publish -p "$crate" 2>&1); then
+              echo "$out"
+            else
+              echo "$out"
+              echo "$out" | grep -q "already uploaded" || exit 1
+              echo "== $crate: this version is already on crates.io; fine"
+            fi
+          done
