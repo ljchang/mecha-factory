@@ -1494,6 +1494,18 @@ impl Db {
         })
     }
 
+    /// Rewrite one queue row's payload — the confirm step's way of adding
+    /// machinery minted after submit (the manage URL) before the row drains.
+    pub fn queue_set_payload(&self, user_id: &str, seq: i64, payload: &str) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE queue SET payload = ?3 WHERE user_id = ?1 AND seq = ?2",
+                params![user_id, seq, payload],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn booking_get(&self, id: &str) -> Result<Option<BookingRow>> {
         self.with(|conn| {
             Ok(conn

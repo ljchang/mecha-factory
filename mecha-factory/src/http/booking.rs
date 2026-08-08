@@ -522,6 +522,29 @@ pub async fn confirm(
                 .into_response();
         }
     }
+    // The manage URL is minted here and nowhere else — the token was — so
+    // it rides home in the payload with the other machinery keys, and the
+    // invite home sends can carry it. Plaintext transits the queue briefly:
+    // acceptable for a capability whose whole job is to travel in email.
+    {
+        let mut values = values.clone();
+        values.insert(
+            "_manage_url".into(),
+            format!(
+                "{}/s/{handle}/{id}/m/{manage_token}",
+                app.config.base_url(crate::config::Role::Gate)
+            )
+            .into(),
+        );
+        if let Ok(payload) = serde_json::to_string(&values) {
+            if let Err(e) = app.db.queue_set_payload(&user.id, verified.seq, &payload) {
+                // The booking stands; only the cancel link is missing from
+                // the invite. Loud, because a quiet miss here is a visitor
+                // with no way out.
+                tracing::error!(seq = verified.seq, error = %e, "storing the manage url");
+            }
+        }
+    }
     tracing::info!(handle = %user.handle, %id, seq = verified.seq, "booked");
 
     // The when, in the host's zone, from the booking row — the record, not

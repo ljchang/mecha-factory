@@ -361,6 +361,13 @@ fn the_click_books_and_a_lapsed_hold_never_drains() {
         1,
         "a booked booking drains"
     );
+    // The payload gained the manage URL at confirm — minted box-side, read
+    // home-side, carried like the other machinery keys.
+    let drained = server.db.drain(&server.user.id, 0, 10).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(drained[0].payload.as_str()).unwrap();
+    let manage = payload["_manage_url"].as_str().expect("a manage url");
+    assert!(manage.contains("/s/alice/book/m/"), "{manage}");
     // A second click finds the token spent, and does not double-book.
     let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
         .send(server.gate);
