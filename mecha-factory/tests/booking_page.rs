@@ -251,3 +251,58 @@ fn holds_claim_once_block_overlap_and_expire_free() {
         .unwrap();
     assert_eq!(blocking.len(), 1, "only the confirmed row blocks: {blocking:?}");
 }
+
+/// The POST half: a stranger picks a slot, the hold is taken, the link is
+/// mailed — and the loser of the race gets the refreshed week, not an error.
+#[test]
+fn a_submission_holds_the_slot_and_the_race_loser_gets_the_week_back() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let reply = Request::new("PUT", "/v1/types/book", &gate)
+        .auth(&server.key(Scope::Release))
+        .body(BOOK_TOML.as_bytes().to_vec())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (push, stamp) = future_slot_push();
+    let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    let form = format!(
+        "_slot={}%7C30&requester_name=Priya&requester_email=priya%40example.edu",
+        stamp.replace(':', "%3A").replace('+', "%2B")
+    );
+    let reply = Request::new("POST", "/s/alice/book", &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form.clone())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(reply.body.contains("held for 30 minutes"), "{}", reply.body);
+    assert_eq!(server.sent_links(), 1, "one verification link went out");
+    assert!(
+        server.verification_token().len() > 20,
+        "the link carries a real token"
+    );
+
+    // The held slot is off the page for the next visitor…
+    let page = server.get(server.gate, "/s/alice/book");
+    assert!(!page.body.contains("_slot\" value"), "{}", page.body);
+
+    // …and the same POST again loses the race, gracefully.
+    let reply = Request::new("POST", "/s/alice/book", &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send(server.gate);
+    assert_eq!(reply.status, 200);
+    assert!(reply.body.contains("just taken"), "{}", reply.body);
+    assert_eq!(server.sent_links(), 1, "the loser mails nobody");
+
+    // A POST naming a slot the cache never offered is a prober: nothing.
+    let reply = Request::new("POST", "/s/alice/book", &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("_slot=2030-01-01T00%3A00%3A00Z%7C30&requester_name=X&requester_email=x%40y.z")
+        .send(server.gate);
+    assert_eq!(reply.status, 404, "{}", reply.body);
+}

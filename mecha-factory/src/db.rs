@@ -1483,6 +1483,17 @@ impl Db {
         })
     }
 
+    /// Record which queue row carries the hold's details.
+    pub fn booking_bind_queue(&self, id: &str, seq: i64) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE bookings SET queue_seq = ?2 WHERE id = ?1",
+                params![id, seq],
+            )?;
+            Ok(())
+        })
+    }
+
     pub fn booking_get(&self, id: &str) -> Result<Option<BookingRow>> {
         self.with(|conn| {
             Ok(conn

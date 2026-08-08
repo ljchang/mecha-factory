@@ -173,3 +173,236 @@ pub async fn asset(
     }
     nothing_here()
 }
+
+/// `POST /s/{handle}/{id}` — pick a slot, take the hold, send the link.
+///
+/// The order is the design: the hold is taken *before* the queue row is
+/// written, because the hold is the contended thing — losing the race is
+/// ordinary (the visitor gets the refreshed week back with a notice, never
+/// an error page) and a queue row without its hold would be a booking that
+/// cannot happen. The slot must be one the cache offers right now: a POST
+/// naming any other instant is a prober, not a race.
+pub async fn submit(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, id)): Path<(String, String)>,
+    body: String,
+) -> Response {
+    use super::intake;
+
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((user, parsed)) = resolve(&app, &handle, &id) else {
+        return nothing_here();
+    };
+    let Ok(verification) = parsed.servable() else {
+        return nothing_here();
+    };
+
+    let raw = intake::form_values(&body);
+    let now = chrono::Utc::now();
+    let now_stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    // The slot, before the fields: parsed strictly, then proved against the
+    // cache. `_slot` is `start|minutes` exactly as the page emitted it.
+    let slot_arg = raw.get("_slot").and_then(|v| v.as_str()).unwrap_or("");
+    let offered = 'found: {
+        let Some((start_raw, minutes_raw)) = slot_arg.split_once('|') else {
+            break 'found None;
+        };
+        let (Ok(start), Ok(minutes)) = (
+            chrono::DateTime::parse_from_rfc3339(start_raw)
+                .map(|t| t.with_timezone(&chrono::Utc)),
+            minutes_raw.parse::<u32>(),
+        ) else {
+            break 'found None;
+        };
+        let Ok(Some(cache)) = app.db.slots_get(&user.id, &id) else {
+            break 'found None;
+        };
+        let slots: Vec<mecha_manifest::availability::Slot> =
+            serde_json::from_str(&cache.slots).unwrap_or_default();
+        slots
+            .into_iter()
+            .find(|s| s.start == start && s.duration_minutes == minutes && s.start > now)
+    };
+    let Some(slot) = offered else {
+        return nothing_here();
+    };
+
+    // Keys beginning with `_` are the page's own machinery (`_slot`), not
+    // the stranger's answers: stripped before validation here, and the
+    // drain side strips them the same way before its re-validation.
+    let mut fields_only = raw.clone();
+    fields_only.retain(|k, _| !k.starts_with('_'));
+    let submission = match parsed.validate_at(&fields_only, mecha_manifest::Phase::Submit) {
+        Ok(submission) => submission,
+        Err(_) => {
+            // Their week back with the message; re-rendering the form with
+            // per-field errors folds in when the page grows error display
+            // for the POST path.
+            return page_with_notice(
+                &app, &user, &parsed, &handle, &id,
+                "Some answers need attention — please try again.",
+            );
+        }
+    };
+    let Some(address) = submission
+        .values
+        .get(&verification.field)
+        .and_then(|v| v.as_str())
+    else {
+        return nothing_here();
+    };
+
+    let policy = parsed.booking_policy();
+    let booking_id = crate::intake::mint_token();
+    let hold = crate::db::BookingRow {
+        id: booking_id.clone(),
+        user_id: user.id.clone(),
+        instrument_id: id.clone(),
+        slot_start: slot.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        slot_end: slot.end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        duration_minutes: i64::from(slot.duration_minutes),
+        state: "held".into(),
+        hold_expires: Some(
+            (now + chrono::Duration::minutes(i64::from(policy.hold_minutes)))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        ),
+        queue_seq: None,
+        manage_hash: None,
+        ics_sequence: 0,
+        created_at: now_stamp.clone(),
+        confirmed_at: None,
+        cancelled_at: None,
+    };
+    match app.db.booking_hold(&hold, &now_stamp) {
+        Ok(true) => {}
+        Ok(false) => {
+            // The race, lost gracefully: the refreshed week, with the truth.
+            return page_with_notice(
+                &app, &user, &parsed, &handle, &id,
+                "That time was just taken — these are still open.",
+            );
+        }
+        Err(e) => {
+            tracing::error!(%id, error = %e, "taking a hold");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+
+    // The slot rides in the payload as typed values, underscore-prefixed
+    // like `_token`: the drain side reads them without a manifest field
+    // existing for them, exactly as the page submitted them.
+    let mut values = submission.values.clone();
+    values.insert("_slot_start".into(), hold.slot_start.clone().into());
+    values.insert("_slot_end".into(), hold.slot_end.clone().into());
+    values.insert(
+        "_duration_minutes".into(),
+        slot.duration_minutes.into(),
+    );
+    values.insert("_booking_id".into(), booking_id.clone().into());
+
+    let token = crate::intake::mint_token();
+    let row = crate::db::Submission {
+        user_id: user.id.clone(),
+        type_id: id.clone(),
+        payload: serde_json::to_string(&values).unwrap_or_else(|_| "{}".into()),
+        created_at: now_stamp.clone(),
+        retain_until: parsed.retain_days.map(crate::db::days_from_now),
+        verify_hash: crate::intake::hash_token(&token),
+        verify_expires: crate::db::hours_from_now(verification.expires_hours),
+        recipient_hash: crate::intake::recipient_hash(address),
+    };
+    let seq = match app.db.submission_add(&row) {
+        Ok(seq) => seq,
+        Err(e) => {
+            tracing::error!(error = %e, "storing a booking submission");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+    let _ = app.db.booking_bind_queue(&booking_id, seq);
+
+    let link = format!(
+        "{}/s/{handle}/{id}/c/{token}",
+        app.config.base_url(crate::config::Role::Gate)
+    );
+    app.mailer.send_verification(address, &parsed, &link);
+    tracing::info!(handle = %user.handle, %id, seq, "booking held, awaiting verification");
+
+    intake::page(
+        StatusCode::OK,
+        intake::shell(
+            "Check your email",
+            &format!(
+                "<h1>Almost there</h1><p>Your time is held for {} minutes. A \
+                 confirmation link is on its way to {} — clicking it books the \
+                 meeting.</p>",
+                policy.hold_minutes,
+                mecha_manifest::escape_text(address)
+            ),
+            &format!("/s/{handle}/{id}/"),
+        ),
+    )
+}
+
+/// The weekly page with a line of truth above it — the race loser's view,
+/// and the invalid submission's. Rendered by the same path as the GET so
+/// what it offers is already narrowed by every live hold including the one
+/// that just beat this visitor.
+fn page_with_notice(
+    app: &Shared,
+    user: &UserRow,
+    parsed: &RequestType,
+    handle: &str,
+    id: &str,
+    notice: &str,
+) -> Response {
+    let now = chrono::Utc::now();
+    let now_stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let blocking = app
+        .db
+        .bookings_blocking(&user.id, id, &now_stamp)
+        .unwrap_or_default();
+    let mut slots: Vec<mecha_manifest::availability::Slot> = app
+        .db
+        .slots_get(&user.id, id)
+        .ok()
+        .flatten()
+        .and_then(|row| serde_json::from_str(&row.slots).ok())
+        .unwrap_or_default();
+    slots.retain(|s| {
+        !blocking.iter().any(|(b_start, b_end)| {
+            match (
+                chrono::DateTime::parse_from_rfc3339(b_start),
+                chrono::DateTime::parse_from_rfc3339(b_end),
+            ) {
+                (Ok(bs), Ok(be)) => {
+                    bs.with_timezone(&chrono::Utc) < s.end
+                        && s.start < be.with_timezone(&chrono::Utc)
+                }
+                _ => true,
+            }
+        })
+    });
+    let options = BookingOptions {
+        action: format!("/s/{handle}/{id}"),
+        assets: format!("/s/{handle}/{id}/"),
+        theme: mecha_manifest::Theme::by_name(&app.config.theme),
+        now,
+        stale_notice: Some(notice.to_string()),
+        ..BookingOptions::default()
+    };
+    match parsed.booking_page(&slots, &options) {
+        Ok(page) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            page.html,
+        )
+            .into_response(),
+        Err(_) => Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+    }
+}
