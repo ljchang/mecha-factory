@@ -242,6 +242,21 @@ sha256sum -c factory-x86_64-linux-musl.tar.gz.sha256
 tar xzf factory-x86_64-linux-musl.tar.gz
 ```
 
+**Routine deploys are one command** once `scripts/deploy.sh` is installed on
+the box (`install -m 0755 scripts/deploy.sh /usr/local/bin/factory-deploy`):
+
+```sh
+ssh <box> factory-deploy v0.2.0     # download, checksum, prove binary+config, swap, health-check
+ssh <box> factory-deploy --rollback # reinstall factory.prev
+```
+
+The script proves the binary and the config *before* touching the service and
+rolls itself back if the gate does not answer afterwards — both learned on
+2026-08-08, when a hand-copied wrong-architecture binary crash-looped the
+service (`status=203/EXEC` says nothing about why) and a config line appended
+into the wrong TOML table was silently ignored. Never `scp` a locally built
+binary to this box.
+
 The fallback that always works — and was the procedure until the workflow
 existed — is building on the box, which one vCPU makes the step to start and
 walk away from:
