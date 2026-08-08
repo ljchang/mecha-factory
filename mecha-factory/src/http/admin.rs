@@ -138,10 +138,7 @@ pub async fn signin_link(
 /// answer 5xx rather than the sign-in page — a valid session rendered as
 /// expired sends the operator back to the CLI to work around a database
 /// fault, with the fault never logged.
-fn session(
-    app: &Shared,
-    headers: &HeaderMap,
-) -> Result<Option<(String, KeyRow)>, Box<Response>> {
+fn session(app: &Shared, headers: &HeaderMap) -> Result<Option<(String, KeyRow)>, Box<Response>> {
     let Some(token) = headers
         .get(header::COOKIE)
         .and_then(|header| header.to_str().ok())
@@ -169,12 +166,11 @@ fn session(
             // The rolling half of the month-long session: using the panel
             // is what keeps it alive. Best-effort like the stamp above —
             // a failed extension costs a sign-in, not a session.
-            let extended = (chrono::Utc::now()
-                + chrono::Duration::days(SESSION_EXPIRY_DAYS))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-            let _ = app
-                .db
-                .operator_session_touch(&crate::intake::hash_token(&token), &now, &extended);
+            let extended = (chrono::Utc::now() + chrono::Duration::days(SESSION_EXPIRY_DAYS))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let _ =
+                app.db
+                    .operator_session_touch(&crate::intake::hash_token(&token), &now, &extended);
             Ok(Some((token, key)))
         }
         Ok(None) => Ok(None),
@@ -370,8 +366,7 @@ pub async fn finish(
         }
         Err(e) => {
             tracing::error!(error = %e, "signing an operator in");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     };
     tracing::info!(key = %key_id, "operator signed in from a link");
@@ -666,8 +661,7 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
         Ok(data) => data,
         Err(e) => {
             tracing::error!(error = %e, "reading the operator ledgers");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     };
 
@@ -797,9 +791,8 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
 
     let mut withheld_out = String::new();
     if !withheld.is_empty() {
-        withheld_out.push_str(
-            "<table><tr><th>version</th><th>since</th><th>reason</th><th></th></tr>",
-        );
+        withheld_out
+            .push_str("<table><tr><th>version</th><th>since</th><th>reason</th><th></th></tr>");
         for row in &withheld {
             let restore = act(
                 "/admin/withhold",

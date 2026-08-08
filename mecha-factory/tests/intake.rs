@@ -24,14 +24,17 @@ fn upload_meeting(server: &Server) {
     assert_eq!(reply.status, 200, "{}", reply.body);
 }
 
-
 /// Click a verification link the way a person does: land on the interstitial,
 /// then submit its button. The GET must spend nothing — that is the mail-
 /// scanner fix — so the POST is what the old single GET used to be.
 fn click_confirm(server: &Server, path: &str) -> common::Reply {
     let interstitial = server.get(server.gate, path);
     assert_eq!(interstitial.status, 200, "{}", interstitial.body);
-    assert!(interstitial.body.contains("Confirm"), "{}", interstitial.body);
+    assert!(
+        interstitial.body.contains("Confirm"),
+        "{}",
+        interstitial.body
+    );
     Request::new("POST", path, server.gate.to_string()).send(server.gate)
 }
 
@@ -202,13 +205,21 @@ fn an_unverified_submission_expires_and_is_deleted() {
 
     // Nothing expires yet.
     assert_eq!(
-        server.db.expire_unverified("2026-08-06T00:00:00Z").unwrap().0,
+        server
+            .db
+            .expire_unverified("2026-08-06T00:00:00Z")
+            .unwrap()
+            .0,
         0
     );
 
     // Well past the 48-hour window.
     assert_eq!(
-        server.db.expire_unverified("2030-01-01T00:00:00Z").unwrap().0,
+        server
+            .db
+            .expire_unverified("2030-01-01T00:00:00Z")
+            .unwrap()
+            .0,
         1
     );
     let token = server.verification_token();
@@ -340,10 +351,7 @@ fn multipart(boundary: &str, parts: &[(&str, &str, &[u8])]) -> Vec<u8> {
 fn post_upload(server: &Server, location: &str, parts: &[(&str, &str, &[u8])]) -> common::Reply {
     let body = multipart("testboundary", parts);
     Request::new("POST", location, server.gate.to_string())
-        .header(
-            "Content-Type",
-            "multipart/form-data; boundary=testboundary",
-        )
+        .header("Content-Type", "multipart/form-data; boundary=testboundary")
         .body(body)
         .send(server.gate)
 }
@@ -360,7 +368,11 @@ fn a_file_arrives_only_after_verification_and_only_as_what_it_is() {
     // The public form: a note where the input would be, and no enctype.
     let form = server.get(server.gate, "/f/alice/letterish");
     assert_eq!(form.status, 200);
-    assert!(form.body.contains("after verifying your email"), "{}", form.body);
+    assert!(
+        form.body.contains("after verifying your email"),
+        "{}",
+        form.body
+    );
     assert!(!form.body.contains("type=\"file\""), "{}", form.body);
 
     // A urlencoded value aimed at the file field is a probe, refused.
@@ -403,7 +415,11 @@ fn a_file_arrives_only_after_verification_and_only_as_what_it_is() {
     assert_eq!(server.get(server.gate, &location).status, 200, "still live");
 
     // The real thing.
-    let done = post_upload(&server, &location, &[("cv", "Ada CV.pdf", b"%PDF-1.4 tiny")]);
+    let done = post_upload(
+        &server,
+        &location,
+        &[("cv", "Ada CV.pdf", b"%PDF-1.4 tiny")],
+    );
     assert_eq!(done.status, 200, "{}", done.body);
     assert_eq!(server.db.queue_depth(None).unwrap(), 1);
 
@@ -423,7 +439,12 @@ fn a_file_arrives_only_after_verification_and_only_as_what_it_is() {
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].filename, "Ada CV.pdf");
     assert_eq!(rows[0].content_type, "application/pdf");
-    let blob = server.dir.path().join("attachments").join(&user.id).join(&rows[0].id);
+    let blob = server
+        .dir
+        .path()
+        .join("attachments")
+        .join(&user.id)
+        .join(&rows[0].id);
     assert_eq!(std::fs::read(&blob).unwrap(), b"%PDF-1.4 tiny");
 
     // The token spent with the upload: the page is gone now.
@@ -442,10 +463,17 @@ fn a_file_arrives_only_after_verification_and_only_as_what_it_is() {
     let wrong_scope = Request::new("GET", &blob_path, server.gate.to_string())
         .auth(&server.key(Scope::Publish))
         .send(server.gate);
-    assert_ne!(wrong_scope.status, 200, "a publish key reads no queue blobs");
-    let invented = Request::new("GET", "/v1/queue/attachments/00000000", server.gate.to_string())
-        .auth(&server.key(Scope::Drain))
-        .send(server.gate);
+    assert_ne!(
+        wrong_scope.status, 200,
+        "a publish key reads no queue blobs"
+    );
+    let invented = Request::new(
+        "GET",
+        "/v1/queue/attachments/00000000",
+        server.gate.to_string(),
+    )
+    .auth(&server.key(Scope::Drain))
+    .send(server.gate);
     assert_eq!(invented.status, 404);
 
     // And the drain names the blob beside the record it belongs to.

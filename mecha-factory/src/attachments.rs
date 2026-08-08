@@ -29,8 +29,7 @@ const ORPHAN_GRACE: std::time::Duration = std::time::Duration::from_secs(60 * 60
 
 impl Store {
     pub fn new(root: PathBuf) -> Result<Store> {
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("creating {}", root.display()))?;
+        std::fs::create_dir_all(&root).with_context(|| format!("creating {}", root.display()))?;
         Ok(Store { root })
     }
 

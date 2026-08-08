@@ -20,10 +20,10 @@
 
 pub mod account;
 pub mod admin;
-pub mod booking;
-pub mod poll;
 pub mod artifacts;
+pub mod booking;
 pub mod intake;
+pub mod poll;
 pub mod signup;
 pub mod v1;
 pub mod viewer;
@@ -115,7 +115,10 @@ pub fn router(app: Shared) -> Router {
             )),
         )
         .route("/v1/bundles/{id}/alias", post(v1::alias))
-        .route("/v1/instruments/{id}/slots", axum::routing::put(v1::put_slots))
+        .route(
+            "/v1/instruments/{id}/slots",
+            axum::routing::put(v1::put_slots),
+        )
         .route(
             "/v1/instruments/{id}/polls/{poll_id}",
             axum::routing::put(v1::put_poll).get(v1::get_poll),
@@ -181,7 +184,10 @@ pub fn router(app: Shared) -> Router {
         .route("/f/{handle}/{type_id}/{name}", get(intake::asset))
         // The booking page: the same gate, the same no-script posture as the
         // forms — server-rendered HTML whose scripts are same-origin files.
-        .route("/s/{handle}/{type_id}", get(booking::page).post(booking::submit))
+        .route(
+            "/s/{handle}/{type_id}",
+            get(booking::page).post(booking::submit),
+        )
         // The live half of the page: what is open right now, as data, for
         // the open tab that polls it. A static segment, so it wins over the
         // `{name}` asset route below.
@@ -218,11 +224,11 @@ pub fn router(app: Shared) -> Router {
         // attachment budget enforced beneath it in the handler.
         .route(
             "/f/{handle}/{type_id}/u/{token}",
-            get(intake::upload_page)
-                .post(intake::upload)
-                .layer(axum::extract::DefaultBodyLimit::max(
+            get(intake::upload_page).post(intake::upload).layer(
+                axum::extract::DefaultBodyLimit::max(
                     app.config.limits.max_submission_bytes as usize,
-                )),
+                ),
+            ),
         )
         // Claiming a handle from an invite. Gate-only like the forms, and for
         // the same reason: server-rendered HTML that executes nothing.
@@ -298,11 +304,7 @@ async fn guard(
         // A configured redirect host — the apex, `www` — sends the browser to
         // the gate and keeps the path: `mecha-factory.ai/account` should land
         // on the account page, not the splash.
-        let bare = host
-            .split(':')
-            .next()
-            .unwrap_or(&host)
-            .to_ascii_lowercase();
+        let bare = host.split(':').next().unwrap_or(&host).to_ascii_lowercase();
         if app
             .config
             .redirect_hosts

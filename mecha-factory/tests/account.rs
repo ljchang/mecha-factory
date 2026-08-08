@@ -33,8 +33,8 @@ fn signed_in(server: &Server) -> String {
     let asked = post(server, "/account/signin", "email=alice%40example.org", None);
     assert_eq!(asked.status, 200, "{}", asked.body);
     let link = server.verification_token(); // the last link the mailer saw
-    // The person's path: interstitial first (which spends nothing — the
-    // mail-scanner fix), then the button's POST redeems.
+                                            // The person's path: interstitial first (which spends nothing — the
+                                            // mail-scanner fix), then the button's POST redeems.
     let interstitial = get(server, &format!("/account/s/{link}"), None);
     assert_eq!(interstitial.status, 200, "{}", interstitial.body);
     let finished = post(server, &format!("/account/s/{link}"), "", None);
@@ -247,7 +247,12 @@ fn signing_out_ends_the_session_server_side() {
 #[test]
 fn a_suspended_accounts_link_never_spends() {
     let server = common::start();
-    post(&server, "/account/signin", "email=alice%40example.org", None);
+    post(
+        &server,
+        "/account/signin",
+        "email=alice%40example.org",
+        None,
+    );
     let link = server.verification_token();
     server.db.user_status(&server.user.id, "suspended").unwrap();
 
@@ -337,8 +342,16 @@ fn the_header_knows_who_it_is_for() {
     // Signed out: the same corner holds a Sign in dropdown with the email
     // form — and nothing only a session gets.
     let signin = server.get(server.gate, "/account");
-    assert!(signin.body.contains("header class=\"site\""), "{}", signin.body);
-    assert!(signin.body.contains("<summary>Sign in</summary>"), "{}", signin.body);
+    assert!(
+        signin.body.contains("header class=\"site\""),
+        "{}",
+        signin.body
+    );
+    assert!(
+        signin.body.contains("<summary>Sign in</summary>"),
+        "{}",
+        signin.body
+    );
     assert!(signin.body.contains("action=\"/account/signin\""));
     assert!(!signin.body.contains("/account/signout"));
 
@@ -347,11 +360,17 @@ fn the_header_knows_who_it_is_for() {
     let page = get(&server, "/account", Some(&cookie));
     assert!(page.body.contains("account-menu"), "{}", page.body);
     assert!(page.body.contains("/account/signout"));
-    assert!(page.body.contains("/account#artifacts"), "dropdown links are absolute");
+    assert!(
+        page.body.contains("/account#artifacts"),
+        "dropdown links are absolute"
+    );
     // The artifacts table carries the full controls once bundles exist; on an
     // empty account it at least says what would land here.
     assert!(page.body.contains("Nothing published yet") || page.body.contains("Take down"));
-    assert!(page.body.contains("menu.js"), "the dropdown gets its close script");
+    assert!(
+        page.body.contains("menu.js"),
+        "the dropdown gets its close script"
+    );
     assert!(page.body.contains("alice"));
 
     // The script the page references is served, as JavaScript.
@@ -361,7 +380,11 @@ fn the_header_knows_who_it_is_for() {
 
     // A 404 that must not distinguish handles carries no chrome at all.
     let missing = server.get(server.gate, "/f/nobody/nothing");
-    assert!(!missing.body.contains("header class=\"site\""), "{}", missing.body);
+    assert!(
+        !missing.body.contains("header class=\"site\""),
+        "{}",
+        missing.body
+    );
     assert!(!missing.body.contains("form.css"));
 }
 
@@ -404,7 +427,11 @@ fn the_viewer_knows_its_owner_and_its_controls_return_there() {
     // Signed in, on your own bundle: handle in the corner, Manage present.
     let page = get(&server, "/view/alice/brief/1", Some(&session));
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("<summary>alice</summary>"), "{}", page.body);
+    assert!(
+        page.body.contains("<summary>alice</summary>"),
+        "{}",
+        page.body
+    );
     assert!(page.body.contains("<summary>Manage</summary>"));
     assert!(page.body.contains("Take down"));
     assert!(page.body.contains("name=\"return\""));
@@ -438,10 +465,17 @@ fn the_viewer_knows_its_owner_and_its_controls_return_there() {
     // Private now: the owner still gets the viewer; a visitor with no
     // session gets the reader sign-in gate — the page every private or
     // absent viewer URL answers with, so it confirms nothing.
-    assert_eq!(get(&server, "/view/alice/brief/1", Some(&session)).status, 200);
+    assert_eq!(
+        get(&server, "/view/alice/brief/1", Some(&session)).status,
+        200
+    );
     let stranger = get(&server, "/view/alice/brief/1", None);
     assert_eq!(stranger.status, 200);
-    assert!(stranger.body.contains("Sign in to view"), "{}", stranger.body);
+    assert!(
+        stranger.body.contains("Sign in to view"),
+        "{}",
+        stranger.body
+    );
 
     // A return address outside /view/ is not followed.
     let elsewhere = post(

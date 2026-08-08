@@ -1040,8 +1040,7 @@ impl Db {
                 Some(None) => Ok(Some(EMAIL_DOOR_KEY.to_string())),
                 Some(Some(_)) => Ok(None),
                 None => {
-                    let unusable =
-                        crate::intake::hash_token(&crate::intake::mint_token());
+                    let unusable = crate::intake::hash_token(&crate::intake::mint_token());
                     conn.execute(
                         "INSERT INTO keys (id, user_id, scope, hash, label, created_at) \
                          VALUES (?1, '', 'operate', ?2, 'email sign-in door', ?3)",
@@ -1806,11 +1805,7 @@ impl Db {
     /// page offers what remains. Overlap is by time range, not slot
     /// identity: a confirmed 60-minute meeting blocks both half-hours it
     /// covers, whichever duration a later visitor picked.
-    pub fn booking_hold(
-        &self,
-        row: &BookingRow,
-        now: &str,
-    ) -> Result<bool> {
+    pub fn booking_hold(&self, row: &BookingRow, now: &str) -> Result<bool> {
         self.with(|conn| {
             let inserted = conn.execute(
                 "INSERT INTO bookings (id, user_id, instrument_id, slot_start, slot_end,                  duration_minutes, state, hold_expires, queue_seq, ics_sequence, created_at)                  SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'held', ?7, ?8, 0, ?9                  WHERE NOT EXISTS (SELECT 1 FROM bookings                    WHERE user_id = ?2 AND instrument_id = ?3                      AND slot_start < ?5 AND ?4 < slot_end                      AND (state = 'confirmed' OR (state = 'held' AND hold_expires > ?10)))",
@@ -1834,12 +1829,7 @@ impl Db {
     /// Convert a live hold into the booking, atomically re-proving the slot
     /// is still clear of *other* live rows — a second hold cannot exist by
     /// construction, but re-checking costs one clause and assumes less.
-    pub fn booking_confirm(
-        &self,
-        id: &str,
-        manage_hash: &str,
-        now: &str,
-    ) -> Result<bool> {
+    pub fn booking_confirm(&self, id: &str, manage_hash: &str, now: &str) -> Result<bool> {
         self.with(|conn| {
             let updated = conn.execute(
                 "UPDATE bookings SET state = 'confirmed', confirmed_at = ?3,                  manage_hash = ?2, hold_expires = NULL                  WHERE id = ?1 AND state = 'held' AND hold_expires > ?3                    AND NOT EXISTS (SELECT 1 FROM bookings b2                      WHERE b2.user_id = bookings.user_id                        AND b2.instrument_id = bookings.instrument_id                        AND b2.id != bookings.id                        AND b2.slot_start < bookings.slot_end                        AND bookings.slot_start < b2.slot_end                        AND (b2.state = 'confirmed'                             OR (b2.state = 'held' AND b2.hold_expires > ?3)))",
@@ -2019,12 +2009,7 @@ impl Db {
     /// Record one participant's answers, wholesale — the newest submission
     /// is their answer, replacing any earlier one; changing your mind is
     /// ordinary, not an error. Only while the poll is open.
-    pub fn poll_answer(
-        &self,
-        token_hash: &str,
-        answers: &str,
-        now: &str,
-    ) -> Result<bool> {
+    pub fn poll_answer(&self, token_hash: &str, answers: &str, now: &str) -> Result<bool> {
         self.with(|conn| {
             let updated = conn.execute(
                 "UPDATE poll_participants SET answers = ?2, responded_at = ?3                  WHERE token_hash = ?1 AND EXISTS (SELECT 1 FROM polls p                    WHERE p.user_id = poll_participants.user_id                      AND p.id = poll_participants.poll_id AND p.state = 'open')",
@@ -2118,9 +2103,8 @@ impl Db {
             let mut blobs = Vec::new();
             let tx = conn.unchecked_transaction()?;
             for seq in seqs {
-                let mut stmt = tx.prepare(
-                    "SELECT id FROM attachments WHERE user_id = ?1 AND seq = ?2",
-                )?;
+                let mut stmt =
+                    tx.prepare("SELECT id FROM attachments WHERE user_id = ?1 AND seq = ?2")?;
                 let ids = stmt.query_map(params![user_id, seq], |r| r.get::<_, String>(0))?;
                 blobs.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
                 drop(stmt);
@@ -2347,10 +2331,7 @@ impl Db {
     /// Drop budget rows for days gone by — yesterday's counts bound nothing.
     pub fn expire_upload_budget(&self, today: &str) -> Result<usize> {
         self.with(|conn| {
-            Ok(conn.execute(
-                "DELETE FROM upload_budget WHERE day < ?1",
-                params![today],
-            )?)
+            Ok(conn.execute("DELETE FROM upload_budget WHERE day < ?1", params![today])?)
         })
     }
 
@@ -2508,7 +2489,10 @@ impl Db {
                 ),
                 params![now],
             )?;
-            let removed = tx.execute(&format!("DELETE FROM queue WHERE {predicate}"), params![now])?;
+            let removed = tx.execute(
+                &format!("DELETE FROM queue WHERE {predicate}"),
+                params![now],
+            )?;
             tx.commit()?;
             Ok((removed, blobs))
         })
@@ -3417,7 +3401,9 @@ mod tests {
         assert_eq!(db.attachments_for(&u, seq).unwrap().len(), 1);
         assert!(db.attachment_get(&u, "blob1").unwrap().is_some());
         assert!(
-            db.attachment_get("someone-else", "blob1").unwrap().is_none(),
+            db.attachment_get("someone-else", "blob1")
+                .unwrap()
+                .is_none(),
             "someone else's id and a nonexistent one are the same absence"
         );
 

@@ -189,7 +189,10 @@ fn the_letter_starter_asks_for_a_cv_and_can_be_served() {
         .expect("the letter starter exists");
     assert!(letter.verification.is_some(), "letter must be servable");
     let cv = letter.field("cv").expect("the cv field exists");
-    assert!(!cv.required, "a link stays the easy path; the CV is optional");
+    assert!(
+        !cv.required,
+        "a link stays the easy path; the CV is optional"
+    );
     assert!(!cv.is_free_text());
     assert!(letter.has_file_fields());
     assert!(letter.attachment_budget() > 0);

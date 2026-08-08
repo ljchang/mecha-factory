@@ -1548,10 +1548,9 @@ accept=["docx"]
     #[test]
     fn a_booking_without_its_needs_is_refused_with_the_reason() {
         // No [availability]: nothing could ever be offered.
-        let err = RequestType::from_toml(&BOOKING_BASE.replace(
-            "[availability]",
-            "[availability_disabled]",
-        ));
+        let err = RequestType::from_toml(
+            &BOOKING_BASE.replace("[availability]", "[availability_disabled]"),
+        );
         assert!(err.is_err());
 
         // A bad window inside [availability] surfaces at check, not at the
@@ -1561,10 +1560,8 @@ accept=["docx"]
         assert!(err.contains("ends before"), "{err}");
 
         // No verification: no way to convert a hold into a booking.
-        let no_verify = BOOKING_BASE.replace(
-            "[verification]\n        field = \"requester_email\"",
-            "",
-        );
+        let no_verify =
+            BOOKING_BASE.replace("[verification]\n        field = \"requester_email\"", "");
         let err = RequestType::from_toml(&no_verify).unwrap_err().to_string();
         assert!(err.contains("no way to book"), "{err}");
 

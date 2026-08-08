@@ -191,7 +191,9 @@ pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> Boo
     ));
 
     if !options.open {
-        body.push_str("<p class=\"empty\">This poll is closed; answers can no longer change.</p>\n");
+        body.push_str(
+            "<p class=\"empty\">This poll is closed; answers can no longer change.</p>\n",
+        );
     }
     body.push_str(&format!(
         "<form method=\"post\" action=\"{}\">\n",
@@ -219,7 +221,9 @@ pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> Boo
         }
         let key = format!(
             "a_{}|{}",
-            candidate.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            candidate
+                .start
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             candidate.duration_minutes
         );
         let label = local.format("%-I:%M %p").to_string().to_lowercase();
@@ -605,7 +609,9 @@ impl RequestType {
                     day.format("%b %-d")
                 ));
                 for slot in of_day {
-                    let start_utc = slot.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+                    let start_utc = slot
+                        .start
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                     let local = slot.start.with_timezone(&tz);
                     let label = local.format("%-I:%M %p").to_string().to_lowercase();
                     let value = format!("{start_utc}|{}", slot.duration_minutes);
@@ -1172,9 +1178,15 @@ mod tests {
         assert!(html.contains(r#"<span class="date">Aug 11</span>"#));
         assert!(html.contains(r#"<span class="date">Aug 13</span>"#));
         assert!(html.contains("Times are shown in America/New_York"));
-        assert!(html.contains(r#"name="requester_email""#), "details fields ride along");
+        assert!(
+            html.contains(r#"name="requester_email""#),
+            "details fields ride along"
+        );
         assert!(html.contains("Book this time"));
-        assert!(!html.contains("<script>"), "no inline script under the gate CSP");
+        assert!(
+            !html.contains("<script>"),
+            "no inline script under the gate CSP"
+        );
         // Both scripts external, one stylesheet.
         assert!(html.contains("booking.js") && html.contains("form.js"));
         let names: Vec<&str> = page.assets().iter().map(|(n, _)| *n).collect();
@@ -1234,10 +1246,9 @@ mod tests {
     fn a_rejected_submission_keeps_the_slot_and_names_fields_by_label() {
         let slots = [slot("2026-08-11T17:00:00Z", 30)];
         let mut options = options("2026-08-10T12:00:00Z");
-        options.values.insert(
-            "_slot".into(),
-            "2026-08-11T17:00:00Z|30".into(),
-        );
+        options
+            .values
+            .insert("_slot".into(), "2026-08-11T17:00:00Z|30".into());
         options.values.insert("requester_name".into(), "Ada".into());
         options.errors = vec![crate::ValidationError {
             field: "requester_email".into(),
@@ -1265,9 +1276,18 @@ mod tests {
         ];
         let now = "2026-08-10T12:00:00Z";
         let first = booking().booking_page(&slots, &options(now)).unwrap();
-        assert!(first.html.contains("?week=2026-08-17\">later"), "a later slot means a next link");
-        assert!(!first.html.contains("earlier"), "the first week has no past");
-        assert!(!first.html.contains("Aug 25"), "next week's slot is not shown");
+        assert!(
+            first.html.contains("?week=2026-08-17\">later"),
+            "a later slot means a next link"
+        );
+        assert!(
+            !first.html.contains("earlier"),
+            "the first week has no past"
+        );
+        assert!(
+            !first.html.contains("Aug 25"),
+            "next week's slot is not shown"
+        );
 
         let mut later = options(now);
         later.week = Some("2026-08-25".parse().unwrap());
@@ -1293,7 +1313,8 @@ mod tests {
         assert!(page.html.contains("check back soon"));
 
         let mut with_notice = options("2026-08-10T12:00:00Z");
-        with_notice.stale_notice = Some("Refreshed 2026-08-09; recent changes may not show.".into());
+        with_notice.stale_notice =
+            Some("Refreshed 2026-08-09; recent changes may not show.".into());
         let page = booking().booking_page(&slots, &with_notice).unwrap();
         assert!(page.html.contains("recent changes may not show"));
     }
@@ -1361,14 +1382,26 @@ mod tests {
         assert!(!page.html.contains("0 of 5 yes"));
         assert!(page.html.contains(r#"id="savestate""#));
         assert!(page.html.contains("poll.js") && page.html.contains("booking.js"));
-        assert!(!page.html.contains("<script>"), "no inline script under the gate CSP");
+        assert!(
+            !page.html.contains("<script>"),
+            "no inline script under the gate CSP"
+        );
     }
 
     #[test]
     fn mondays_anchor_weeks() {
-        assert_eq!(week_of("2026-08-13".parse().unwrap()), "2026-08-10".parse().unwrap());
-        assert_eq!(week_of("2026-08-10".parse().unwrap()), "2026-08-10".parse().unwrap());
-        assert_eq!(week_of("2026-08-16".parse().unwrap()), "2026-08-10".parse().unwrap());
+        assert_eq!(
+            week_of("2026-08-13".parse().unwrap()),
+            "2026-08-10".parse().unwrap()
+        );
+        assert_eq!(
+            week_of("2026-08-10".parse().unwrap()),
+            "2026-08-10".parse().unwrap()
+        );
+        assert_eq!(
+            week_of("2026-08-16".parse().unwrap()),
+            "2026-08-10".parse().unwrap()
+        );
     }
 
     /// The guardrail, against every murky shape it must refuse: a tie of
@@ -1384,8 +1417,14 @@ mod tests {
         ];
         let answer = |wed: &str, thu: &str| -> BTreeMap<String, PollAnswer> {
             [
-                ("2030-02-05T18:00:00Z|60".to_string(), PollAnswer::parse(wed).unwrap()),
-                ("2030-02-06T15:00:00Z|60".to_string(), PollAnswer::parse(thu).unwrap()),
+                (
+                    "2030-02-05T18:00:00Z|60".to_string(),
+                    PollAnswer::parse(wed).unwrap(),
+                ),
+                (
+                    "2030-02-06T15:00:00Z|60".to_string(),
+                    PollAnswer::parse(thu).unwrap(),
+                ),
             ]
             .into()
         };
@@ -1401,7 +1440,10 @@ mod tests {
         // A tie of unanimous slots: judgment, not a guess.
         let answers = vec![answer("yes", "yes"), answer("yes", "yes")];
         let ranked = rank_poll(&candidates, &answers, 2);
-        assert!(clean_winner(&ranked, 2, 2).is_none(), "two unanimous = stage");
+        assert!(
+            clean_winner(&ranked, 2, 2).is_none(),
+            "two unanimous = stage"
+        );
 
         // The best needs an if-needed: someone pays, so someone decides.
         let answers = vec![answer("yes", "no"), answer("if_needed", "no")];

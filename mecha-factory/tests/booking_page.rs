@@ -43,14 +43,10 @@ end = "17:00"
 fn future_slot_push() -> (String, String) {
     let start = chrono::Utc::now() + chrono::Duration::days(7);
     // On the half hour, for a stable-looking label.
-    let start = start
-        .date_naive()
-        .and_hms_opt(17, 0, 0)
-        .unwrap()
-        .and_utc();
+    let start = start.date_naive().and_hms_opt(17, 0, 0).unwrap().and_utc();
     let stamp = start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let end = (start + chrono::Duration::minutes(30))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let end =
+        (start + chrono::Duration::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let body = serde_json::json!({
         "generated_at": chrono::Utc::now()
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -75,7 +71,11 @@ fn a_pushed_type_and_cache_become_a_page_a_stranger_can_read() {
     // Before any slot push: the page exists and honestly offers nothing.
     let page = server.get(server.gate, "/s/alice/book");
     assert_eq!(page.status, 200, "{}", page.body);
-    assert!(page.body.contains("Nothing is currently open"), "{}", page.body);
+    assert!(
+        page.body.contains("Nothing is currently open"),
+        "{}",
+        page.body
+    );
 
     let (push, stamp) = future_slot_push();
     let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
@@ -162,8 +162,7 @@ fn a_stale_cache_serves_with_its_age_stated() {
     let (push, _) = future_slot_push();
     let mut doc: serde_json::Value = serde_json::from_str(&push).unwrap();
     let old = chrono::Utc::now() - chrono::Duration::days(2);
-    doc["generated_at"] =
-        serde_json::json!(old.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    doc["generated_at"] = serde_json::json!(old.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
     let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
         .auth(&server.key(Scope::Slots))
         .body(doc.to_string())
@@ -201,13 +200,13 @@ fn holds_claim_once_block_overlap_and_expire_free() {
 
     let now = chrono::Utc::now();
     let now_s = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let later = (now + chrono::Duration::minutes(30))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let later =
+        (now + chrono::Duration::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let start: chrono::DateTime<chrono::Utc> = stamp.parse().unwrap();
-    let end_30 = (start + chrono::Duration::minutes(30))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let end_60 = (start + chrono::Duration::minutes(60))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let end_30 =
+        (start + chrono::Duration::minutes(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let end_60 =
+        (start + chrono::Duration::minutes(60)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let row = |id: &str, end: &str, expires: &str| mecha_factory::db::BookingRow {
         id: id.into(),
         user_id: server.user.id.clone(),
@@ -225,13 +224,26 @@ fn holds_claim_once_block_overlap_and_expire_free() {
         cancelled_at: None,
     };
 
-    assert!(server.db.booking_hold(&row("b1", &end_30, &later), &now_s).unwrap());
+    assert!(server
+        .db
+        .booking_hold(&row("b1", &end_30, &later), &now_s)
+        .unwrap());
     // The same slot, and the 60 overlapping it, both lose while b1 lives.
-    assert!(!server.db.booking_hold(&row("b2", &end_30, &later), &now_s).unwrap());
-    assert!(!server.db.booking_hold(&row("b3", &end_60, &later), &now_s).unwrap());
+    assert!(!server
+        .db
+        .booking_hold(&row("b2", &end_30, &later), &now_s)
+        .unwrap());
+    assert!(!server
+        .db
+        .booking_hold(&row("b3", &end_60, &later), &now_s)
+        .unwrap());
     // The held slot is off the page.
     let page = server.get(server.gate, "/s/alice/book");
-    assert!(!page.body.contains("_slot"), "a held week serves nothing: {}", page.body);
+    assert!(
+        !page.body.contains("_slot"),
+        "a held week serves nothing: {}",
+        page.body
+    );
 
     // Confirm converts the live hold once; a second confirm finds no hold.
     assert!(server.db.booking_confirm("b1", "hash", &now_s).unwrap());
@@ -239,17 +251,24 @@ fn holds_claim_once_block_overlap_and_expire_free() {
 
     // An *expired* hold frees its slot with no sweeper: insert one dated
     // in the past on a second instrument-free stretch by expiring b4 now.
-    let expired = (now - chrono::Duration::minutes(1))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let expired =
+        (now - chrono::Duration::minutes(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     assert!(
-        !server.db.booking_hold(&row("b4", &end_30, &expired), &now_s).unwrap(),
+        !server
+            .db
+            .booking_hold(&row("b4", &end_30, &expired), &now_s)
+            .unwrap(),
         "b1 is confirmed now, so the slot stays taken"
     );
     let blocking = server
         .db
         .bookings_blocking(&server.user.id, "book", &now_s)
         .unwrap();
-    assert_eq!(blocking.len(), 1, "only the confirmed row blocks: {blocking:?}");
+    assert_eq!(
+        blocking.len(),
+        1,
+        "only the confirmed row blocks: {blocking:?}"
+    );
 }
 
 /// The POST half: a stranger picks a slot, the hold is taken, the link is
@@ -342,7 +361,9 @@ fn a_rejected_submission_keeps_the_pick_and_the_typed_values() {
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(
-        reply.body.contains(&format!("value=\"{stamp}|30\" checked")),
+        reply
+            .body
+            .contains(&format!("value=\"{stamp}|30\" checked")),
         "the picked slot survives the rejection: {}",
         reply.body
     );
@@ -352,7 +373,11 @@ fn a_rejected_submission_keeps_the_pick_and_the_typed_values() {
         "the summary says the label, not the field name: {}",
         reply.body
     );
-    assert_eq!(server.sent_links(), 0, "nothing was held, nobody was mailed");
+    assert_eq!(
+        server.sent_links(),
+        0,
+        "nothing was held, nobody was mailed"
+    );
 
     // Nothing took the slot: the next visitor still sees it.
     let page = server.get(server.gate, "/s/alice/book");
@@ -410,8 +435,16 @@ fn slots_json_tells_an_open_tab_the_truth() {
     );
 
     // Wrong doors answer nothing, like every other booking route.
-    assert_eq!(server.get(server.gate, "/s/nobody/book/slots.json").status, 404);
-    assert_eq!(server.get(server.artifacts, "/s/alice/book/slots.json").status, 404);
+    assert_eq!(
+        server.get(server.gate, "/s/nobody/book/slots.json").status,
+        404
+    );
+    assert_eq!(
+        server
+            .get(server.artifacts, "/s/alice/book/slots.json")
+            .status,
+        404
+    );
 }
 
 /// The whole claim, outside-in: submit holds, the mailed link's POST books,
@@ -459,8 +492,7 @@ fn the_click_books_and_a_lapsed_hold_never_drains() {
     assert_eq!(server.db.queue_depth(Some(&server.user.id)).unwrap(), 0);
 
     // The click books.
-    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
-        .send(server.gate);
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate).send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert!(reply.body.contains("booked"), "{}", reply.body);
     assert_eq!(
@@ -471,21 +503,19 @@ fn the_click_books_and_a_lapsed_hold_never_drains() {
     // The payload gained the manage URL at confirm — minted box-side, read
     // home-side, carried like the other machinery keys.
     let drained = server.db.drain(&server.user.id, 0, 10).unwrap();
-    let payload: serde_json::Value =
-        serde_json::from_str(drained[0].payload.as_str()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(drained[0].payload.as_str()).unwrap();
     let manage = payload["_manage_url"].as_str().expect("a manage url");
     assert!(manage.contains("/s/alice/book/m/"), "{manage}");
     // A second click finds the token spent, and does not double-book.
-    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
-        .send(server.gate);
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate).send(server.gate);
     assert_eq!(reply.status, 404);
 
     // Round two, with a policy whose holds lapse instantly.
     put_type(&format!("{BOOK_TOML}\n[policy]\nhold_minutes = 0\n"));
     // A different slot, so round one's confirmed booking does not block it.
     let start: chrono::DateTime<chrono::Utc> = stamp.parse().unwrap();
-    let late = (start + chrono::Duration::hours(2))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let late =
+        (start + chrono::Duration::hours(2)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let late_end = (start + chrono::Duration::hours(2) + chrono::Duration::minutes(30))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     let push = serde_json::json!({
@@ -507,8 +537,7 @@ fn the_click_books_and_a_lapsed_hold_never_drains() {
     );
     assert_eq!(submit(&form).status, 200);
     let token = server.verification_token();
-    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
-        .send(server.gate);
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate).send(server.gate);
     assert_eq!(reply.status, 200);
     assert!(reply.body.contains("lapsed"), "{}", reply.body);
     assert_eq!(
@@ -549,14 +578,12 @@ fn the_manage_link_cancels_once_and_answers_every_state_honestly() {
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
     let token = server.verification_token();
-    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
-        .send(server.gate);
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate).send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
 
     // The manage URL travels in the drained payload; use it as home would.
     let drained = server.db.drain(&server.user.id, 0, 10).unwrap();
-    let payload: serde_json::Value =
-        serde_json::from_str(drained[0].payload.as_str()).unwrap();
+    let payload: serde_json::Value = serde_json::from_str(drained[0].payload.as_str()).unwrap();
     let manage_url = payload["_manage_url"].as_str().unwrap();
     let manage_path = &manage_url[manage_url.find("/s/").unwrap()..];
 

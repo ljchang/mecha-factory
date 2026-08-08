@@ -152,10 +152,7 @@ pub(crate) fn account_dropdown(
         email = mecha_manifest::escape_text(email),
         csrf = mecha_manifest::escape_text(csrf),
         docs = match docs_url {
-            Some(url) => format!(
-                "<a href=\"{}\">Docs</a>",
-                mecha_manifest::escape_text(url)
-            ),
+            Some(url) => format!("<a href=\"{}\">Docs</a>", mecha_manifest::escape_text(url)),
             None => String::new(),
         },
     )
@@ -213,13 +210,7 @@ pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome)
     };
     // The dropdown's close-on-outside-click, only where a dropdown is.
     let has_dropdown = matches!(chrome, Chrome::Account { .. })
-        || matches!(
-            chrome,
-            Chrome::Public {
-                sign_in: true,
-                ..
-            }
-        );
+        || matches!(chrome, Chrome::Public { sign_in: true, .. });
     let script = if !assets.is_empty() && has_dropdown {
         format!(
             "<script src=\"{}menu.js\" defer></script>",
@@ -368,7 +359,10 @@ pub(crate) fn serve_asset(app: &Shared, origin: &Origin, name: &str) -> Response
     if name == "menu.js" {
         return (
             StatusCode::OK,
-            [(header::CONTENT_TYPE, mecha_manifest::content_type("menu.js"))],
+            [(
+                header::CONTENT_TYPE,
+                mecha_manifest::content_type("menu.js"),
+            )],
             MENU_JS.to_string(),
         )
             .into_response();
@@ -612,7 +606,10 @@ pub async fn confirm(
             upload_expires: crate::db::hours_from_now(UPLOAD_EXPIRES_HOURS),
         },
     };
-    let verified = match app.db.submission_verify(&user.id, &hash, &crate::db::now(), next) {
+    let verified = match app
+        .db
+        .submission_verify(&user.id, &hash, &crate::db::now(), next)
+    {
         Ok(Some(row)) => row,
         Ok(None) => {
             // One page for expired, already-used, and never-existed. Which of
@@ -857,8 +854,7 @@ pub async fn upload(
             Ok(None) => break,
             Err(e) => {
                 tracing::debug!(error = %e, "unreadable multipart");
-                return Failure::text(StatusCode::BAD_REQUEST, "unreadable upload")
-                    .into_response();
+                return Failure::text(StatusCode::BAD_REQUEST, "unreadable upload").into_response();
             }
         };
         let Some(name) = field.name().map(str::to_string) else {
@@ -898,8 +894,9 @@ pub async fn upload(
     let ip_hash = crate::intake::hash_token(&peer.ip().to_string());
     let today = crate::db::today();
     match app.db.upload_bytes_today(&ip_hash, &today) {
-        Ok(already) if already.saturating_add(received as i64)
-            > app.config.limits.daily_upload_bytes_per_ip as i64 =>
+        Ok(already)
+            if already.saturating_add(received as i64)
+                > app.config.limits.daily_upload_bytes_per_ip as i64 =>
         {
             tracing::warn!("upload refused by the daily byte budget");
             return page(
@@ -995,7 +992,10 @@ pub async fn upload(
             return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     };
-    match app.db.upload_complete(&user.id, &hash, &now, &payload, &rows) {
+    match app
+        .db
+        .upload_complete(&user.id, &hash, &now, &payload, &rows)
+    {
         Ok(Some(seq)) => {
             tracing::info!(handle = %user.handle, %type_id, seq, files = rows.len(), "queued");
             confirmation_page(&request_type, &handle, &type_id, &submission.values)

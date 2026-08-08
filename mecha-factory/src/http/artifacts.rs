@@ -141,12 +141,7 @@ pub async fn share(
 /// two: the chrome that knows who you are cannot run here, and a second
 /// anonymous chrome would drift from the first. Called through the gate
 /// viewer's route dispatcher, which owns the `/view/{a}/{b}` shape.
-pub(crate) fn viewer_redirect(
-    app: &Shared,
-    origin: &Origin,
-    id: &str,
-    version: u32,
-) -> Response {
+pub(crate) fn viewer_redirect(app: &Shared, origin: &Origin, id: &str, version: u32) -> Response {
     if origin.role == Role::Gate || mecha_manifest::valid_id(id, "bundle id").is_err() {
         return missing();
     }
@@ -174,7 +169,6 @@ pub(crate) fn viewer_redirect(
     )
         .into_response()
 }
-
 
 /// `/b/<id>/v/` — the version switcher: every version of a publicly served
 /// bundle, each at its immutable URL, with the live one named.
@@ -368,10 +362,7 @@ async fn serve(
 
 /// `/g/<cap>` — normalise onto the slash, so the bundle's relative paths
 /// resolve under the capability.
-pub async fn grant_bare(
-    Extension(origin): Extension<Origin>,
-    Path(cap): Path<String>,
-) -> Response {
+pub async fn grant_bare(Extension(origin): Extension<Origin>, Path(cap): Path<String>) -> Response {
     if origin.role == Role::Gate || !cap.chars().all(|c| c.is_ascii_hexdigit()) {
         return missing();
     }

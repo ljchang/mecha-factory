@@ -657,8 +657,7 @@ pub async fn put_slots(
         instrument_id: id.clone(),
         generated_at: push.generated_at.clone(),
         horizon_days: i64::from(push.horizon_days),
-        slots: serde_json::to_string(&push.slots)
-            .unwrap_or_else(|_| "[]".into()),
+        slots: serde_json::to_string(&push.slots).unwrap_or_else(|_| "[]".into()),
         received_at: crate::db::now(),
     };
     if let Err(e) = app.db.slots_put(&row) {
@@ -723,7 +722,9 @@ pub async fn put_poll(
                 .chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
         if !ok {
-            return bad(format!("`{name}` must be 1–64 of lowercase, digits, `-`, `_`"));
+            return bad(format!(
+                "`{name}` must be 1–64 of lowercase, digits, `-`, `_`"
+            ));
         }
     }
     let push: PollPush = match serde_json::from_str(&body) {
@@ -758,7 +759,9 @@ pub async fn put_poll(
     let mut names = std::collections::BTreeSet::new();
     for name in &push.participants {
         if name.trim().is_empty() || name.len() > 80 || !names.insert(name.trim()) {
-            return bad(format!("participant `{name}` is empty, too long, or repeated"));
+            return bad(format!(
+                "participant `{name}` is empty, too long, or repeated"
+            ));
         }
     }
 
@@ -789,8 +792,7 @@ pub async fn put_poll(
         }
         Err(e) => {
             tracing::error!(%poll_id, error = %e, "creating a poll");
-            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     }
     let base = app.config.base_url(Role::Gate);
@@ -1220,7 +1222,10 @@ pub async fn disconnect(
 // be one, kept apart by the credential rather than by attention.
 
 /// The operator, or a refusal. No user join: the key belongs to the box.
-pub(crate) fn authorised_operator(app: &Shared, headers: &HeaderMap) -> Result<KeyRow, Box<Response>> {
+pub(crate) fn authorised_operator(
+    app: &Shared,
+    headers: &HeaderMap,
+) -> Result<KeyRow, Box<Response>> {
     match keys::authenticate(&app.db, bearer(headers), Scope::Operate) {
         Ok(row) => Ok(row),
         Err(e) => {

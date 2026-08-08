@@ -552,11 +552,7 @@ pub async fn release(
     // field can never become an open redirect.
     let back = field("return");
     if back.starts_with("/view/") && !back.starts_with("//") {
-        return (
-            StatusCode::SEE_OTHER,
-            [(header::LOCATION, back)],
-        )
-            .into_response();
+        return (StatusCode::SEE_OTHER, [(header::LOCATION, back)]).into_response();
     }
     render_overview(&app, &token, &user)
 }
@@ -670,7 +666,10 @@ pub async fn share(
                 .into_response();
         }
     }
-    match app.db.share_create(&user.id, &id, &email, &crate::db::now()) {
+    match app
+        .db
+        .share_create(&user.id, &id, &email, &crate::db::now())
+    {
         Ok(true) => {
             // The mailed link is the bare viewer URL: stable while the
             // alias moves, and the sign-in flow hangs off it.

@@ -62,12 +62,7 @@ fn private_live_bundle(server: &Server) {
 
 /// Sign alice in as a tenant and hand back the session token.
 fn owner_signed_in(server: &Server) -> String {
-    post(
-        server,
-        "/account/signin",
-        "email=alice%40example.org",
-        None,
-    );
+    post(server, "/account/signin", "email=alice%40example.org", None);
     let link = server.verification_token();
     let finished = post(server, &format!("/account/s/{link}"), "", None);
     assert_eq!(finished.status, 303, "{}", finished.head);
@@ -132,7 +127,11 @@ fn reader_signed_in(server: &Server, email: &str) -> String {
     );
     assert_eq!(asked.status, 200);
     assert!(asked.body.contains("Check your email"), "{}", asked.body);
-    assert_eq!(server.sent_links(), before + 1, "a granted address is mailed");
+    assert_eq!(
+        server.sent_links(),
+        before + 1,
+        "a granted address is mailed"
+    );
     let link = server.last_link();
     let path = link.split(&server.gate.to_string()).nth(1).unwrap();
     // The person's path: interstitial first, then the button's POST.
@@ -192,8 +191,16 @@ fn a_share_lets_exactly_the_named_address_read_a_private_bundle() {
         "email=mallory%40example.org&return=/view/alice/brief",
         None,
     );
-    assert!(unknown.body.contains("Check your email"), "{}", unknown.body);
-    assert_eq!(server.sent_links(), before, "an unknown address sends nothing");
+    assert!(
+        unknown.body.contains("Check your email"),
+        "{}",
+        unknown.body
+    );
+    assert_eq!(
+        server.sent_links(),
+        before,
+        "an unknown address sends nothing"
+    );
 
     // Casey proves the inbox and lands back on the bare link, which
     // resolves to the live version.

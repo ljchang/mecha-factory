@@ -877,6 +877,9 @@ required = true
 
         // And a file field never enters the free-text sweep: its value is an
         // object, and the field kind is not prose.
-        assert!(submission.free_text(&t).iter().all(|(name, _)| *name != "cv"));
+        assert!(submission
+            .free_text(&t)
+            .iter()
+            .all(|(name, _)| *name != "cv"));
     }
 }

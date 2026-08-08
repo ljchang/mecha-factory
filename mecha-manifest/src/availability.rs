@@ -301,7 +301,10 @@ fn local_instant(tz: Tz, date: NaiveDate, time: NaiveTime) -> Option<DateTime<Ut
     let naive = date.and_time(time);
     tz.from_local_datetime(&naive)
         .earliest()
-        .or_else(|| tz.from_local_datetime(&(naive + Duration::hours(1))).earliest())
+        .or_else(|| {
+            tz.from_local_datetime(&(naive + Duration::hours(1)))
+                .earliest()
+        })
         .map(|t| t.with_timezone(&Utc))
 }
 
@@ -396,8 +399,9 @@ mod tests {
         // A 60-minute slot never overflows the window; the last grid step
         // (16:30 local) offers only the 30.
         let window_end = t("2026-08-04T21:00:00Z");
-        assert!(slots.iter().all(|s| s.end <= window_end
-            || s.start >= t("2026-08-06T00:00:00Z")));
+        assert!(slots
+            .iter()
+            .all(|s| s.end <= window_end || s.start >= t("2026-08-06T00:00:00Z")));
         assert!(slots
             .iter()
             .any(|s| s.start == t("2026-08-04T20:30:00Z") && s.duration_minutes == 30));
@@ -413,7 +417,9 @@ mod tests {
         let slots = availability(&p, &[], &[], &[], t(NOW));
         assert!(slots.iter().all(|s| s.start >= t("2026-08-05T12:00:00Z")));
         assert!(
-            slots.iter().any(|s| s.start.date_naive().to_string() == "2026-08-06"),
+            slots
+                .iter()
+                .any(|s| s.start.date_naive().to_string() == "2026-08-06"),
             "Thursday survives the notice window"
         );
         // Horizon: nothing ends after now + 14d.
@@ -431,7 +437,9 @@ mod tests {
         assert!(no_buffer
             .iter()
             .any(|s| s.start == t("2026-08-04T17:30:00Z") && s.duration_minutes == 30));
-        assert!(no_buffer.iter().any(|s| s.start == t("2026-08-04T19:00:00Z")));
+        assert!(no_buffer
+            .iter()
+            .any(|s| s.start == t("2026-08-04T19:00:00Z")));
 
         let mut p = policy();
         p.buffer_minutes = 15;
@@ -440,8 +448,12 @@ mod tests {
         assert!(!buffered
             .iter()
             .any(|s| s.start == t("2026-08-04T17:30:00Z") && s.duration_minutes == 30));
-        assert!(!buffered.iter().any(|s| s.start == t("2026-08-04T19:00:00Z")));
-        assert!(buffered.iter().any(|s| s.start == t("2026-08-04T19:30:00Z")));
+        assert!(!buffered
+            .iter()
+            .any(|s| s.start == t("2026-08-04T19:00:00Z")));
+        assert!(buffered
+            .iter()
+            .any(|s| s.start == t("2026-08-04T19:30:00Z")));
     }
 
     #[test]
@@ -464,11 +476,15 @@ mod tests {
         ];
         let slots = availability(&p, &[], &[], &bookings, t(NOW));
         assert!(
-            !slots.iter().any(|s| s.start.date_naive().to_string() == "2026-08-04"),
+            !slots
+                .iter()
+                .any(|s| s.start.date_naive().to_string() == "2026-08-04"),
             "two bookings meet the cap; Tuesday closes"
         );
         assert!(
-            slots.iter().any(|s| s.start.date_naive().to_string() == "2026-08-06"),
+            slots
+                .iter()
+                .any(|s| s.start.date_naive().to_string() == "2026-08-06"),
             "Thursday is untouched"
         );
         // Below the cap, the day still offers its remaining air.
@@ -491,7 +507,9 @@ mod tests {
             },
         ];
         let slots = availability(&p, &[], &[], &[], t(NOW));
-        assert!(!slots.iter().any(|s| s.start.date_naive().to_string() == "2026-08-04"));
+        assert!(!slots
+            .iter()
+            .any(|s| s.start.date_naive().to_string() == "2026-08-04"));
         assert!(slots.iter().any(|s| s.start == t("2026-08-05T13:00:00Z")));
     }
 
@@ -530,8 +548,10 @@ mod tests {
         let slots = availability(&p, &[], &[], &[], t("2026-10-31T12:00:00Z"));
         // 01:00 EDT = 05:00Z (first occurrence; the second would be 06:00Z).
         assert!(slots.iter().any(|s| s.start == t("2026-11-01T05:00:00Z")));
-        let mut starts: Vec<(DateTime<Utc>, u32)> =
-            slots.iter().map(|s| (s.start, s.duration_minutes)).collect();
+        let mut starts: Vec<(DateTime<Utc>, u32)> = slots
+            .iter()
+            .map(|s| (s.start, s.duration_minutes))
+            .collect();
         let before = starts.len();
         starts.dedup();
         assert_eq!(before, starts.len(), "no slot may be offered twice");
@@ -546,8 +566,10 @@ mod tests {
             end: hm("18:00"),
         });
         let slots = availability(&p, &[], &[], &[], t(NOW));
-        let mut keyed: Vec<(DateTime<Utc>, u32)> =
-            slots.iter().map(|s| (s.start, s.duration_minutes)).collect();
+        let mut keyed: Vec<(DateTime<Utc>, u32)> = slots
+            .iter()
+            .map(|s| (s.start, s.duration_minutes))
+            .collect();
         let before = keyed.len();
         keyed.dedup();
         assert_eq!(before, keyed.len());
@@ -581,7 +603,10 @@ mod tests {
         assert_eq!(p.increment_minutes, 30, "the default grid");
         assert_eq!(p.windows.len(), 1);
         assert_eq!(p.windows[0].day, Weekday::Tue);
-        assert!(p.overrides[0].windows.is_empty(), "no windows closes the day");
+        assert!(
+            p.overrides[0].windows.is_empty(),
+            "no windows closes the day"
+        );
         assert_eq!(p.overrides[1].windows[0].0, hm("09:00"));
         assert_eq!(p.per_day_cap, Some(3));
     }

@@ -262,8 +262,7 @@ pub async fn submit(
             break 'found None;
         };
         let (Ok(start), Ok(minutes)) = (
-            chrono::DateTime::parse_from_rfc3339(start_raw)
-                .map(|t| t.with_timezone(&chrono::Utc)),
+            chrono::DateTime::parse_from_rfc3339(start_raw).map(|t| t.with_timezone(&chrono::Utc)),
             minutes_raw.parse::<u32>(),
         ) else {
             break 'found None;
@@ -293,11 +292,18 @@ pub async fn submit(
             // typed values ride back into the fields, the errors render as
             // the form's own summary-plus-per-field messages, and `_slot`
             // stays in the values so their picked time arrives re-checked.
-            return page_back(&app, &user, &parsed, &handle, &id, Rejection {
-                notice: None,
-                values: raw,
-                errors,
-            });
+            return page_back(
+                &app,
+                &user,
+                &parsed,
+                &handle,
+                &id,
+                Rejection {
+                    notice: None,
+                    values: raw,
+                    errors,
+                },
+            );
         }
     };
     let Some(address) = submission
@@ -314,7 +320,9 @@ pub async fn submit(
         id: booking_id.clone(),
         user_id: user.id.clone(),
         instrument_id: id.clone(),
-        slot_start: slot.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        slot_start: slot
+            .start
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         slot_end: slot.end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         duration_minutes: i64::from(slot.duration_minutes),
         state: "held".into(),
@@ -335,16 +343,22 @@ pub async fn submit(
             // The race, lost gracefully: the refreshed week with the truth —
             // and everything they typed still in the form, because losing a
             // slot must not also cost the details.
-            return page_back(&app, &user, &parsed, &handle, &id, Rejection {
-                notice: Some("That time was just taken — these are still open.".into()),
-                values: raw,
-                errors: Vec::new(),
-            });
+            return page_back(
+                &app,
+                &user,
+                &parsed,
+                &handle,
+                &id,
+                Rejection {
+                    notice: Some("That time was just taken — these are still open.".into()),
+                    values: raw,
+                    errors: Vec::new(),
+                },
+            );
         }
         Err(e) => {
             tracing::error!(%id, error = %e, "taking a hold");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     }
 
@@ -354,10 +368,7 @@ pub async fn submit(
     let mut values = submission.values.clone();
     values.insert("_slot_start".into(), hold.slot_start.clone().into());
     values.insert("_slot_end".into(), hold.slot_end.clone().into());
-    values.insert(
-        "_duration_minutes".into(),
-        slot.duration_minutes.into(),
-    );
+    values.insert("_duration_minutes".into(), slot.duration_minutes.into());
     values.insert("_booking_id".into(), booking_id.clone().into());
 
     let token = crate::intake::mint_token();
@@ -375,8 +386,7 @@ pub async fn submit(
         Ok(seq) => seq,
         Err(e) => {
             tracing::error!(error = %e, "storing a booking submission");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     };
     let _ = app.db.booking_bind_queue(&booking_id, seq);
@@ -436,11 +446,14 @@ fn page_back(
         .and_then(|s| s.split_once('|'));
     let duration = picked.and_then(|(_, mins)| mins.parse().ok());
     let week = picked.and_then(|(start, _)| {
-        chrono::DateTime::parse_from_rfc3339(start).ok().and_then(|t| {
-            parsed.availability_policy().and_then(|p| p.ok()).map(|p| {
-                t.with_timezone(&p.timezone).date_naive()
+        chrono::DateTime::parse_from_rfc3339(start)
+            .ok()
+            .and_then(|t| {
+                parsed
+                    .availability_policy()
+                    .and_then(|p| p.ok())
+                    .map(|p| t.with_timezone(&p.timezone).date_naive())
             })
-        })
     });
     let options = BookingOptions {
         action: format!("/s/{handle}/{id}"),
@@ -520,33 +533,34 @@ pub async fn confirm(
 
     let hash = crate::intake::hash_token(&token);
     let now = crate::db::now();
-    let verified = match app
-        .db
-        .submission_verify(&user.id, &hash, &now, crate::db::VerifyNext::Queued)
-    {
-        Ok(Some(row)) => row,
-        // One page for expired, spent, and never-existed alike — which it
-        // was is not a stranger's business.
-        Ok(None) => {
-            return intake::page(
-                StatusCode::NOT_FOUND,
-                intake::shell(
-                    "Link expired",
-                    &format!(
-                        "<h1>This link is no longer valid</h1>\
+    let verified =
+        match app
+            .db
+            .submission_verify(&user.id, &hash, &now, crate::db::VerifyNext::Queued)
+        {
+            Ok(Some(row)) => row,
+            // One page for expired, spent, and never-existed alike — which it
+            // was is not a stranger's business.
+            Ok(None) => {
+                return intake::page(
+                    StatusCode::NOT_FOUND,
+                    intake::shell(
+                        "Link expired",
+                        &format!(
+                            "<h1>This link is no longer valid</h1>\
                          <p>It may have expired or already been used. \
                          <a href=\"/s/{handle}/{id}\">Pick a time</a> to start again.</p>"
+                        ),
+                        &format!("/s/{handle}/{id}/"),
                     ),
-                    &format!("/s/{handle}/{id}/"),
-                ),
-            );
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "verifying a booking");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
-        }
-    };
+                );
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "verifying a booking");
+                return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                    .into_response();
+            }
+        };
 
     let values: serde_json::Map<String, serde_json::Value> =
         serde_json::from_str(&verified.payload).unwrap_or_default();
@@ -559,15 +573,16 @@ pub async fn confirm(
     };
 
     let manage_token = crate::intake::mint_token();
-    let converted = app.db.booking_confirm(
-        booking_id,
-        &crate::intake::hash_token(&manage_token),
-        &now,
-    );
+    let converted =
+        app.db
+            .booking_confirm(booking_id, &crate::intake::hash_token(&manage_token), &now);
     match converted {
         Ok(true) => {}
         Ok(false) => {
-            let (_, _) = app.db.queue_ack(&user.id, &[verified.seq]).unwrap_or_default();
+            let (_, _) = app
+                .db
+                .queue_ack(&user.id, &[verified.seq])
+                .unwrap_or_default();
             tracing::info!(%booking_id, "a hold lapsed before its click");
             // Their answers came through the verified payload, so the page
             // they get back has everything filled in — all that is left to
@@ -575,18 +590,24 @@ pub async fn confirm(
             // re-checking a time that is gone would be a lie.
             let mut values = values.clone();
             values.retain(|k, _| !k.starts_with('_'));
-            return page_back(&app, &user, &parsed, &handle, &id, Rejection {
-                notice: Some(
-                    "Your held time lapsed before you confirmed — these are still open.".into(),
-                ),
-                values,
-                errors: Vec::new(),
-            });
+            return page_back(
+                &app,
+                &user,
+                &parsed,
+                &handle,
+                &id,
+                Rejection {
+                    notice: Some(
+                        "Your held time lapsed before you confirmed — these are still open.".into(),
+                    ),
+                    values,
+                    errors: Vec::new(),
+                },
+            );
         }
         Err(e) => {
             tracing::error!(error = %e, "converting a hold");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     }
     // The manage URL is minted here and nowhere else — the token was — so
@@ -849,8 +870,7 @@ pub async fn manage_cancel(
         }
         Err(e) => {
             tracing::error!(error = %e, "cancelling a booking");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     }
     // The record home turns into a calendar deletion. Machinery keys only:

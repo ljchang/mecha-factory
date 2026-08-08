@@ -40,12 +40,7 @@ struct StoredCandidate {
 /// Resolve a token against the path it arrived on. The token names one
 /// participant of one poll; a URL whose handle or poll id disagrees with
 /// the row is somebody splicing capabilities onto other pages.
-fn resolve(
-    app: &Shared,
-    handle: &str,
-    poll_id: &str,
-    token: &str,
-) -> Option<(PollRow, String)> {
+fn resolve(app: &Shared, handle: &str, poll_id: &str, token: &str) -> Option<(PollRow, String)> {
     let user = match app.db.user_by_handle(handle) {
         Ok(Some(user)) if user.active() => user,
         _ => return None,
@@ -72,18 +67,12 @@ fn still_open(poll: &PollRow, now: chrono::DateTime<chrono::Utc>) -> bool {
             .unwrap_or(true)
 }
 
-fn render(
-    app: &Shared,
-    poll: &PollRow,
-    participant: &str,
-    notice: Option<String>,
-) -> Response {
+fn render(app: &Shared, poll: &PollRow, participant: &str, notice: Option<String>) -> Response {
     let Ok(tz) = poll.timezone.parse::<chrono_tz::Tz>() else {
         tracing::error!(poll = %poll.id, tz = %poll.timezone, "a poll with a bad zone");
         return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
     };
-    let stored: Vec<StoredCandidate> =
-        serde_json::from_str(&poll.candidates).unwrap_or_default();
+    let stored: Vec<StoredCandidate> = serde_json::from_str(&poll.candidates).unwrap_or_default();
     let others = app
         .db
         .poll_participants(&poll.user_id, &poll.id)
@@ -183,9 +172,9 @@ pub async fn page(
     let Some((poll, name)) = resolve(&app, &handle, &poll_id, &token) else {
         return nothing_here();
     };
-    let notice = query.saved.map(|_| {
-        "Saved. You can change your answers any time until the poll closes.".to_string()
-    });
+    let notice = query
+        .saved
+        .map(|_| "Saved. You can change your answers any time until the poll closes.".to_string());
     render(&app, &poll, &name, notice)
 }
 
@@ -221,8 +210,7 @@ pub async fn answer(
     }
 
     let raw = super::intake::form_values(&body);
-    let stored: Vec<StoredCandidate> =
-        serde_json::from_str(&poll.candidates).unwrap_or_default();
+    let stored: Vec<StoredCandidate> = serde_json::from_str(&poll.candidates).unwrap_or_default();
     let mut answers = serde_json::Map::new();
     for candidate in &stored {
         let key = format!(
@@ -243,10 +231,11 @@ pub async fn answer(
         answers.insert(key, answer.as_str().into());
     }
     let payload = serde_json::Value::Object(answers).to_string();
-    match app
-        .db
-        .poll_answer(&crate::intake::hash_token(&token), &payload, &crate::db::now())
-    {
+    match app.db.poll_answer(
+        &crate::intake::hash_token(&token),
+        &payload,
+        &crate::db::now(),
+    ) {
         Ok(true) if wants_json => StatusCode::NO_CONTENT.into_response(),
         Ok(true) => (
             StatusCode::SEE_OTHER,

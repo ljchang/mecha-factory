@@ -245,7 +245,12 @@ fn the_panel_signs_in_from_a_cli_minted_link_once() {
     let refused = admin_post(&server, "/v1/admin/signin", &tenant, serde_json::json!({}));
     assert_eq!(refused.status, 403, "{}", refused.body);
 
-    let minted = admin_post(&server, "/v1/admin/signin", &operator, serde_json::json!({}));
+    let minted = admin_post(
+        &server,
+        "/v1/admin/signin",
+        &operator,
+        serde_json::json!({}),
+    );
     assert_eq!(minted.status, 200);
     let url = minted.json()["url"].as_str().unwrap().to_string();
     let token = url.rsplit('/').next().unwrap().to_string();
@@ -458,7 +463,12 @@ fn the_panel_session_dies_with_its_key() {
         after.body
     );
     // And the dead key mints no more links.
-    let refused = admin_post(&server, "/v1/admin/signin", &operator, serde_json::json!({}));
+    let refused = admin_post(
+        &server,
+        "/v1/admin/signin",
+        &operator,
+        serde_json::json!({}),
+    );
     assert_eq!(refused.status, 401, "{}", refused.body);
 }
 

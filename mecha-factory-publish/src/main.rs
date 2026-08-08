@@ -1689,14 +1689,19 @@ fn polls_command(action: PollsAction) -> Result<()> {
                     ))
                 })
                 .collect();
-            let participants = tally["participants"].as_array().cloned().unwrap_or_default();
+            let participants = tally["participants"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
             let answers: Vec<std::collections::BTreeMap<String, PollAnswer>> = participants
                 .iter()
                 .filter_map(|p| p["answers"].as_object())
                 .map(|map| {
                     map.iter()
                         .filter_map(|(k, v)| {
-                            v.as_str().and_then(PollAnswer::parse).map(|a| (k.clone(), a))
+                            v.as_str()
+                                .and_then(PollAnswer::parse)
+                                .map(|a| (k.clone(), a))
                         })
                         .collect()
                 })
@@ -1760,7 +1765,11 @@ fn polls_command(action: PollsAction) -> Result<()> {
                 ),
                 None => println!(
                     "\nno clean winner{} — judgment call: pick from the ranking above",
-                    if responded < total { " yet (answers outstanding)" } else { "" }
+                    if responded < total {
+                        " yet (answers outstanding)"
+                    } else {
+                        ""
+                    }
                 ),
             }
         }

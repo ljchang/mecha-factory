@@ -431,7 +431,13 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
     // Pin the share URL to v1 so "live" and "latest" differ.
     server
         .db
-        .alias_set(&server.user.id, "switchable", Some(1), Visibility::Public, "t")
+        .alias_set(
+            &server.user.id,
+            "switchable",
+            Some(1),
+            Visibility::Public,
+            "t",
+        )
         .unwrap();
     let host = server.host(server.artifacts);
 
@@ -470,7 +476,10 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
     );
     assert!(gate_view.body.contains("<summary>Sign in</summary>"));
     assert!(!gate_view.body.contains("<summary>Manage</summary>"));
-    assert!(gate_view.body.contains("/view/alice/switchable/1"), "switcher");
+    assert!(
+        gate_view.body.contains("/view/alice/switchable/1"),
+        "switcher"
+    );
     let view_csp = gate_view.header("content-security-policy").unwrap();
     assert!(view_csp.contains("frame-src http://"), "{view_csp}");
     assert!(view_csp.contains("frame-ancestors 'none'"), "{view_csp}");
@@ -487,7 +496,13 @@ fn the_version_index_lists_what_a_reader_may_switch_between() {
     // existed.
     server
         .db
-        .alias_set(&server.user.id, "switchable", Some(1), Visibility::Private, "t")
+        .alias_set(
+            &server.user.id,
+            "switchable",
+            Some(1),
+            Visibility::Private,
+            "t",
+        )
         .unwrap();
     let hidden = get_host(server.artifacts, &host, "/b/switchable/v/", None);
     let absent = get_host(server.artifacts, &host, "/b/no-such-bundle/v/", None);

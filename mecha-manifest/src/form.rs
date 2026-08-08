@@ -295,7 +295,11 @@ impl RequestType {
         }
         body.push_str(&format!(
             "<button type=\"submit\">{}</button>\n</form>\n",
-            if any_required { "Upload and finish" } else { "Finish" }
+            if any_required {
+                "Upload and finish"
+            } else {
+                "Finish"
+            }
         ));
 
         let html = format!(

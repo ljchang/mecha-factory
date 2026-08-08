@@ -417,10 +417,7 @@ pub async fn two_seg(
     };
     (
         StatusCode::SEE_OTHER,
-        [(
-            header::LOCATION,
-            format!("/view/{handle}/{id}/{version}"),
-        )],
+        [(header::LOCATION, format!("/view/{handle}/{id}/{version}"))],
     )
         .into_response()
 }
@@ -432,14 +429,11 @@ fn visitor_email(
     session: &Option<(String, UserRow)>,
     reader: &Option<(String, String)>,
 ) -> Option<String> {
-    reader
-        .as_ref()
-        .map(|(_, email)| email.clone())
-        .or_else(|| {
-            session
-                .as_ref()
-                .map(|(_, user)| crate::intake::normalize_email(&user.email))
-        })
+    reader.as_ref().map(|(_, email)| email.clone()).or_else(|| {
+        session
+            .as_ref()
+            .map(|(_, user)| crate::intake::normalize_email(&user.email))
+    })
 }
 
 fn granted_email(
@@ -511,9 +505,7 @@ pub async fn view(
         None => (None, mecha_manifest::Visibility::Private),
     };
     let public = visibility == mecha_manifest::Visibility::Public;
-    let granted = !is_owner
-        && !public
-        && granted_email(&app, &owner.id, &id, &session, &reader);
+    let granted = !is_owner && !public && granted_email(&app, &owner.id, &id, &session, &reader);
     if !is_owner {
         let allowed = (public && live.is_some()) || (granted && Some(version) == live);
         if !allowed {
@@ -614,9 +606,7 @@ pub async fn view(
                      <button type=\"submit\">{label}</button></form>",
                     id = esc(&id),
                     version = ver
-                        .map(|v| format!(
-                            "<input type=\"hidden\" name=\"version\" value=\"{v}\">"
-                        ))
+                        .map(|v| format!("<input type=\"hidden\" name=\"version\" value=\"{v}\">"))
                         .unwrap_or_default(),
                 )
             };
@@ -632,11 +622,7 @@ pub async fn view(
             if public {
                 items.push_str(&form(live, "private", "Make private"));
             } else {
-                items.push_str(&form(
-                    live.or(Some(version)),
-                    "public",
-                    "Release publicly",
-                ));
+                items.push_str(&form(live.or(Some(version)), "public", "Release publicly"));
             }
             if live.is_some() {
                 items.push_str(&form(None, "private", "Take down"));

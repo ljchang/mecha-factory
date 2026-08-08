@@ -67,11 +67,7 @@ fn a_poll_collects_tristate_answers_behind_capabilities() {
     let page = server.get(server.gate, &format!("{priya_path}?saved=1"));
     assert!(page.body.contains("Saved."), "{}", page.body);
     assert!(page.body.contains("1 of 2 have answered"));
-    assert!(
-        page.body.contains("value=\"yes\" checked"),
-        "{}",
-        page.body
-    );
+    assert!(page.body.contains("value=\"yes\" checked"), "{}", page.body);
 
     // Tal's page shows Priya's heat, not her identity.
     let tal = urls["Tal"].as_str().unwrap().to_string();
@@ -83,7 +79,10 @@ fn a_poll_collects_tristate_answers_behind_capabilities() {
         "one of two yeses shades the cell: {}",
         page.body
     );
-    assert!(!page.body.contains("Priya"), "names are not each other's business");
+    assert!(
+        !page.body.contains("Priya"),
+        "names are not each other's business"
+    );
 
     // Home reads the tally, typed.
     let reply = Request::new("GET", "/v1/instruments/book/polls/lab-feb", &gate)
@@ -167,7 +166,9 @@ fn wrong_doors_and_bad_pushes_answer_nothing() {
         404
     );
     assert_eq!(
-        server.get(server.gate, "/p/alice/lab-feb/not-a-token").status,
+        server
+            .get(server.gate, "/p/alice/lab-feb/not-a-token")
+            .status,
         404
     );
 

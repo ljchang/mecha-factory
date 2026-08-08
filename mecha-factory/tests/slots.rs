@@ -84,7 +84,11 @@ fn every_other_scope_is_refused_and_so_is_no_key() {
         .send(server.gate);
     assert_eq!(reply.status, 401);
     assert!(
-        server.db.slots_get(&server.user.id, "book").unwrap().is_none(),
+        server
+            .db
+            .slots_get(&server.user.id, "book")
+            .unwrap()
+            .is_none(),
         "nothing may have landed"
     );
 }
@@ -123,15 +127,13 @@ fn a_push_that_disagrees_with_itself_is_refused() {
     assert_eq!(reply.status, 400);
 
     // A field this code never looked at must not ride into the ledger.
-    let reply = put(
-        serde_json::json!({
-            "generated_at": "2026-08-08T12:00:00Z",
-            "horizon_days": 60,
-            "slots": [],
-            "note": "<script>alert(1)</script>",
-        })
-        .to_string(),
-    );
+    let reply = put(serde_json::json!({
+        "generated_at": "2026-08-08T12:00:00Z",
+        "horizon_days": 60,
+        "slots": [],
+        "note": "<script>alert(1)</script>",
+    })
+    .to_string());
     assert_eq!(reply.status, 400, "{}", reply.body);
 
     // An id that is not an id.
@@ -142,7 +144,11 @@ fn a_push_that_disagrees_with_itself_is_refused() {
     assert_eq!(reply.status, 400);
 
     assert!(
-        server.db.slots_get(&server.user.id, "book").unwrap().is_none(),
+        server
+            .db
+            .slots_get(&server.user.id, "book")
+            .unwrap()
+            .is_none(),
         "no refused push may leave a row"
     );
 }
@@ -168,7 +174,11 @@ fn slot_caches_are_tenant_scoped() {
 
     assert!(server.db.slots_get(&bob.id, "book").unwrap().is_some());
     assert!(
-        server.db.slots_get(&server.user.id, "book").unwrap().is_none(),
+        server
+            .db
+            .slots_get(&server.user.id, "book")
+            .unwrap()
+            .is_none(),
         "bob's push may not appear under alice"
     );
 }
