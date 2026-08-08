@@ -25,6 +25,11 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TARGET: x86_64-unknown-linux-musl
+  # Static is the contract, so it is stated rather than inherited: the musl
+  # target's crt-static default is toolchain policy that can move under us —
+  # and the first verified run of this workflow (v0.1.0) proved it had,
+  # producing a dynamically linked binary the guard below refused.
+  RUSTFLAGS: -C target-feature=+crt-static
 
 permissions:
   contents: write
@@ -51,7 +56,8 @@ jobs:
         run: |
           set -euo pipefail
           BIN="target/$TARGET/release/factory"
-          file "$BIN" | grep -q "statically linked" || {
+          file "$BIN"
+          file "$BIN" | grep -Eq "statically linked|static-pie linked" || {
             echo "refusing: $BIN is not statically linked" >&2; exit 1; }
           "$BIN" --help >/dev/null
 
