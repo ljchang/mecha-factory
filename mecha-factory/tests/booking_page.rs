@@ -410,3 +410,91 @@ fn the_click_books_and_a_lapsed_hold_never_drains() {
         "only round one's booking is in the queue — the lapsed one is gone"
     );
 }
+
+/// The manage link, in every state it answers: active cancels once and
+/// frees the slot, the cancellation queues a machinery record for home,
+/// "already cancelled" tells the truth, and a spliced or stale token gets
+/// a branded page with a way forward, never a bare 404.
+#[test]
+fn the_manage_link_cancels_once_and_answers_every_state_honestly() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let reply = Request::new("PUT", "/v1/types/book", &gate)
+        .auth(&server.key(Scope::Release))
+        .body(BOOK_TOML.as_bytes().to_vec())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (push, stamp) = future_slot_push();
+    let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    // Book it, outside-in.
+    let form = format!(
+        "_slot={}%7C30&requester_name=Priya&requester_email=priya%40example.edu",
+        stamp.replace(':', "%3A")
+    );
+    let reply = Request::new("POST", "/s/alice/book", &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let token = server.verification_token();
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    // The manage URL travels in the drained payload; use it as home would.
+    let drained = server.db.drain(&server.user.id, 0, 10).unwrap();
+    let payload: serde_json::Value =
+        serde_json::from_str(drained[0].payload.as_str()).unwrap();
+    let manage_url = payload["_manage_url"].as_str().unwrap();
+    let manage_path = &manage_url[manage_url.find("/s/").unwrap()..];
+
+    // GET states without mutating: the booking survives a scanner's fetch.
+    let page = server.get(server.gate, manage_path);
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("Cancel this booking"), "{}", page.body);
+
+    // The slot is off the week while booked.
+    let week = server.get(server.gate, "/s/alice/book");
+    assert!(!week.body.contains("_slot\" value"), "booked = gone");
+
+    // POST cancels: the slot returns, and home is owed a machinery record.
+    let before = server.db.queue_depth(Some(&server.user.id)).unwrap();
+    let reply = Request::new("POST", manage_path, &gate).send(server.gate);
+    assert_eq!(reply.status, 200);
+    assert!(reply.body.contains("Cancelled"), "{}", reply.body);
+    let week = server.get(server.gate, "/s/alice/book");
+    assert!(
+        week.body.contains("_slot\" value"),
+        "a cancelled slot is bookable again: {}",
+        week.body
+    );
+    let rows = server.db.drain(&server.user.id, 0, 10).unwrap();
+    assert_eq!(
+        server.db.queue_depth(Some(&server.user.id)).unwrap(),
+        before + 1,
+        "the cancellation queued"
+    );
+    let cancel: serde_json::Value =
+        serde_json::from_str(rows.last().unwrap().payload.as_str()).unwrap();
+    assert_eq!(cancel["_cancelled"], serde_json::json!(true));
+    assert_eq!(cancel["_booking_id"], payload["_booking_id"]);
+
+    // A second POST finds "already cancelled" and queues nothing more.
+    let reply = Request::new("POST", manage_path, &gate).send(server.gate);
+    assert!(reply.body.contains("Already cancelled"), "{}", reply.body);
+    assert_eq!(
+        server.db.queue_depth(Some(&server.user.id)).unwrap(),
+        before + 1,
+        "cancel is once"
+    );
+
+    // A dead token: branded, with a way forward.
+    let reply = server.get(server.gate, "/s/alice/book/m/not-a-token");
+    assert_eq!(reply.status, 404);
+    assert!(reply.body.contains("no longer valid"), "{}", reply.body);
+}

@@ -320,6 +320,16 @@ pub fn record_from(row: &Value, now: &str) -> Record {
     let mut fields_only = raw.clone();
     fields_only.retain(|k, _| !k.starts_with('_'));
 
+    // A payload that is *nothing but* machinery — a cancellation record —
+    // has no stranger fields, so there is nothing for the manifest to
+    // validate and no prose to sweep: valid by construction, empty
+    // free_text, no reply address. Validation exists to check what a
+    // stranger typed; here nobody typed anything.
+    if fields_only.is_empty() && !raw.is_empty() {
+        record.valid = true;
+        return record;
+    }
+
     match local_type(&type_id) {
         Ok(Some(request_type)) => match request_type.validate(&fields_only) {
             Ok(mut submission) => {

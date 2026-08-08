@@ -1506,6 +1506,37 @@ impl Db {
         })
     }
 
+    /// The booking a manage token names, by the hash of what was presented —
+    /// the stored value is a verifier, like every credential on the box.
+    pub fn booking_by_manage(&self, manage_hash: &str) -> Result<Option<BookingRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT id FROM bookings WHERE manage_hash = ?1",
+                    params![manage_hash],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?)
+        })
+        .and_then(|id| match id {
+            Some(id) => self.booking_get(&id),
+            None => Ok(None),
+        })
+    }
+
+    /// Cancel a confirmed booking. Only `confirmed` cancels — a second click
+    /// finds no transition and answers `false`, which the page renders as
+    /// "already cancelled" rather than as a second cancellation record.
+    pub fn booking_cancel(&self, id: &str, state: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let updated = conn.execute(
+                "UPDATE bookings SET state = ?2, cancelled_at = ?3                  WHERE id = ?1 AND state = 'confirmed'",
+                params![id, state, now],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
     pub fn booking_get(&self, id: &str) -> Result<Option<BookingRow>> {
         self.with(|conn| {
             Ok(conn

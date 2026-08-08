@@ -178,6 +178,12 @@ pub fn router(app: Shared) -> Router {
             "/s/{handle}/{type_id}/c/{token}",
             get(booking::confirm_page).post(booking::confirm),
         )
+        // The cancel capability from the invite. GET states, POST cancels —
+        // scanners follow GETs.
+        .route(
+            "/s/{handle}/{type_id}/m/{token}",
+            get(booking::manage_page).post(booking::manage_cancel),
+        )
         // GET is a page with a button and POST is the verification, because
         // mail scanners follow GETs — see `intake::confirm_page`.
         .route(

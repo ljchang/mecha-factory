@@ -591,3 +591,244 @@ fn booking_when(parsed: &RequestType, booking: &crate::db::BookingRow) -> String
         policy.timezone
     )
 }
+
+/// What one manage link may currently do, derived from the row and the
+/// clock — the states the incumbents' support forums are full of fumbling,
+/// each answered honestly.
+enum ManageState {
+    /// Cancellable now.
+    Active,
+    /// Confirmed, but inside the cancellation cutoff.
+    InsideCutoff(u32),
+    /// The meeting already happened (or started).
+    Past,
+    /// Already cancelled.
+    Cancelled,
+}
+
+fn manage_state(
+    parsed: &RequestType,
+    booking: &crate::db::BookingRow,
+    now: chrono::DateTime<chrono::Utc>,
+) -> ManageState {
+    if booking.state.starts_with("cancelled") {
+        return ManageState::Cancelled;
+    }
+    let start = chrono::DateTime::parse_from_rfc3339(&booking.slot_start)
+        .map(|t| t.with_timezone(&chrono::Utc));
+    let Ok(start) = start else {
+        // An unparseable row cannot be reasoned about; "past" offers no
+        // action, which is the safe answer.
+        return ManageState::Past;
+    };
+    if start <= now {
+        return ManageState::Past;
+    }
+    let cutoff = parsed.booking_policy().cancel_cutoff_hours;
+    if start - now < chrono::Duration::hours(i64::from(cutoff)) {
+        return ManageState::InsideCutoff(cutoff);
+    }
+    ManageState::Active
+}
+
+/// The manage page body for a state. The POST is rendered only when it
+/// would work; everything else explains itself and offers the booking page.
+fn manage_body(
+    parsed: &RequestType,
+    booking: &crate::db::BookingRow,
+    state: &ManageState,
+    handle: &str,
+    id: &str,
+) -> String {
+    let when = booking_when(parsed, booking);
+    match state {
+        ManageState::Active => format!(
+            "<h1>Your booking</h1>\n{when}\
+             <p>If your plans have changed, you can cancel this meeting. The \
+             time goes back to being bookable, and the calendar event is \
+             withdrawn.</p>\
+             <form method=\"post\"><button type=\"submit\">Cancel this booking</button></form>"
+        ),
+        ManageState::InsideCutoff(hours) => format!(
+            "<h1>Your booking</h1>\n{when}\
+             <p>This meeting starts within {hours} hour(s), which is inside \
+             the cancellation window — it can no longer be cancelled here. \
+             If you cannot make it, please reply to your confirmation email \
+             directly.</p>"
+        ),
+        ManageState::Past => format!(
+            "<h1>This meeting has already happened</h1>\n{when}\
+             <p>There is nothing to change. <a href=\"/s/{handle}/{id}\">Book \
+             a new time</a> if you would like another.</p>"
+        ),
+        ManageState::Cancelled => format!(
+            "<h1>Already cancelled</h1>\n\
+             <p>This booking was cancelled and its time freed. \
+             <a href=\"/s/{handle}/{id}\">Book a new time</a> whenever you like.</p>"
+        ),
+    }
+}
+
+/// Resolve a manage token to its booking, and the type it belongs to. The
+/// dead-link answer is a branded page with a way forward, never a bare 404 —
+/// the one cheap win over every incumbent.
+fn resolve_manage(
+    app: &Shared,
+    handle: &str,
+    id: &str,
+    token: &str,
+) -> Result<(UserRow, RequestType, crate::db::BookingRow), Box<Response>> {
+    use super::intake;
+    let dead = || {
+        intake::page(
+            StatusCode::NOT_FOUND,
+            intake::shell(
+                "Link no longer valid",
+                &format!(
+                    "<h1>This link is no longer valid</h1>\
+                     <p>It may be from an older email. \
+                     <a href=\"/s/{handle}/{id}\">Book a time</a> if you need one.</p>"
+                ),
+                &format!("/s/{handle}/{id}/"),
+            ),
+        )
+    };
+    let Some((user, parsed)) = resolve(app, handle, id) else {
+        return Err(Box::new(dead()));
+    };
+    let booking = app
+        .db
+        .booking_by_manage(&crate::intake::hash_token(token))
+        .ok()
+        .flatten()
+        // The token names one booking; a URL whose path disagrees with the
+        // row is somebody splicing tokens onto other people's pages.
+        .filter(|b| b.user_id == user.id && b.instrument_id == id);
+    match booking {
+        Some(booking) => Ok((user, parsed, booking)),
+        None => Err(Box::new(dead())),
+    }
+}
+
+/// `GET /s/{handle}/{id}/m/{token}` — state, honestly, mutating nothing.
+/// Scanner-safe by construction: the destructive verb is the POST below.
+pub async fn manage_page(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, id, token)): Path<(String, String, String)>,
+) -> Response {
+    use super::intake;
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let (_, parsed, booking) = match resolve_manage(&app, &handle, &id, &token) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let state = manage_state(&parsed, &booking, chrono::Utc::now());
+    intake::page(
+        StatusCode::OK,
+        intake::shell(
+            &parsed.title,
+            &manage_body(&parsed, &booking, &state, &handle, &id),
+            &format!("/s/{handle}/{id}/"),
+        ),
+    )
+}
+
+/// `POST /s/{handle}/{id}/m/{token}` — the cancellation.
+///
+/// The transition only fires from `confirmed`, so a double-click cancels
+/// once; the freed slot is immediate (liveness is judged at query time);
+/// and the cancellation record queued for home is machinery-only — home
+/// deletes the calendar event through its ledger, and the provider mails
+/// the retraction. No model, no prose, nothing composed.
+pub async fn manage_cancel(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, id, token)): Path<(String, String, String)>,
+) -> Response {
+    use super::intake;
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let (user, parsed, booking) = match resolve_manage(&app, &handle, &id, &token) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    let now = chrono::Utc::now();
+    let state = manage_state(&parsed, &booking, now);
+    if !matches!(state, ManageState::Active) {
+        // The POST arrived where the button would not have rendered — a
+        // stale tab, a replay. The state page is the answer, not an error.
+        return intake::page(
+            StatusCode::OK,
+            intake::shell(
+                &parsed.title,
+                &manage_body(&parsed, &booking, &state, &handle, &id),
+                &format!("/s/{handle}/{id}/"),
+            ),
+        );
+    }
+    let now_stamp = crate::db::now();
+    match app
+        .db
+        .booking_cancel(&booking.id, "cancelled_by_booker", &now_stamp)
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            // Raced by another click; the row will say so.
+            return manage_page_redirect(&handle, &id, &token);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "cancelling a booking");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    // The record home turns into a calendar deletion. Machinery keys only:
+    // there is no stranger prose in a cancellation, and the drain side
+    // treats an all-machinery payload as valid by construction.
+    let payload = serde_json::json!({
+        "_booking_id": booking.id,
+        "_cancelled": true,
+        "_slot_start": booking.slot_start,
+        "_slot_end": booking.slot_end,
+    })
+    .to_string();
+    if let Err(e) = app.db.queue_add(
+        &user.id,
+        &id,
+        "queued",
+        &payload,
+        &now_stamp,
+        parsed.retain_days.map(crate::db::days_from_now).as_deref(),
+    ) {
+        // The slot is freed regardless; the calendar copy is now stale until
+        // someone notices. Loud, because this is the one path where the two
+        // ledgers can drift.
+        tracing::error!(error = %e, booking = %booking.id, "queueing a cancellation");
+    }
+    tracing::info!(handle = %user.handle, %id, booking = %booking.id, "cancelled by booker");
+    intake::page(
+        StatusCode::OK,
+        intake::shell(
+            &parsed.title,
+            &format!(
+                "<h1>Cancelled</h1>\
+                 <p>Your booking is cancelled and the time has been freed. \
+                 The calendar invite will be withdrawn shortly. \
+                 <a href=\"/s/{handle}/{id}\">Book a new time</a> any time.</p>"
+            ),
+            &format!("/s/{handle}/{id}/"),
+        ),
+    )
+}
+
+fn manage_page_redirect(handle: &str, id: &str, token: &str) -> Response {
+    (
+        StatusCode::SEE_OTHER,
+        [(header::LOCATION, format!("/s/{handle}/{id}/m/{token}"))],
+    )
+        .into_response()
+}
