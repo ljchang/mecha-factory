@@ -2475,12 +2475,7 @@ impl Db {
     /// keep the stored one when `None` — the caller could not build it, and
     /// a record that never drains is worse than one missing a nicety) and
     /// make the row drainable. This is the moment a long-polled drain wakes.
-    pub fn queue_release(
-        &self,
-        user_id: &str,
-        seq: i64,
-        payload: Option<&str>,
-    ) -> Result<bool> {
+    pub fn queue_release(&self, user_id: &str, seq: i64, payload: Option<&str>) -> Result<bool> {
         let released = self.with(|conn| {
             let changed = conn.execute(
                 "UPDATE queue SET state = 'queued', \
