@@ -617,3 +617,33 @@ endpoint owes anyone.
   — but the ledger and the queue are only here. A nightly `sqlite3 .backup` of
   `factory.db` off the box is worth having before there is anything in the queue
   you would miss.
+
+## The scheduling instrument, once the box is up
+
+The booking page and the group poll need four things beyond the base
+deployment, all home-side except the first:
+
+1. **A slots key.** On the box: `factory --config … key create --handle
+   <you> --scope slots`, installed at `~/.mecha/factory/slots.key` (0600)
+   at home. The narrowest credential the box knows: it can replace an
+   instrument's slot cache and run its polls, nothing else — sized for the
+   systemd timer it lives beside.
+2. **The booking type.** `factory-publish type push
+   mecha-manifest/types/book.toml` (edit the windows first — they are your
+   week). The page is then live at `https://<gate>/s/<handle>/book`,
+   honestly empty until the first slot push.
+3. **The availability policy at home.** The `[availability]` section of the
+   same book.toml, as `~/.mecha/instruments/book-policy.toml` — the slot
+   pipeline reads the file, not the box.
+4. **The two user timers.** `mecha-slots.{service,timer}` (the 15-minute
+   slot refresh + booking sweep) and the existing frontdoor timer. Both:
+   `cp scripts/mecha-slots.* ~/.config/systemd/user/ && systemctl --user
+   daemon-reload && systemctl --user enable --now mecha-slots.timer`.
+
+Then book a slot yourself, end to end, before sending the link to anyone:
+the confirmation invite should arrive from your own mailbox, the manage
+link in its description should cancel, and the withdrawal should follow.
+Polls: `mecha-mail freebusy --days 60 --json | factory-publish polls create
+book <id> --policy … --title … --duration 60 --participant "Name=email"`,
+send each person their URL, watch `polls status`, and book the winner when
+it names one.
