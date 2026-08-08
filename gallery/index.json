@@ -75,7 +75,19 @@
       "renderings": [
         {
           "file": "book.html",
-          "label": "the form"
+          "label": "the week"
+        },
+        {
+          "file": "book.week-1.html",
+          "label": "1 week(s) on"
+        },
+        {
+          "file": "book.errors.html",
+          "label": "rejected, with errors"
+        },
+        {
+          "file": "book.poll.html",
+          "label": "poll: one participant"
         }
       ],
       "schema": "schema/book.json",

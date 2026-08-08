@@ -28,12 +28,33 @@
 //! The error states are **produced by the validator**, not typed out. A gallery
 //! showing invented error text would document a form nobody is ever served.
 
+use chrono::{DateTime, Duration, Utc};
+use mecha_manifest::availability::{availability, Interval, Slot};
 use mecha_manifest::{escape_text, FieldKind, FormOptions, Phase, RequestType, Theme};
-use mecha_manifest::{BUILT_IN_THEMES, MAX_FILE_BYTES_PER_TYPE};
+use mecha_manifest::{poll_page, BookingOptions, PollAnswer, PollCandidate, PollPageOptions};
+use mecha_manifest::{RequestKind, BUILT_IN_THEMES, MAX_FILE_BYTES_PER_TYPE};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// The gallery's clock.
+///
+/// **Hardcoded, and it has to be.** `gallery/` is a committed golden file
+/// diffed in CI, so a page rendered against the real clock would differ from
+/// the committed one every single day and the drift check would cry wolf until
+/// somebody deleted it. Booking is the first surface here that has a time at
+/// all, and it is exactly the surface where that trap is easiest to fall into.
+///
+/// A Monday, 09:00 in `book.toml`'s `America/New_York`, chosen so the
+/// starter's 24-hour minimum notice lands inside the same week and the first
+/// rendered week has slots in it rather than being an honest but useless
+/// empty grid.
+const NOW: &str = "2026-03-02T14:00:00Z";
+
+fn now() -> DateTime<Utc> {
+    NOW.parse().expect("the gallery's clock is a literal")
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out: PathBuf = std::env::args()
@@ -65,8 +86,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let dir = out.join(theme.name);
         fs::create_dir_all(&dir)?;
         let mut assets_written = false;
+        let mut booking_assets_written = false;
         for entry in &entries {
             for variant in entry.variants() {
+                if variant.is_booking() {
+                    let page = render_booking(entry, &variant, theme)?;
+                    fs::write(dir.join(variant.file_name(entry)), &page.html)?;
+                    pages += 1;
+                    if !booking_assets_written {
+                        for (name, contents) in page.assets() {
+                            fs::write(dir.join(name), contents)?;
+                        }
+                        booking_assets_written = true;
+                    }
+                    continue;
+                }
                 let options = FormOptions {
                     // Inert on purpose. The gallery is static, so nothing here
                     // posts anywhere; what a submit click does demonstrate is
@@ -141,10 +175,40 @@ enum Variant {
     Upload,
     /// One page of a multi-step form, which is how a step is really served.
     Step(String),
+    /// The week view of a `kind = "booking"` type. `weeks` pages forward from
+    /// the first week holding a slot, which is what a "next week" link does.
+    Booking { weeks: i64 },
+    /// A booking page re-served with the details form rejected.
+    ///
+    /// The one variant here that is **not** a state the box reaches today:
+    /// `booking_page` renders `values` and `errors`, but both server callers
+    /// pass `BookingOptions::default()`, so a failed POST currently gets the
+    /// week back with a one-line notice instead (`http/booking.rs`, which says
+    /// so). Rendered anyway, because it is what the POST path is growing into
+    /// and seeing it is how the two remaining gaps became visible — the
+    /// summary lists raw field *names* where the form's own summary lists
+    /// labels, and no `_slot` radio comes back checked, so a visitor who
+    /// mistypes an address loses the time they picked.
+    BookingErrors,
+    /// The poll page: the same weekly frame over seeded candidates, each a
+    /// tri-state answer.
+    Poll,
 }
 
 impl Entry {
     fn variants(&self) -> Vec<Variant> {
+        // A booking type is never served as a plain form — the details fields
+        // exist only beside the week view — so the gallery does not render one
+        // either. Every variant here is a state the box actually reaches.
+        if self.request.kind == RequestKind::Booking {
+            return vec![
+                Variant::Booking { weeks: 0 },
+                Variant::Booking { weeks: 1 },
+                Variant::BookingErrors,
+                Variant::Poll,
+            ];
+        }
+
         let mut out = vec![Variant::Plain];
         if self.bad_submission.is_some() {
             out.push(Variant::Errors);
@@ -171,23 +235,45 @@ impl Variant {
             Variant::Errors => format!("{}.errors.html", entry.id),
             Variant::Upload => format!("{}.upload.html", entry.id),
             Variant::Step(id) => format!("{}.step-{id}.html", entry.id),
+            Variant::Booking { weeks: 0 } => format!("{}.html", entry.id),
+            Variant::Booking { weeks } => format!("{}.week-{weeks}.html", entry.id),
+            Variant::BookingErrors => format!("{}.errors.html", entry.id),
+            Variant::Poll => format!("{}.poll.html", entry.id),
         }
     }
 
     fn label(&self) -> String {
         match self {
             Variant::Plain => "the form".into(),
-            Variant::Errors => "rejected, with errors".into(),
+            Variant::Errors | Variant::BookingErrors => "rejected, with errors".into(),
             Variant::Upload => "upload page".into(),
             Variant::Step(id) => format!("step: {id}"),
+            Variant::Booking { weeks: 0 } => "the week".into(),
+            Variant::Booking { weeks } => format!("{weeks} week(s) on"),
+            Variant::Poll => "poll: one participant".into(),
         }
+    }
+
+    /// Whether this variant renders through the booking machinery, which has
+    /// its own options type and its own three assets.
+    fn is_booking(&self) -> bool {
+        matches!(
+            self,
+            Variant::Booking { .. } | Variant::BookingErrors | Variant::Poll
+        )
     }
 
     /// The parts of [`FormOptions`] this variant owns. The caller fills in the
     /// theme and the asset prefix, which are the same for every page.
     fn options(&self, entry: &Entry) -> FormOptions {
         match self {
-            Variant::Plain | Variant::Upload => FormOptions::default(),
+            // Booking variants carry their own options type; the caller
+            // branches before it gets here.
+            Variant::Plain
+            | Variant::Upload
+            | Variant::Booking { .. }
+            | Variant::BookingErrors
+            | Variant::Poll => FormOptions::default(),
             Variant::Step(id) => FormOptions {
                 step: Some(id.clone()),
                 ..FormOptions::default()
@@ -221,6 +307,149 @@ impl Variant {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Booking
+// ---------------------------------------------------------------------------
+
+/// The slots the gallery's booking pages offer.
+///
+/// Run through the **real engine** against the starter's own `[availability]`,
+/// rather than made up: a hand-written week would show a layout nobody's
+/// policy produces, and the interesting parts of this page — a day missing
+/// because its cap is met, two durations sharing a start, a gap where
+/// something is already booked — are what the engine does, not what a
+/// designer would draw.
+fn gallery_slots(request: &RequestType) -> Result<Vec<Slot>, Box<dyn std::error::Error>> {
+    let policy = request
+        .availability_policy()
+        .ok_or("the booking starter has no [availability]")??;
+
+    // Two commitments in the first offerable week, so the page shows what a
+    // real calendar does to it: one afternoon loses its middle, and the buffer
+    // eats a little more than the meeting itself.
+    let busy = |day: &str, from: &str, to: &str| -> Result<Interval, Box<dyn std::error::Error>> {
+        Ok(Interval {
+            start: format!("{day}T{from}:00Z").parse()?,
+            end: format!("{day}T{to}:00Z").parse()?,
+        })
+    };
+    let busy = vec![
+        busy("2026-03-03", "19:00", "20:00")?, // Tue 14:00–15:00 New York
+        busy("2026-03-05", "18:30", "19:30")?, // Thu 13:30–14:30 New York
+    ];
+
+    Ok(availability(&policy, &busy, &[], &[], now()))
+}
+
+/// Render one booking-shaped page.
+fn render_booking(
+    entry: &Entry,
+    variant: &Variant,
+    theme: Theme,
+) -> Result<mecha_manifest::BookingPage, Box<dyn std::error::Error>> {
+    let slots = gallery_slots(&entry.request)?;
+    let policy = entry
+        .request
+        .availability_policy()
+        .ok_or("not a booking manifest")??;
+
+    if let Variant::Poll = variant {
+        // A poll is seeded from what the organizer could actually offer, so
+        // the candidates are drawn from the same engine output rather than
+        // from a blank 7×24 grid. Three answered, one not: the read of this
+        // page is the pattern across a row, and a uniform one shows nothing.
+        let answers = [
+            Some(PollAnswer::Yes),
+            Some(PollAnswer::IfNeeded),
+            None,
+            Some(PollAnswer::No),
+            Some(PollAnswer::Yes),
+        ];
+        let candidates: Vec<PollCandidate> = slots
+            .iter()
+            .filter(|s| s.duration_minutes == 60)
+            .take(answers.len())
+            .zip(answers)
+            .enumerate()
+            .map(|(i, (slot, mine))| PollCandidate {
+                start: slot.start,
+                end: slot.end,
+                duration_minutes: slot.duration_minutes,
+                mine,
+                // Fixed rather than random: a golden file cannot roll dice.
+                yes_count: [4, 2, 3, 0, 1][i],
+            })
+            .collect();
+        return Ok(poll_page(
+            &candidates,
+            &PollPageOptions {
+                title: "When can we all meet?".into(),
+                participant: "Dana".into(),
+                timezone: policy.timezone,
+                action: "#".into(),
+                assets: String::new(),
+                theme,
+                deadline_local: Some("Friday 6pm".into()),
+                responded: 3,
+                total: 5,
+                open: true,
+                notice: None,
+            },
+        ));
+    }
+
+    let first_week = slots
+        .first()
+        .map(|s| mecha_manifest::week_of(s.start.with_timezone(&policy.timezone).date_naive()));
+    let (weeks, values, errors) = match variant {
+        Variant::Booking { weeks } => (*weeks, Map::new(), Vec::new()),
+        // The slot the stranger picked rides back with the rejection. Losing
+        // it would mean re-choosing a time because a name was too long.
+        Variant::BookingErrors => {
+            let mut values = Map::new();
+            values.insert("requester_name".into(), json!("Sam"));
+            values.insert("requester_email".into(), json!("sam@example"));
+            // Validate the manifest's own fields, then add the chosen slot for
+            // rendering. `_slot` is the page's machinery key, not a field, and
+            // handing it to the validator would manufacture an error the box
+            // never produces — the server keeps the two apart for this reason.
+            let errors = entry
+                .request
+                .validate_at(&values, Phase::Submit)
+                .err()
+                .unwrap_or_default();
+            if let Some(slot) = slots.first() {
+                values.insert(
+                    "_slot".into(),
+                    json!(format!(
+                        "{}|{}",
+                        slot.start
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        slot.duration_minutes
+                    )),
+                );
+            }
+            (0, values, errors)
+        }
+        _ => unreachable!("render_booking is only called for booking variants"),
+    };
+
+    let page = entry.request.booking_page(
+        &slots,
+        &BookingOptions {
+            action: "#".into(),
+            assets: String::new(),
+            theme,
+            now: now(),
+            week: first_week.map(|w| w + Duration::days(7 * weeks)),
+            values,
+            errors,
+            stale_notice: None,
+        },
+    )?;
+    Ok(page)
 }
 
 // ---------------------------------------------------------------------------

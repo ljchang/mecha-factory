@@ -12,6 +12,10 @@
 <main class="booking">
 <h1>Book a meeting</h1>
 <p class="intro">Pick a time that works; you&#39;ll get a confirmation and a calendar invite.</p>
+<div class="errors" role="alert"><p>Some answers need attention:</p><ul>
+<li>purpose: this is required</li>
+<li>requester_email: this does not look like an email address</li>
+</ul></div>
 <nav class="weeknav" aria-label="Week">
 <span></span>
 <span class="range">Mar 2 – Mar 8</span>
@@ -54,22 +58,24 @@
 <div class="details">
 <div class="field" data-field="requester_name">
 <label for="requester_name">Your name <span class="req" aria-hidden="true">*</span></label>
-<input type="text" id="requester_name" name="requester_name" maxlength="120" value="" required>
+<input type="text" id="requester_name" name="requester_name" maxlength="120" value="Sam" required>
 </div>
 <div class="field" data-field="requester_email">
 <label for="requester_email">Your email <span class="req" aria-hidden="true">*</span></label>
 <p class="help" id="requester_email-help">The confirmation, the calendar invite, and the link to cancel all go here.</p>
-<input type="email" id="requester_email" name="requester_email" maxlength="254" value="" required aria-describedby="requester_email-help">
+<input type="email" id="requester_email" name="requester_email" maxlength="254" value="sam@example" required aria-invalid="true" aria-describedby="requester_email-help requester_email-error">
+<p class="error" id="requester_email-error">this does not look like an email address</p>
 </div>
 <div class="field" data-field="purpose">
 <label for="purpose">What is this about? <span class="req" aria-hidden="true">*</span></label>
-<select id="purpose" name="purpose" required>
+<select id="purpose" name="purpose" required aria-invalid="true" aria-describedby="purpose-error">
 <option value="">Choose…</option>
 <option value="advising">Advising</option>
 <option value="research">Research / collaboration</option>
 <option value="office_hours">Office hours</option>
 <option value="other">Something else</option>
 </select>
+<p class="error" id="purpose-error">this is required</p>
 </div>
 <div class="field" data-field="topic">
 <label for="topic">Anything I should read or know beforehand?</label>
