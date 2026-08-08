@@ -324,8 +324,11 @@ impl Remote {
     /// A **pure read**: the box marks nothing, so a response that never
     /// arrives costs a repeat rather than a stranger's request. Which is the
     /// right way round — see [`Remote::ack`].
-    pub fn drain(&self, since: i64) -> Result<serde_json::Value> {
-        self.request("GET", &format!("/v1/queue?since={since}"), None)
+    /// `wait` holds the request open on the box for up to that many seconds,
+    /// answering the moment a record lands — the drain loop's whole trick.
+    /// Zero asks and answers immediately, which is every scheduled caller.
+    pub fn drain(&self, since: i64, wait: u64) -> Result<serde_json::Value> {
+        self.request("GET", &format!("/v1/queue?since={since}&wait={wait}"), None)
             .context("draining the queue")
     }
 

@@ -547,6 +547,111 @@ fn the_click_books_and_a_lapsed_hold_never_drains() {
     );
 }
 
+/// A record in `finalizing` does not exist as far as the drain is
+/// concerned — it becomes drainable exactly once, at release, fully
+/// formed. This is the ordering that keeps a long-polled drain from
+/// shipping a booking before its manage URL is written onto it.
+#[test]
+fn a_finalizing_record_is_invisible_until_released() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let seq = server
+        .db
+        .queue_add(
+            &server.user.id,
+            "book",
+            "finalizing",
+            "{\"draft\":true}",
+            &mecha_factory::db::now(),
+            None,
+        )
+        .unwrap();
+
+    let reply = Request::new("GET", "/v1/queue", &gate)
+        .auth(&server.key(Scope::Drain))
+        .send(server.gate);
+    assert_eq!(reply.status, 200);
+    assert_eq!(
+        reply.json()["records"].as_array().map(|r| r.len()),
+        Some(0),
+        "a finalizing record must not drain: {}",
+        reply.body
+    );
+
+    assert!(server
+        .db
+        .queue_release(&server.user.id, seq, Some("{\"final\":true}"))
+        .unwrap());
+    let reply = Request::new("GET", "/v1/queue", &gate)
+        .auth(&server.key(Scope::Drain))
+        .send(server.gate);
+    assert_eq!(reply.json()["records"][0]["payload"], "{\"final\":true}");
+    // Releasing twice is a no-op: the state moved.
+    assert!(!server.db.queue_release(&server.user.id, seq, None).unwrap());
+}
+
+/// `?wait=` holds the drain open and a record landing answers it early —
+/// the whole of "the invite follows the click by seconds", with the
+/// connection still initiated by home. An empty wait times out empty.
+#[test]
+fn a_waiting_drain_wakes_when_a_record_lands() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let addr = server.gate;
+    let key = server.key(Scope::Drain);
+
+    // Nothing queued: a short wait answers empty after roughly its wait,
+    // not instantly — proof it actually held the request.
+    let started = std::time::Instant::now();
+    let reply = Request::new("GET", "/v1/queue?wait=1", &gate)
+        .auth(&key)
+        .send(addr);
+    assert_eq!(reply.status, 200);
+    assert_eq!(reply.json()["records"].as_array().map(|r| r.len()), Some(0));
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "an empty wait=1 answered in {:?}",
+        started.elapsed()
+    );
+
+    // A record landing mid-wait answers the held request early.
+    let poller = {
+        let gate = gate.clone();
+        let key = key.clone();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let reply = Request::new("GET", "/v1/queue?wait=20", &gate)
+                .auth(&key)
+                .send(addr);
+            (reply, started.elapsed())
+        })
+    };
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    server
+        .db
+        .queue_add(
+            &server.user.id,
+            "book",
+            "queued",
+            "{}",
+            &mecha_factory::db::now(),
+            None,
+        )
+        .unwrap();
+    let (reply, elapsed) = poller.join().unwrap();
+    assert_eq!(reply.status, 200);
+    assert_eq!(
+        reply.json()["records"].as_array().map(|r| r.len()),
+        Some(1),
+        "{}",
+        reply.body
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(10),
+        "the wake beat the deadline by a mile, took {elapsed:?}"
+    );
+}
+
 /// The manage link, in every state it answers: active cancels once and
 /// frees the slot, the cancellation queues a machinery record for home,
 /// "already cancelled" tells the truth, and a spliced or stale token gets

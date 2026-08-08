@@ -31,6 +31,11 @@ const SCHEMA: i64 = 11;
 #[derive(Clone)]
 pub struct Db {
     conn: Arc<Mutex<Connection>>,
+    /// Woken whenever a row becomes drainable (`state = 'queued'`), which is
+    /// what lets `GET /v1/queue?wait=` answer the moment a record lands
+    /// instead of on the next poll. One signal for every tenant: a waiter
+    /// re-checks its own rows, and a spurious wake costs one SELECT.
+    queue_signal: Arc<tokio::sync::Notify>,
 }
 
 /// The one key id that is a name rather than random: the anchor row the
@@ -436,6 +441,15 @@ pub enum VerifyNext {
         upload_hash: String,
         upload_expires: String,
     },
+    /// Verified, but the caller still has machinery to write onto the
+    /// payload before the record is fit to leave — the booking confirm
+    /// mints its manage URL *after* converting the hold. `finalizing` is
+    /// invisible to `drain`, and [`Db::queue_release`] is the only way out:
+    /// a record becomes drainable exactly once, fully formed. Before this
+    /// state existed the gap was a 15-minute sweep wide and never hit; a
+    /// long-polled drain answers in milliseconds and would have shipped
+    /// every booking without its cancel link.
+    Finalizing,
 }
 
 impl Db {
@@ -455,6 +469,7 @@ impl Db {
         migrate(&conn).with_context(|| format!("migrating {}", path.display()))?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
+            queue_signal: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -463,12 +478,27 @@ impl Db {
         migrate(&conn)?;
         Ok(Db {
             conn: Arc::new(Mutex::new(conn)),
+            queue_signal: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
     fn with<T>(&self, f: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
         let conn = self.conn.lock().expect("the ledger lock is never poisoned");
         f(&conn)
+    }
+
+    /// The signal behind `GET /v1/queue?wait=`. Cloned by the handler so it
+    /// can register *before* its check of the table — registering after
+    /// would race a row landing in between and sleep through it.
+    pub fn queue_signal(&self) -> Arc<tokio::sync::Notify> {
+        Arc::clone(&self.queue_signal)
+    }
+
+    /// Called after any commit that made a row drainable. `notify_waiters`
+    /// wakes only currently-registered waiters and stores nothing, so calls
+    /// with nobody listening are free.
+    fn wake_drains(&self) {
+        self.queue_signal.notify_waiters();
     }
 
     // ---- users ----------------------------------------------------------
@@ -2060,14 +2090,18 @@ impl Db {
         now: &str,
         retain_until: Option<&str>,
     ) -> Result<i64> {
-        self.with(|conn| {
+        let seq = self.with(|conn| {
             conn.execute(
                 "INSERT INTO queue (user_id, type_id, state, payload, created_at, retain_until) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![user_id, type_id, state, payload, now, retain_until],
             )?;
             Ok(conn.last_insert_rowid())
-        })
+        })?;
+        if state == "queued" {
+            self.wake_drains();
+        }
+        Ok(seq)
     }
 
     /// Everything of this user's queued after `since`, oldest first.
@@ -2264,6 +2298,9 @@ impl Db {
                 params![payload, seq],
             )?;
             tx.commit()?;
+            if changed > 0 {
+                self.wake_drains();
+            }
             Ok((changed > 0).then_some(seq))
         })
     }
@@ -2412,6 +2449,11 @@ impl Db {
                      WHERE seq = ?1 AND state = 'submitted'",
                     params![row.seq, upload_hash, upload_expires],
                 )?,
+                VerifyNext::Finalizing => tx.execute(
+                    "UPDATE queue SET state = 'finalizing', verify_hash = NULL, \
+                     verify_expires = NULL WHERE seq = ?1 AND state = 'submitted'",
+                    params![row.seq],
+                )?,
             };
             tx.commit()?;
             if changed == 0 {
@@ -2420,9 +2462,38 @@ impl Db {
             row.state = match next {
                 VerifyNext::Queued => "queued".into(),
                 VerifyNext::AwaitingUpload { .. } => "awaiting_upload".into(),
+                VerifyNext::Finalizing => "finalizing".into(),
             };
+            if matches!(next, VerifyNext::Queued) {
+                self.wake_drains();
+            }
             Ok(Some(row))
         })
+    }
+
+    /// The only exit from `finalizing`: install the finished payload (or
+    /// keep the stored one when `None` — the caller could not build it, and
+    /// a record that never drains is worse than one missing a nicety) and
+    /// make the row drainable. This is the moment a long-polled drain wakes.
+    pub fn queue_release(
+        &self,
+        user_id: &str,
+        seq: i64,
+        payload: Option<&str>,
+    ) -> Result<bool> {
+        let released = self.with(|conn| {
+            let changed = conn.execute(
+                "UPDATE queue SET state = 'queued', \
+                 payload = COALESCE(?3, payload) \
+                 WHERE user_id = ?1 AND seq = ?2 AND state = 'finalizing'",
+                params![user_id, seq, payload],
+            )?;
+            Ok(changed == 1)
+        })?;
+        if released {
+            self.wake_drains();
+        }
+        Ok(released)
     }
 
     /// Verification sends today: to this recipient, and by this user.

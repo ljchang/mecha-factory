@@ -533,10 +533,16 @@ pub async fn confirm(
 
     let hash = crate::intake::hash_token(&token);
     let now = crate::db::now();
+    // `Finalizing`, not `Queued`: the manage URL is minted below, *after*
+    // the hold converts, and a drain must never see this record until it
+    // carries one. With the 15-minute sweep the gap never mattered; a
+    // long-polled drain answers in milliseconds and would ship the invite
+    // without its cancel link. The release below is what makes the record
+    // drainable — exactly once, fully formed.
     let verified =
         match app
             .db
-            .submission_verify(&user.id, &hash, &now, crate::db::VerifyNext::Queued)
+            .submission_verify(&user.id, &hash, &now, crate::db::VerifyNext::Finalizing)
         {
             Ok(Some(row)) => row,
             // One page for expired, spent, and never-existed alike — which it
@@ -614,6 +620,11 @@ pub async fn confirm(
     // it rides home in the payload with the other machinery keys, and the
     // invite home sends can carry it. Plaintext transits the queue briefly:
     // acceptable for a capability whose whole job is to travel in email.
+    // The release makes the record drainable; a payload that could not be
+    // built releases the stored one instead (the booking stands; only the
+    // cancel link is missing — loud, because a quiet miss here is a visitor
+    // with no way out), and a record left in `finalizing` would be worse
+    // than either: a booking home never hears about.
     {
         let mut values = values.clone();
         values.insert(
@@ -624,12 +635,26 @@ pub async fn confirm(
             )
             .into(),
         );
-        if let Ok(payload) = serde_json::to_string(&values) {
-            if let Err(e) = app.db.queue_set_payload(&user.id, verified.seq, &payload) {
-                // The booking stands; only the cancel link is missing from
-                // the invite. Loud, because a quiet miss here is a visitor
-                // with no way out.
-                tracing::error!(seq = verified.seq, error = %e, "storing the manage url");
+        let payload = serde_json::to_string(&values).ok();
+        match app
+            .db
+            .queue_release(&user.id, verified.seq, payload.as_deref())
+        {
+            Ok(true) if payload.is_some() => {}
+            Ok(true) => {
+                tracing::error!(seq = verified.seq, "released without the manage url");
+            }
+            Ok(false) => {
+                tracing::error!(seq = verified.seq, "a booking record was not in finalizing");
+            }
+            Err(e) => {
+                tracing::error!(seq = verified.seq, error = %e, "releasing a booking record");
+                // One more try with the stored payload before giving up
+                // loudly: better an invite without a cancel link than a
+                // meeting on nobody's calendar.
+                if let Err(e) = app.db.queue_release(&user.id, verified.seq, None) {
+                    tracing::error!(seq = verified.seq, error = %e, "record stuck in finalizing");
+                }
             }
         }
     }

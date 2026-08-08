@@ -900,15 +900,30 @@ pub struct DrainQuery {
     /// The highest sequence number home already holds.
     #[serde(default)]
     pub since: i64,
+    /// Seconds to hold the request open waiting for a record, capped at
+    /// [`DRAIN_WAIT_CAP_SECONDS`]. Absent or zero answers immediately, which
+    /// is what every existing caller gets. This is the whole of "instant"
+    /// invites: the connection is still initiated by home — the box only
+    /// ever answers — so the one-way property survives by inspection.
+    #[serde(default)]
+    pub wait: u64,
 }
 
-/// `GET /v1/queue?since={seq}` — take what has been verified and not yet
-/// acknowledged.
+/// The ceiling on `?wait=`. Under half a minute, so an idle connection never
+/// looks dead to anything between home and the box, and a shutdown never
+/// waits long for its handlers.
+const DRAIN_WAIT_CAP_SECONDS: u64 = 25;
+
+/// `GET /v1/queue?since={seq}&wait={s}` — take what has been verified and
+/// not yet acknowledged, waiting up to `wait` seconds for something to take.
 ///
 /// A pure read (see `Db::drain`). The records are not marked, so a response
 /// that never arrives costs nothing but a repeat — and repeating is correct,
 /// because the alternative is a stranger's request disappearing into a dropped
-/// connection.
+/// connection. The wait is a loop over exactly that read: register on the
+/// queue signal *before* checking (the other order sleeps through a record
+/// landing in between), check, and either answer or wait for a wake or the
+/// deadline. A wake for another tenant's record costs one re-check.
 pub async fn drain(
     State(app): State<Shared>,
     Extension(origin): Extension<Origin>,
@@ -922,10 +937,29 @@ pub async fn drain(
         Ok((_, user)) => user,
         Err(refusal) => return *refusal,
     };
-    match app
-        .db
-        .drain(&user.id, query.since, app.config.limits.drain_batch)
-    {
+    let deadline = std::time::Instant::now()
+        + std::time::Duration::from_secs(query.wait.min(DRAIN_WAIT_CAP_SECONDS));
+    let signal = app.db.queue_signal();
+    let rows = loop {
+        // `enable` is what registers for `notify_waiters` — a merely-created
+        // Notified future receives nothing, and registering only at the
+        // `.await` would sleep through a record landing during the check.
+        let mut woken = std::pin::pin!(signal.notified());
+        woken.as_mut().enable();
+        match app
+            .db
+            .drain(&user.id, query.since, app.config.limits.drain_batch)
+        {
+            Ok(rows) if rows.is_empty() && std::time::Instant::now() < deadline => {
+                tokio::select! {
+                    _ = &mut woken => {}
+                    _ = tokio::time::sleep_until(deadline.into()) => {}
+                }
+            }
+            other => break other,
+        }
+    };
+    match rows {
         Ok(rows) => {
             let mut records = Vec::with_capacity(rows.len());
             for row in &rows {

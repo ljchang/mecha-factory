@@ -240,6 +240,12 @@ enum Command {
         /// One JSON object, for a trigger's `if` rather than a human's eye.
         #[arg(long)]
         json: bool,
+        /// Hold the request open up to this many seconds, answering the
+        /// moment a record lands (the box caps it near 25). What lets a
+        /// loop over this command react in seconds while still never being
+        /// dialled by the box — home initiates every connection.
+        #[arg(long, default_value_t = 0)]
+        wait: u64,
     },
     /// An instrument's availability: computed here, served by the box.
     #[command(subcommand)]
@@ -570,7 +576,12 @@ fn main() -> Result<()> {
 
         Command::Disconnect => println!("{}", remote::disconnect()?),
 
-        Command::Drain { out, dry_run, json } => drain_command(out, dry_run, json)?,
+        Command::Drain {
+            out,
+            dry_run,
+            json,
+            wait,
+        } => drain_command(out, dry_run, json, wait)?,
         Command::Slots(SlotsAction::Push {
             id,
             policy,
@@ -1284,7 +1295,7 @@ fn fetch_blobs(
     Ok(())
 }
 
-fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> {
+fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool, wait: u64) -> Result<()> {
     use mecha_factory_publish::requests::{record_from, RequestStore};
 
     let Some(remote) = remote::Remote::configured_for(remote::Scope::Drain)? else {
@@ -1297,7 +1308,7 @@ fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool) -> Result<()> 
     // Always from zero. Acknowledgement is what removes a record, so a cursor
     // would only add a second idea of what home holds, and one that can drift
     // ahead of what was actually written.
-    let body = remote.drain(0)?;
+    let body = remote.drain(0, wait)?;
     let rows = body["records"].as_array().cloned().unwrap_or_default();
 
     if dry_run {
