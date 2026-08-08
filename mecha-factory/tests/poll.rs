@@ -77,7 +77,12 @@ fn a_poll_collects_tristate_answers_behind_capabilities() {
     let tal = urls["Tal"].as_str().unwrap().to_string();
     let tal_path = &tal[tal.find("/p/").unwrap()..];
     let page = server.get(server.gate, tal_path);
-    assert!(page.body.contains("1 yes"), "{}", page.body);
+    assert!(page.body.contains("1 of 2 yes"), "{}", page.body);
+    assert!(
+        page.body.contains("heat-3"),
+        "one of two yeses shades the cell: {}",
+        page.body
+    );
     assert!(!page.body.contains("Priya"), "names are not each other's business");
 
     // Home reads the tally, typed.
@@ -95,6 +100,15 @@ fn a_poll_collects_tristate_answers_behind_capabilities() {
         .unwrap();
     assert_eq!(priya_row["answers"]["2030-02-05T18:00:00Z|60"], "yes");
 
+    // An autosave (poll.js asking for JSON) is answered with a bare 204 —
+    // no redirect for a fetch to follow, nothing to render.
+    let reply = Request::new("POST", priya_path, &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .body("a_2030-02-05T18%3A00%3A00Z%7C60=yes".to_string())
+        .send(server.gate);
+    assert_eq!(reply.status, 204, "an autosave saves: {}", reply.body);
+
     // Close: answers freeze, the page says so, a late POST changes nothing.
     let reply = Request::new("POST", "/v1/instruments/book/polls/lab-feb/close", &gate)
         .auth(&server.key(Scope::Slots))
@@ -107,6 +121,13 @@ fn a_poll_collects_tristate_answers_behind_capabilities() {
         .body("a_2030-02-05T18%3A00%3A00Z%7C60=no".to_string())
         .send(server.gate);
     assert_eq!(reply.status, 200, "not a redirect: nothing was saved");
+    // The autosave shape of the same late POST is refused in a word.
+    let reply = Request::new("POST", priya_path, &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .body("a_2030-02-05T18%3A00%3A00Z%7C60=no".to_string())
+        .send(server.gate);
+    assert_eq!(reply.status, 409, "a closed poll tells the script plainly");
     let reply = Request::new("GET", "/v1/instruments/book/polls/lab-feb", &gate)
         .auth(&server.key(Scope::Slots))
         .send(server.gate);

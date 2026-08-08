@@ -16,39 +16,41 @@
 <p class="zone" id="zone-note">Times are shown in America/New_York.</p>
 <form method="post" action="#">
 <div class="week poll" role="group" aria-label="Candidate times">
-<section class="day"><h2>Tue Mar 3</h2>
-<fieldset class="slot answer"><legend><span class="when" data-utc="2026-03-03T20:30:00Z">3:30 pm</span> · 60 min <span class="mins">4 yes</span></legend>
+<section class="day"><h2><span class="dow">Tue</span> <span class="date">Mar 3</span></h2>
+<fieldset class="slot answer heat-4"><legend><span class="when" data-utc="2026-03-03T20:30:00Z">3:30 pm</span> <span class="len">· 60 min</span> <span class="count">4 of 5 yes</span></legend>
 <label class="tri"><input type="radio" name="a_2026-03-03T20:30:00Z|60" value="yes" checked> yes</label>
 <label class="tri"><input type="radio" name="a_2026-03-03T20:30:00Z|60" value="if_needed"> if needed</label>
 <label class="tri"><input type="radio" name="a_2026-03-03T20:30:00Z|60" value="no"> no</label>
 </fieldset>
-<fieldset class="slot answer"><legend><span class="when" data-utc="2026-03-03T21:00:00Z">4:00 pm</span> · 60 min <span class="mins">2 yes</span></legend>
+<fieldset class="slot answer heat-2"><legend><span class="when" data-utc="2026-03-03T21:00:00Z">4:00 pm</span> <span class="len">· 60 min</span> <span class="count">2 of 5 yes</span></legend>
 <label class="tri"><input type="radio" name="a_2026-03-03T21:00:00Z|60" value="yes"> yes</label>
 <label class="tri"><input type="radio" name="a_2026-03-03T21:00:00Z|60" value="if_needed" checked> if needed</label>
 <label class="tri"><input type="radio" name="a_2026-03-03T21:00:00Z|60" value="no"> no</label>
 </fieldset>
 </section>
-<section class="day"><h2>Wed Mar 4</h2>
-<fieldset class="slot answer"><legend><span class="when" data-utc="2026-03-04T14:00:00Z">9:00 am</span> · 60 min <span class="mins">3 yes</span></legend>
+<section class="day"><h2><span class="dow">Wed</span> <span class="date">Mar 4</span></h2>
+<fieldset class="slot answer heat-3"><legend><span class="when" data-utc="2026-03-04T14:00:00Z">9:00 am</span> <span class="len">· 60 min</span> <span class="count">3 of 5 yes</span></legend>
 <label class="tri"><input type="radio" name="a_2026-03-04T14:00:00Z|60" value="yes"> yes</label>
 <label class="tri"><input type="radio" name="a_2026-03-04T14:00:00Z|60" value="if_needed"> if needed</label>
 <label class="tri"><input type="radio" name="a_2026-03-04T14:00:00Z|60" value="no" checked> no</label>
 </fieldset>
-<fieldset class="slot answer"><legend><span class="when" data-utc="2026-03-04T14:30:00Z">9:30 am</span> · 60 min </legend>
+<fieldset class="slot answer heat-0"><legend><span class="when" data-utc="2026-03-04T14:30:00Z">9:30 am</span> <span class="len">· 60 min</span></legend>
 <label class="tri"><input type="radio" name="a_2026-03-04T14:30:00Z|60" value="yes"> yes</label>
 <label class="tri"><input type="radio" name="a_2026-03-04T14:30:00Z|60" value="if_needed"> if needed</label>
 <label class="tri"><input type="radio" name="a_2026-03-04T14:30:00Z|60" value="no" checked> no</label>
 </fieldset>
-<fieldset class="slot answer"><legend><span class="when" data-utc="2026-03-04T15:00:00Z">10:00 am</span> · 60 min <span class="mins">1 yes</span></legend>
+<fieldset class="slot answer heat-1"><legend><span class="when" data-utc="2026-03-04T15:00:00Z">10:00 am</span> <span class="len">· 60 min</span> <span class="count">1 of 5 yes</span></legend>
 <label class="tri"><input type="radio" name="a_2026-03-04T15:00:00Z|60" value="yes" checked> yes</label>
 <label class="tri"><input type="radio" name="a_2026-03-04T15:00:00Z|60" value="if_needed"> if needed</label>
 <label class="tri"><input type="radio" name="a_2026-03-04T15:00:00Z|60" value="no"> no</label>
 </fieldset>
 </section>
 </div>
+<p class="savestate" id="savestate" aria-live="polite" hidden></p>
 <button type="submit">Save my answers</button>
 </form>
 <script src="booking.js" defer></script>
+<script src="poll.js" defer></script>
 </main>
 </body>
 </html>

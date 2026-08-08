@@ -13,48 +13,45 @@
 <h1>Book a meeting</h1>
 <p class="intro">Pick a time that works; you&#39;ll get a confirmation and a calendar invite.</p>
 <div class="errors" role="alert"><p>Some answers need attention:</p><ul>
-<li>purpose: this is required</li>
-<li>requester_email: this does not look like an email address</li>
+<li><a href="#purpose">What is this about?</a>: this is required</li>
+<li><a href="#requester_email">Your email</a>: this does not look like an email address</li>
 </ul></div>
 <nav class="weeknav" aria-label="Week">
 <span></span>
 <span class="range">Mar 2 – Mar 8</span>
-<a rel="nofollow" href="?week=2026-03-09">later &rarr;</a>
+<a rel="nofollow" href="?week=2026-03-09&mins=30">later <span aria-hidden="true">&rarr;</span></a>
+</nav>
+<nav class="durations" aria-label="Meeting length">
+<a rel="nofollow" href="?week=2026-03-02&mins=30" aria-current="true">30 min</a>
+<a rel="nofollow" href="?week=2026-03-02&mins=60">60 min</a>
 </nav>
 <form method="post" action="#">
 <p class="zone" id="zone-note">Times are shown in America/New_York.</p>
+<p class="notice" id="live-note" aria-live="assertive" hidden></p>
 <div class="week" role="group" aria-label="Available times">
-<section class="day"><h2>Tue Mar 3</h2>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-03T18:00:00Z|30" required><span class="when" data-utc="2026-03-03T18:00:00Z">1:00 pm</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-03T20:30:00Z|30" required><span class="when" data-utc="2026-03-03T20:30:00Z">3:30 pm</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-03T20:30:00Z|60" required><span class="when" data-utc="2026-03-03T20:30:00Z">3:30 pm</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-03T21:00:00Z|30" required><span class="when" data-utc="2026-03-03T21:00:00Z">4:00 pm</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-03T21:00:00Z|60" required><span class="when" data-utc="2026-03-03T21:00:00Z">4:00 pm</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-03T21:30:00Z|30" required><span class="when" data-utc="2026-03-03T21:30:00Z">4:30 pm</span><span class="mins" data-minutes="30">30 min</span></label>
+<section class="day"><h2><span class="dow">Tue</span> <span class="date">Mar 3</span></h2>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-03T18:00:00Z|30" checked required><span class="when" data-utc="2026-03-03T18:00:00Z">1:00 pm</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-03T20:30:00Z|30" required><span class="when" data-utc="2026-03-03T20:30:00Z">3:30 pm</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-03T21:00:00Z|30" required><span class="when" data-utc="2026-03-03T21:00:00Z">4:00 pm</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-03T21:30:00Z|30" required><span class="when" data-utc="2026-03-03T21:30:00Z">4:30 pm</span></label>
 </section>
-<section class="day"><h2>Wed Mar 4</h2>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T14:00:00Z|30" required><span class="when" data-utc="2026-03-04T14:00:00Z">9:00 am</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T14:00:00Z|60" required><span class="when" data-utc="2026-03-04T14:00:00Z">9:00 am</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T14:30:00Z|30" required><span class="when" data-utc="2026-03-04T14:30:00Z">9:30 am</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T14:30:00Z|60" required><span class="when" data-utc="2026-03-04T14:30:00Z">9:30 am</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T15:00:00Z|30" required><span class="when" data-utc="2026-03-04T15:00:00Z">10:00 am</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T15:00:00Z|60" required><span class="when" data-utc="2026-03-04T15:00:00Z">10:00 am</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T15:30:00Z|30" required><span class="when" data-utc="2026-03-04T15:30:00Z">10:30 am</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T15:30:00Z|60" required><span class="when" data-utc="2026-03-04T15:30:00Z">10:30 am</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T16:00:00Z|30" required><span class="when" data-utc="2026-03-04T16:00:00Z">11:00 am</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T16:00:00Z|60" required><span class="when" data-utc="2026-03-04T16:00:00Z">11:00 am</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-04T16:30:00Z|30" required><span class="when" data-utc="2026-03-04T16:30:00Z">11:30 am</span><span class="mins" data-minutes="30">30 min</span></label>
+<section class="day"><h2><span class="dow">Wed</span> <span class="date">Mar 4</span></h2>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-04T14:00:00Z|30" required><span class="when" data-utc="2026-03-04T14:00:00Z">9:00 am</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-04T14:30:00Z|30" required><span class="when" data-utc="2026-03-04T14:30:00Z">9:30 am</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-04T15:00:00Z|30" required><span class="when" data-utc="2026-03-04T15:00:00Z">10:00 am</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-04T15:30:00Z|30" required><span class="when" data-utc="2026-03-04T15:30:00Z">10:30 am</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-04T16:00:00Z|30" required><span class="when" data-utc="2026-03-04T16:00:00Z">11:00 am</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-04T16:30:00Z|30" required><span class="when" data-utc="2026-03-04T16:30:00Z">11:30 am</span></label>
 </section>
-<section class="day"><h2>Thu Mar 5</h2>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-05T20:00:00Z|30" required><span class="when" data-utc="2026-03-05T20:00:00Z">3:00 pm</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-05T20:00:00Z|60" required><span class="when" data-utc="2026-03-05T20:00:00Z">3:00 pm</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-05T20:30:00Z|30" required><span class="when" data-utc="2026-03-05T20:30:00Z">3:30 pm</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-05T20:30:00Z|60" required><span class="when" data-utc="2026-03-05T20:30:00Z">3:30 pm</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-05T21:00:00Z|30" required><span class="when" data-utc="2026-03-05T21:00:00Z">4:00 pm</span><span class="mins" data-minutes="30">30 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-05T21:00:00Z|60" required><span class="when" data-utc="2026-03-05T21:00:00Z">4:00 pm</span><span class="mins" data-minutes="60">60 min</span></label>
-<label class="slot"><input type="radio" name="_slot" value="2026-03-05T21:30:00Z|30" required><span class="when" data-utc="2026-03-05T21:30:00Z">4:30 pm</span><span class="mins" data-minutes="30">30 min</span></label>
+<section class="day"><h2><span class="dow">Thu</span> <span class="date">Mar 5</span></h2>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-05T20:00:00Z|30" required><span class="when" data-utc="2026-03-05T20:00:00Z">3:00 pm</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-05T20:30:00Z|30" required><span class="when" data-utc="2026-03-05T20:30:00Z">3:30 pm</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-05T21:00:00Z|30" required><span class="when" data-utc="2026-03-05T21:00:00Z">4:00 pm</span></label>
+<label class="slot"><input type="radio" name="_slot" value="2026-03-05T21:30:00Z|30" required><span class="when" data-utc="2026-03-05T21:30:00Z">4:30 pm</span></label>
 </section>
 </div>
+<p class="pick-hint">Pick a time to continue.</p>
+<div class="picked" id="picked" aria-live="polite"></div>
 <div class="details">
 <div class="field" data-field="requester_name">
 <label for="requester_name">Your name <span class="req" aria-hidden="true">*</span></label>
@@ -85,7 +82,7 @@
 <button type="submit">Book this time</button>
 </form>
 <script type="application/json" id="conditions">{}</script>
-<script type="application/json" id="booking-config">{"timezone":"America/New_York"}</script>
+<script type="application/json" id="booking-config">{"duration":30,"timezone":"America/New_York","week_end":"2026-03-09","week_start":"2026-03-02"}</script>
 <script src="form.js" defer></script>
 <script src="booking.js" defer></script>
 </main>

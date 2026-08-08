@@ -101,7 +101,7 @@ fn a_pushed_type_and_cache_become_a_page_a_stranger_can_read() {
     );
 
     // The assets the page names are served beside it.
-    for asset in ["booking.css", "form.js", "booking.js"] {
+    for asset in ["booking.css", "form.js", "booking.js", "poll.js"] {
         let reply = server.get(server.gate, &format!("/s/alice/book/{asset}"));
         assert_eq!(reply.status, 200, "{asset}");
     }
@@ -297,6 +297,11 @@ fn a_submission_holds_the_slot_and_the_race_loser_gets_the_week_back() {
         .send(server.gate);
     assert_eq!(reply.status, 200);
     assert!(reply.body.contains("just taken"), "{}", reply.body);
+    assert!(
+        reply.body.contains("value=\"Priya\""),
+        "losing the race must not also cost the typed details: {}",
+        reply.body
+    );
     assert_eq!(server.sent_links(), 1, "the loser mails nobody");
 
     // A POST naming a slot the cache never offered is a prober: nothing.
@@ -305,6 +310,108 @@ fn a_submission_holds_the_slot_and_the_race_loser_gets_the_week_back() {
         .body("_slot=2030-01-01T00%3A00%3A00Z%7C30&requester_name=X&requester_email=x%40y.z")
         .send(server.gate);
     assert_eq!(reply.status, 404, "{}", reply.body);
+}
+
+/// A rejected submission keeps everything the visitor already did: the
+/// picked slot arrives re-checked, the typed values ride the fields, and the
+/// summary names the failed field by its label.
+#[test]
+fn a_rejected_submission_keeps_the_pick_and_the_typed_values() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let reply = Request::new("PUT", "/v1/types/book", &gate)
+        .auth(&server.key(Scope::Release))
+        .body(BOOK_TOML.as_bytes().to_vec())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (push, stamp) = future_slot_push();
+    let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    // A real slot, a real name, a mangled email.
+    let form = format!(
+        "_slot={}%7C30&requester_name=Priya&requester_email=not-an-email",
+        stamp.replace(':', "%3A")
+    );
+    let reply = Request::new("POST", "/s/alice/book", &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(
+        reply.body.contains(&format!("value=\"{stamp}|30\" checked")),
+        "the picked slot survives the rejection: {}",
+        reply.body
+    );
+    assert!(reply.body.contains("value=\"Priya\""), "{}", reply.body);
+    assert!(
+        reply.body.contains(">Your email</a>"),
+        "the summary says the label, not the field name: {}",
+        reply.body
+    );
+    assert_eq!(server.sent_links(), 0, "nothing was held, nobody was mailed");
+
+    // Nothing took the slot: the next visitor still sees it.
+    let page = server.get(server.gate, "/s/alice/book");
+    assert!(page.body.contains(&format!("value=\"{stamp}|30\"")));
+}
+
+/// The live half of the page: `slots.json` reports what is open right now,
+/// uncacheably, and a hold taken between two polls disappears from it.
+#[test]
+fn slots_json_tells_an_open_tab_the_truth() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let reply = Request::new("PUT", "/v1/types/book", &gate)
+        .auth(&server.key(Scope::Release))
+        .body(BOOK_TOML.as_bytes().to_vec())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let (push, stamp) = future_slot_push();
+    let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    // The page tells its scripts where to poll.
+    let page = server.get(server.gate, "/s/alice/book");
+    assert!(
+        page.body.contains("/s/alice/book/slots.json"),
+        "{}",
+        page.body
+    );
+
+    let reply = server.get(server.gate, "/s/alice/book/slots.json");
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let open = reply.json();
+    assert_eq!(open["slots"][0]["start"], stamp.as_str(), "{}", reply.body);
+
+    // Someone holds it; the next poll no longer offers it.
+    let form = format!(
+        "_slot={}%7C30&requester_name=Priya&requester_email=priya%40example.edu",
+        stamp.replace(':', "%3A")
+    );
+    let reply = Request::new("POST", "/s/alice/book", &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(form)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let reply = server.get(server.gate, "/s/alice/book/slots.json");
+    assert_eq!(reply.status, 200);
+    assert_eq!(
+        reply.json()["slots"].as_array().map(|s| s.len()),
+        Some(0),
+        "a held slot is not open: {}",
+        reply.body
+    );
+
+    // Wrong doors answer nothing, like every other booking route.
+    assert_eq!(server.get(server.gate, "/s/nobody/book/slots.json").status, 404);
+    assert_eq!(server.get(server.artifacts, "/s/alice/book/slots.json").status, 404);
 }
 
 /// The whole claim, outside-in: submit holds, the mailed link's POST books,

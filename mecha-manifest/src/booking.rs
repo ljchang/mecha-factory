@@ -26,12 +26,24 @@ pub struct BookingOptions {
     pub now: DateTime<Utc>,
     /// The Monday to show. `None` shows the first week holding a slot.
     pub week: Option<NaiveDate>,
-    /// Values and errors from a rejected submission being shown back.
+    /// The meeting length to show, from `?mins=`. `None` — or a length no
+    /// future slot offers — falls back to the shortest on offer, so each
+    /// start time renders exactly once and the page never shows "3:30 pm"
+    /// twice. Switching lengths is a link, like week paging: it works with
+    /// JavaScript off, and the server is the one filtering.
+    pub duration: Option<u32>,
+    /// Values and errors from a rejected submission being shown back. May
+    /// carry the page's own `_slot` key, which re-checks the picked time —
+    /// a visitor who mistyped an email must not lose the slot they chose.
     pub values: serde_json::Map<String, serde_json::Value>,
     pub errors: Vec<crate::ValidationError>,
     /// A line about freshness, when the server judges the cache old enough
     /// to say so. Rendered verbatim (escaped), so wording stays server-side.
     pub stale_notice: Option<String>,
+    /// Where `booking.js` may poll for live availability, relative to the
+    /// page (usually `slots.json` under the assets prefix). `None` renders a
+    /// static page — the gallery's golden files must not fetch anything.
+    pub live_slots_url: Option<String>,
 }
 
 impl Default for BookingOptions {
@@ -42,9 +54,11 @@ impl Default for BookingOptions {
             theme: crate::theme::NOCTURNE,
             now: DateTime::<Utc>::UNIX_EPOCH,
             week: None,
+            duration: None,
             values: serde_json::Map::new(),
             errors: Vec::new(),
             stale_notice: None,
+            live_slots_url: None,
         }
     }
 }
@@ -59,11 +73,12 @@ pub struct BookingPage {
 }
 
 impl BookingPage {
-    pub fn assets(&self) -> [(&'static str, &str); 3] {
+    pub fn assets(&self) -> [(&'static str, &str); 4] {
         [
             ("booking.css", &self.style),
             ("form.js", FORM_JS),
             ("booking.js", BOOKING_JS),
+            ("poll.js", POLL_JS),
         ]
     }
 }
@@ -71,7 +86,7 @@ impl BookingPage {
 /// The page's assets for a theme, independent of any render — what a server
 /// answers asset requests from, where [`BookingPage::assets`] serves whoever
 /// is writing a rendered bundle to disk.
-pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 3] {
+pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 4] {
     [
         (
             "booking.css",
@@ -84,6 +99,7 @@ pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 3] {
         ),
         ("form.js", FORM_JS.to_string()),
         ("booking.js", BOOKING_JS.to_string()),
+        ("poll.js", POLL_JS.to_string()),
     ]
 }
 
@@ -194,8 +210,10 @@ pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> Boo
                 body.push_str("</section>\n");
             }
             body.push_str(&format!(
-                "<section class=\"day\"><h2>{}</h2>\n",
-                this_day.format("%a %b %-d")
+                "<section class=\"day\"><h2><span class=\"dow\">{}</span> \
+                 <span class=\"date\">{}</span></h2>\n",
+                this_day.format("%a"),
+                this_day.format("%b %-d")
             ));
             day = Some(this_day);
         }
@@ -205,17 +223,27 @@ pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> Boo
             candidate.duration_minutes
         );
         let label = local.format("%-I:%M %p").to_string().to_lowercase();
+        // The heat is discrete steps, never a continuous ramp: six shades is
+        // what stays tellable-apart, and the count rides in text beside the
+        // colour so the information survives colour-blindness and screen
+        // readers. A class rather than an inline style, because the gate's
+        // CSP (`style-src 'self'`) forbids style attributes.
+        let heat_bucket = if options.total == 0 || candidate.yes_count == 0 {
+            0
+        } else {
+            (candidate.yes_count * 5).div_ceil(options.total).min(5)
+        };
         let heat = if candidate.yes_count > 0 {
             format!(
-                "<span class=\"mins\">{} yes</span>",
-                candidate.yes_count
+                " <span class=\"count\">{} of {} yes</span>",
+                candidate.yes_count, options.total
             )
         } else {
             String::new()
         };
         body.push_str(&format!(
-            "<fieldset class=\"slot answer\"><legend><span class=\"when\" \
-             data-utc=\"{utc}\">{label}</span> · {mins} min {heat}</legend>\n",
+            "<fieldset class=\"slot answer heat-{heat_bucket}\"><legend><span class=\"when\" \
+             data-utc=\"{utc}\">{label}</span> <span class=\"len\">· {mins} min</span>{heat}</legend>\n",
             utc = candidate
                 .start
                 .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
@@ -248,11 +276,17 @@ pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> Boo
     }
     body.push_str("</div>\n");
     if options.open {
-        body.push_str("<button type=\"submit\">Save my answers</button>\n");
+        // Where poll.js reports autosaves. Hidden until it speaks; with
+        // JavaScript off the button below is the whole story.
+        body.push_str(
+            "<p class=\"savestate\" id=\"savestate\" aria-live=\"polite\" hidden></p>\n\
+             <button type=\"submit\">Save my answers</button>\n",
+        );
     }
     body.push_str("</form>\n");
     body.push_str(&format!(
-        "<script src=\"{0}booking.js\" defer></script>\n",
+        "<script src=\"{0}booking.js\" defer></script>\n\
+         <script src=\"{0}poll.js\" defer></script>\n",
         escape_text(&options.assets)
     ));
 
@@ -390,6 +424,34 @@ impl RequestType {
         let mut future: Vec<&Slot> = slots.iter().filter(|s| s.start > options.now).collect();
         future.sort_by_key(|s| (s.start, s.duration_minutes));
 
+        // The lengths on offer, and the one being shown. Everything below —
+        // the grid, the week paging, the empty-week message — is about one
+        // meeting length at a time, so a start time never renders twice.
+        let durations: Vec<u32> = {
+            let mut seen = Vec::new();
+            for slot in &future {
+                if !seen.contains(&slot.duration_minutes) {
+                    seen.push(slot.duration_minutes);
+                }
+            }
+            seen.sort_unstable();
+            seen
+        };
+        let chosen = options
+            .duration
+            .filter(|d| durations.contains(d))
+            .or_else(|| durations.first().copied());
+        let future: Vec<&Slot> = future
+            .into_iter()
+            .filter(|s| Some(s.duration_minutes) == chosen)
+            .collect();
+        // `&mins=` rides every navigation link once there is a choice to
+        // keep; with one length there is nothing to preserve.
+        let mins_param = match chosen {
+            Some(chosen) if durations.len() > 1 => format!("&mins={chosen}"),
+            _ => String::new(),
+        };
+
         let today = options.now.with_timezone(&tz).date_naive();
         let this_week = week_of(today);
         let first_slot_week = future.first().map(|s| local_day(s, tz)).map(week_of);
@@ -413,6 +475,9 @@ impl RequestType {
         let has_next = future.iter().any(|s| local_day(s, tz) >= week_end);
         let has_prev = week > this_week;
 
+        // The slot a rejected submission had picked, so it survives the trip.
+        let picked_slot = options.values.get("_slot").and_then(|v| v.as_str());
+
         let mut body = String::new();
         body.push_str(&format!("<h1>{}</h1>\n", escape_text(&self.title)));
         if let Some(description) = &self.description {
@@ -428,13 +493,26 @@ impl RequestType {
             ));
         }
         if !options.errors.is_empty() {
+            // The same label lookup as the plain form's summary: a visitor is
+            // told "Your email", never `requester_email`.
             body.push_str(
                 "<div class=\"errors\" role=\"alert\"><p>Some answers need attention:</p><ul>\n",
             );
             for error in &options.errors {
+                let label = self
+                    .field(&error.field)
+                    .map(|f| f.label.as_str())
+                    .or_else(|| {
+                        self.acknowledgments
+                            .iter()
+                            .find(|a| a.id == error.field)
+                            .map(|a| a.label.as_str())
+                    })
+                    .unwrap_or(error.field.as_str());
                 body.push_str(&format!(
-                    "<li>{}: {}</li>\n",
+                    "<li><a href=\"#{}\">{}</a>: {}</li>\n",
                     escape_text(&error.field),
+                    escape_text(label),
                     escape_text(&error.message)
                 ));
             }
@@ -446,7 +524,7 @@ impl RequestType {
         body.push_str("<nav class=\"weeknav\" aria-label=\"Week\">\n");
         if has_prev {
             body.push_str(&format!(
-                "<a rel=\"nofollow\" href=\"?week={}\">&larr; earlier</a>\n",
+                "<a rel=\"nofollow\" href=\"?week={}{mins_param}\"><span aria-hidden=\"true\">&larr;</span> earlier</a>\n",
                 week - Duration::days(7)
             ));
         } else {
@@ -459,12 +537,27 @@ impl RequestType {
         ));
         if has_next {
             body.push_str(&format!(
-                "<a rel=\"nofollow\" href=\"?week={week_end}\">later &rarr;</a>\n"
+                "<a rel=\"nofollow\" href=\"?week={week_end}{mins_param}\">later <span aria-hidden=\"true\">&rarr;</span></a>\n"
             ));
         } else {
             body.push_str("<span></span>\n");
         }
         body.push_str("</nav>\n");
+
+        // The length switch: server-side links, the same shape as week
+        // paging, so it books identically with JavaScript off. Rendered only
+        // when there is a real choice.
+        if durations.len() > 1 {
+            body.push_str("<nav class=\"durations\" aria-label=\"Meeting length\">\n");
+            for duration in &durations {
+                let current = Some(*duration) == chosen;
+                body.push_str(&format!(
+                    "<a rel=\"nofollow\" href=\"?week={week}&mins={duration}\"{}>{duration} min</a>\n",
+                    if current { " aria-current=\"true\"" } else { "" },
+                ));
+            }
+            body.push_str("</nav>\n");
+        }
 
         body.push_str(&format!(
             "<form method=\"post\" action=\"{}\">\n",
@@ -477,6 +570,10 @@ impl RequestType {
             "<p class=\"zone\" id=\"zone-note\">Times are shown in {}.</p>\n",
             escape_text(&tz.to_string())
         ));
+
+        // Where booking.js speaks when live availability moves under the
+        // page — "that time was just taken". Empty and hidden until it does.
+        body.push_str("<p class=\"notice\" id=\"live-note\" aria-live=\"assertive\" hidden></p>\n");
 
         if in_week.is_empty() {
             let hint = if has_next {
@@ -502,20 +599,26 @@ impl RequestType {
                     continue;
                 }
                 body.push_str(&format!(
-                    "<section class=\"day\"><h2>{}</h2>\n",
-                    day.format("%a %b %-d")
+                    "<section class=\"day\"><h2><span class=\"dow\">{}</span> \
+                     <span class=\"date\">{}</span></h2>\n",
+                    day.format("%a"),
+                    day.format("%b %-d")
                 ));
                 for slot in of_day {
                     let start_utc = slot.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                     let local = slot.start.with_timezone(&tz);
                     let label = local.format("%-I:%M %p").to_string().to_lowercase();
+                    let value = format!("{start_utc}|{}", slot.duration_minutes);
                     body.push_str(&format!(
                         "<label class=\"slot\"><input type=\"radio\" name=\"_slot\" \
-                         value=\"{start_utc}|{minutes}\" required>\
+                         value=\"{value}\"{checked} required>\
                          <span class=\"when\" data-utc=\"{start_utc}\">{label}</span>\
-                         <span class=\"mins\" data-minutes=\"{minutes}\">{minutes} min</span>\
                          </label>\n",
-                        minutes = slot.duration_minutes,
+                        checked = if picked_slot == Some(value.as_str()) {
+                            " checked"
+                        } else {
+                            ""
+                        },
                     ));
                 }
                 body.push_str("</section>\n");
@@ -523,6 +626,16 @@ impl RequestType {
             }
             body.push_str("</div>\n");
         }
+
+        // From here down the page is about the picked time. With CSS `:has`
+        // support, the details stay out of the way until a slot is chosen —
+        // the page's one reveal — and the chip above them echoes the choice
+        // (written by booking.js; its absence loses nothing). Without `:has`,
+        // everything is simply visible, which is the JS-off page.
+        body.push_str(
+            "<p class=\"pick-hint\">Pick a time to continue.</p>\n\
+             <div class=\"picked\" id=\"picked\" aria-live=\"polite\"></div>\n",
+        );
 
         // The details form, by the same machinery as every other type.
         let form_options = FormOptions {
@@ -549,11 +662,20 @@ impl RequestType {
                 .unwrap_or_else(|_| "{}".into())
                 .replace("</", "<\\/")
         ));
+        let mut config = serde_json::json!({
+            "timezone": tz.to_string(),
+            "week_start": week.to_string(),
+            "week_end": week_end.to_string(),
+        });
+        if let Some(chosen) = chosen {
+            config["duration"] = chosen.into();
+        }
+        if let Some(url) = &options.live_slots_url {
+            config["slots_url"] = url.as_str().into();
+        }
         body.push_str(&format!(
             "<script type=\"application/json\" id=\"booking-config\">{}</script>\n",
-            serde_json::json!({ "timezone": tz.to_string() })
-                .to_string()
-                .replace("</", "<\\/")
+            config.to_string().replace("</", "<\\/")
         ));
         body.push_str(&format!(
             "<script src=\"{0}form.js\" defer></script>\n<script src=\"{0}booking.js\" defer></script>\n",
@@ -594,36 +716,125 @@ fn local_day(slot: &Slot, tz: Tz) -> NaiveDate {
 /// The week grid, on the same tokens as everything else. Mobile does not
 /// shrink the columns: the grid scrolls sideways with snap stops, which is
 /// the day-pager pattern in one CSS rule.
+///
+/// The page's one reveal lives here too: with `:has` support, the details
+/// form stays out of the way until a time is picked, and picking one is what
+/// discloses it. Browsers without `:has` (and readers with CSS off) get the
+/// whole page at once, which is exactly the JS-off contract — the reveal is
+/// an enhancement with no script behind it at all.
 const BOOKING_STRUCTURE: &str = r#"
-.booking .weeknav { display:flex; justify-content:space-between; align-items:baseline; margin:1.5rem 0 0.5rem; }
-.booking .weeknav .range { font-weight:600; }
-.booking .zone { color:var(--muted); font-size:0.9rem; }
+/* --- the week frame ----------------------------------------------------- */
+
+.booking .weeknav { display:grid; grid-template-columns:1fr auto 1fr; align-items:center;
+  gap:0.75rem; margin:2rem 0 1rem; }
+.booking .weeknav a { font-family:var(--font-mono); font-size:0.8125rem; text-decoration:none;
+  color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:0.3rem 0.9rem;
+  justify-self:start; white-space:nowrap; transition:color .12s ease, border-color .12s ease; }
+.booking .weeknav a:hover { color:var(--text); border-color:var(--muted); }
+.booking .weeknav > :last-child { justify-self:end; }
+.booking .weeknav .range { font-family:var(--font-mono); font-size:0.8125rem; font-weight:500;
+  letter-spacing:0.06em; text-transform:uppercase; }
+
+.booking .durations { display:inline-flex; gap:0.25rem; border:1px solid var(--line);
+  border-radius:999px; padding:0.25rem; margin:0 0 1.25rem; }
+.booking .durations a { font-family:var(--font-mono); font-size:0.8125rem; text-decoration:none;
+  color:var(--muted); padding:0.25rem 0.9rem; border-radius:999px; transition:color .12s ease; }
+.booking .durations a:hover { color:var(--text); }
+.booking .durations a[aria-current="true"] { background:var(--accent); color:var(--on-accent); }
+
+.booking .zone { color:var(--muted); font-size:0.875rem; margin:0 0 1.25rem; }
 .booking .stale { color:var(--signal); font-size:0.9rem; }
-.booking .week { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(7.5rem,1fr);
-  gap:0.75rem; overflow-x:auto; scroll-snap-type:x proximity; padding-bottom:0.5rem; }
-.booking .day { scroll-snap-align:start; }
-.booking .day h2 { font-size:0.95rem; margin:0 0 0.5rem; color:var(--muted); font-weight:600; }
-.booking .slot { display:flex; gap:0.5rem; align-items:baseline; justify-content:space-between;
-  border:1px solid var(--line); border-radius:var(--radius); padding:0.45rem 0.7rem;
-  margin-bottom:0.5rem; cursor:pointer; background:var(--surface); }
-.booking .slot:hover { border-color:var(--accent); }
-.booking .slot input { position:absolute; opacity:0; pointer-events:none; }
-.booking .slot:has(input:checked) { border-color:var(--accent); outline:2px solid var(--ring); }
-.booking .slot .mins { color:var(--muted); font-size:0.85rem; white-space:nowrap; }
+.booking .notice { color:var(--signal); border-left:2px solid var(--signal);
+  padding:0.25rem 0 0.25rem 1rem; font-size:0.9375rem; }
+.booking .notice a { color:var(--signal); }
 .booking .empty { color:var(--muted); margin:2rem 0; }
-.booking .durations { display:inline-flex; gap:0; border:1px solid var(--line);
-  border-radius:var(--radius); overflow:hidden; margin:0 0 0.75rem; }
-.booking .durations button { border:0; background:var(--surface); color:var(--text);
-  padding:0.35rem 0.9rem; cursor:pointer; }
-.booking .durations button[aria-pressed="true"] { background:var(--accent); color:var(--on-accent); }
-.booking .slot.answer { display:block; cursor:default; }
-.booking .slot.answer legend { font-weight:600; padding:0; }
-.booking .slot.answer .tri { display:inline-flex; gap:0.3rem; align-items:center;
+
+.booking .week { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(7.25rem,1fr);
+  gap:1rem; overflow-x:auto; scroll-snap-type:x proximity; padding-bottom:0.75rem; }
+.booking .day { scroll-snap-align:start; min-width:0; }
+.booking .day h2 { display:flex; flex-direction:column; gap:0.125rem; margin:0 0 0.75rem;
+  padding:0 0 0.5rem; border-bottom:1px solid var(--line); }
+.booking .day .dow { font-family:var(--font-mono); font-size:0.75rem; font-weight:500;
+  text-transform:uppercase; letter-spacing:0.08em; }
+.booking .day .date { font-size:0.8125rem; font-weight:400; color:var(--muted); }
+
+/* --- slots: the time is the button -------------------------------------- */
+
+.booking .slot { display:block; text-align:center; font-family:var(--font-mono);
+  font-size:0.875rem; font-variant-numeric:tabular-nums; border:1px solid var(--line);
+  border-radius:var(--radius); padding:0.55rem 0.5rem; margin-bottom:0.5rem; cursor:pointer;
+  background:var(--surface); transition:border-color .12s ease, background .12s ease,
+  color .12s ease, opacity .3s ease, transform .3s ease; }
+.booking .slot:not(.answer):hover { border-color:var(--accent); color:var(--accent); }
+.booking .slot input { position:absolute; opacity:0; pointer-events:none; }
+/* The fill is the *booking* pick alone. A poll cell is also a `.slot` and
+   always holds a checked tri-state radio, so keying this on `input:checked`
+   would flood every cell — the selector names the booking radio on purpose. */
+.booking .slot:has(input[name="_slot"]:checked) { background:var(--accent);
+  border-color:var(--accent); color:var(--on-accent); }
+.booking .slot:has(input:focus-visible) { border-color:var(--ring);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
+/* A slot someone else just took leaves quietly; its day follows when empty. */
+.booking .slot.gone { opacity:0; transform:scale(0.96); pointer-events:none; }
+
+/* --- the reveal: pick a time, get the form ------------------------------- */
+
+.booking .pick-hint { color:var(--muted); font-size:0.9375rem; margin:1.5rem 0 0; }
+.booking .picked { display:none; }
+.booking .picked:not(:empty) { display:block; font-family:var(--font-mono); font-size:0.875rem;
+  border:1px solid var(--accent); border-left-width:3px; border-radius:var(--radius);
+  padding:0.6rem 0.9rem; margin:1.5rem 0 1.5rem; }
+.booking .details { margin-top:1.5rem; }
+@supports selector(:has(*)) {
+  .booking form:not(:has(input[name="_slot"]:checked)) .details,
+  .booking form:not(:has(input[name="_slot"]:checked)) button[type="submit"] { display:none; }
+  .booking form:has(input[name="_slot"]:checked) .pick-hint { display:none; }
+  .booking form:not(:has(input[name="_slot"])) .pick-hint { display:none; }
+}
+
+/* --- the poll grid ------------------------------------------------------- */
+
+.booking .slot.answer { display:block; text-align:left; font-family:var(--font-sans);
+  cursor:default; padding:0.55rem 0.75rem; }
+.booking .slot.answer legend { font-family:var(--font-mono); font-size:0.8125rem;
+  font-weight:500; padding:0; float:left; width:100%; text-transform:none;
+  letter-spacing:0.01em; color:var(--text); }
+.booking .slot.answer .len { color:var(--muted); font-weight:400; }
+.booking .count { color:var(--muted); font-size:0.75rem; white-space:nowrap;
+  float:right; font-weight:400; }
+.booking .slot.answer .tri { display:inline-flex; gap:0.3rem; align-items:center; clear:both;
   margin:0.35rem 0.9rem 0 0; cursor:pointer; color:var(--muted); font-size:0.9rem; }
 .booking .slot.answer .tri input { position:static; opacity:1; pointer-events:auto; }
 .booking .slot.answer:has(input[value="yes"]:checked) { border-color:var(--accent);
   outline:2px solid var(--ring); }
 .booking .slot.answer:has(input[value="if_needed"]:checked) { border-color:var(--signal); }
+
+/* Heat: how many others said yes, in six tellable steps. Colour never
+   carries it alone — the count is in the cell's text and accessible name. */
+.booking .heat-1 { background:color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.booking .heat-2 { background:color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.booking .heat-3 { background:color-mix(in srgb, var(--accent) 24%, var(--surface)); }
+.booking .heat-4 { background:color-mix(in srgb, var(--accent) 33%, var(--surface)); }
+.booking .heat-5 { background:color-mix(in srgb, var(--accent) 42%, var(--surface)); }
+
+/* poll.js upgrades the grid to tap-to-cycle painting: the radios leave the
+   page (they stay in the form), the whole cell becomes the control, and the
+   state chip says what your answer is. */
+.booking .week.poll.paint .slot.answer { cursor:pointer; touch-action:none;
+  user-select:none; -webkit-user-select:none; }
+.booking .paint .slot.answer .tri { display:none; }
+.booking .slot.answer .state { display:none; }
+.booking .paint .slot.answer .state { display:inline-block; font-family:var(--font-mono);
+  font-size:0.75rem; margin-top:0.35rem; padding:0.1rem 0.5rem; border-radius:999px;
+  border:1px solid var(--line); color:var(--muted); }
+.booking .paint .slot.answer[data-state="yes"] .state { background:var(--accent);
+  border-color:var(--accent); color:var(--on-accent); }
+.booking .paint .slot.answer[data-state="if_needed"] .state { border-color:var(--signal);
+  color:var(--signal); }
+.booking .paint .slot.answer:focus-visible { outline:none; border-color:var(--ring);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
+.booking .savestate { font-family:var(--font-mono); font-size:0.8125rem; color:var(--muted); }
+.booking form.autosaves button[type="submit"] { display:none; }
 "#;
 
 /// Enhancement only — nothing a submission depends on happens here.
@@ -636,65 +847,246 @@ const BOOKING_JS: &str = r#"// Generated by mecha-manifest. Enhancement only:
 
   // 1. Times in the visitor's zone — every stamp and the zone line together,
   // or nothing: a page half-converted is worse than a labelled host zone.
+  var zone = config.timezone;
   try {
-    var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (zone && zone !== config.timezone) {
-      var whens = document.querySelectorAll(".when[data-utc]");
+    var detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (detected && detected !== config.timezone) {
+      zone = detected;
       var fmt = new Intl.DateTimeFormat(undefined,
         { hour: "numeric", minute: "2-digit", timeZone: zone });
-      whens.forEach(function (el) {
+      document.querySelectorAll(".when[data-utc]").forEach(function (el) {
         el.textContent = fmt.format(new Date(el.getAttribute("data-utc"))).toLowerCase();
       });
-      var nowFmt = new Intl.DateTimeFormat(undefined,
-        { hour: "numeric", minute: "2-digit", timeZone: zone });
       var note = document.getElementById("zone-note");
       if (note) {
         note.textContent = "Times are shown in your time zone (" + zone +
-          " — currently " + nowFmt.format(new Date()).toLowerCase() + ").";
+          " — currently " + fmt.format(new Date()).toLowerCase() + ").";
       }
     }
-  } catch (e) { /* the server-rendered labels stand */ }
+  } catch (e) { zone = config.timezone; /* the server-rendered labels stand */ }
 
-  // 2. The duration filter, built only when there is something to filter.
-  var minutes = [];
-  document.querySelectorAll(".slot .mins[data-minutes]").forEach(function (el) {
-    var m = el.getAttribute("data-minutes");
-    if (minutes.indexOf(m) < 0) minutes.push(m);
+  // 2. The picked time, echoed in full above the details — the reveal is
+  // CSS; this chip is the only part a script writes, and losing it loses a
+  // restatement, never the booking.
+  var picked = document.getElementById("picked");
+  var describe = function (input) {
+    var raw = input.value.split("|");
+    var start = new Date(raw[0]);
+    var minutes = parseInt(raw[1], 10) || 0;
+    var end = new Date(start.getTime() + minutes * 60000);
+    try {
+      var day = new Intl.DateTimeFormat(undefined,
+        { weekday: "long", month: "short", day: "numeric", timeZone: zone });
+      var time = new Intl.DateTimeFormat(undefined,
+        { hour: "numeric", minute: "2-digit", timeZone: zone });
+      return day.format(start) + " · " + time.format(start).toLowerCase() +
+        " – " + time.format(end).toLowerCase() + " (" + minutes + " min)";
+    } catch (e) { return ""; }
+  };
+  var updatePicked = function () {
+    if (!picked) return;
+    var checked = document.querySelector('input[name="_slot"]:checked');
+    picked.textContent = checked ? describe(checked) : "";
+  };
+  document.addEventListener("change", function (event) {
+    if (event.target && event.target.name === "_slot") updatePicked();
   });
-  var week = document.querySelector(".week");
-  if (week && minutes.length > 1) {
-    minutes.sort(function (a, b) { return a - b; });
-    var bar = document.createElement("div");
-    bar.className = "durations";
-    bar.setAttribute("role", "group");
-    bar.setAttribute("aria-label", "Meeting length");
-    var apply = function (wanted) {
-      document.querySelectorAll(".slot").forEach(function (slot) {
-        var m = slot.querySelector(".mins").getAttribute("data-minutes");
-        var show = wanted === null || m === wanted;
-        slot.hidden = !show;
-        if (!show) {
-          var input = slot.querySelector("input");
-          if (input.checked) input.checked = false;
-        }
-      });
-      bar.querySelectorAll("button").forEach(function (b) {
-        b.setAttribute("aria-pressed", String(b.dataset.minutes === (wanted === null ? "all" : wanted)));
-      });
+  updatePicked(); // a rejected submission arrives with its slot re-checked
+
+  // 3. Live availability. The page polls the same truth the POST checks, so
+  // a slot someone else just held leaves the page instead of waiting to fail
+  // at submit; if it was *your* pick, the page says so out loud. New slots
+  // (a freed cancellation, a fresh push) reload a pristine page — anything
+  // typed makes the reload an offer instead, never a theft.
+  var note = document.getElementById("live-note");
+  if (config.slots_url && note && window.fetch) {
+    var dirty = false;
+    document.addEventListener("input", function (event) {
+      if (event.target && event.target.closest && event.target.closest(".details")) dirty = true;
+    });
+    var hostDay = null;
+    try {
+      hostDay = new Intl.DateTimeFormat("en-CA",
+        { timeZone: config.timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+    } catch (e) {}
+    var inShownWeek = function (iso) {
+      if (!hostDay || !config.week_start) return false;
+      var day = hostDay.format(new Date(iso));
+      return day >= config.week_start && day < config.week_end;
     };
-    var mk = function (label, value) {
-      var b = document.createElement("button");
-      b.type = "button";
-      b.textContent = label;
-      b.dataset.minutes = value === null ? "all" : value;
-      b.addEventListener("click", function () { apply(value); });
-      bar.appendChild(b);
-      return b;
+    var tell = function (message, withReload) {
+      note.textContent = message;
+      if (withReload) {
+        var link = document.createElement("a");
+        link.href = window.location.href;
+        link.textContent = "Show them";
+        note.appendChild(document.createTextNode(" — "));
+        note.appendChild(link);
+      }
+      note.hidden = false;
     };
-    minutes.forEach(function (m) { mk(m + " min", m); });
-    mk("all", null).setAttribute("aria-pressed", "true");
-    week.parentNode.insertBefore(bar, week);
+    var sweep = function (offered) {
+      var open = {};
+      offered.forEach(function (s) { open[s.start + "|" + s.duration_minutes] = true; });
+      var shown = {};
+      var pickTaken = false;
+      document.querySelectorAll('.week input[name="_slot"]').forEach(function (input) {
+        var slot = input.closest(".slot");
+        if (!slot || slot.classList.contains("gone")) return;
+        if (open[input.value]) { shown[input.value] = true; return; }
+        if (input.checked) { input.checked = false; pickTaken = true; }
+        slot.classList.add("gone");
+        window.setTimeout(function () {
+          var day = slot.closest(".day");
+          slot.remove();
+          if (day && !day.querySelector(".slot")) day.remove();
+        }, 350);
+      });
+      if (pickTaken) {
+        updatePicked();
+        tell("That time was just taken — these are still open.");
+      }
+      var fresh = offered.some(function (s) {
+        return s.duration_minutes === config.duration &&
+          !shown[s.start + "|" + s.duration_minutes] &&
+          inShownWeek(s.start) && new Date(s.start) > new Date();
+      });
+      if (fresh) {
+        var untouched = !dirty && !document.querySelector('input[name="_slot"]:checked');
+        if (untouched) { window.location.reload(); }
+        else if (note.hidden) { tell("More times just opened up.", true); }
+      }
+    };
+    var refresh = function () {
+      fetch(config.slots_url, { headers: { Accept: "application/json" } })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (data) { if (data && data.slots) sweep(data.slots); })
+        .catch(function () { /* offline is not an error the page can fix */ });
+    };
+    window.setInterval(refresh, 30000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") refresh();
+    });
   }
+})();
+"#;
+
+/// The poll grid's enhancement: tap to cycle, drag to paint, autosave.
+/// Everything here rides on the radios staying in the form — the script
+/// changes how they are set, never what is submitted.
+const POLL_JS: &str = r#"// Generated by mecha-manifest. Enhancement only:
+// the poll answers identically with this file blocked.
+(function () {
+  "use strict";
+  var grid = document.querySelector(".week.poll");
+  var form = grid && grid.closest("form");
+  if (!grid || !form || !window.fetch) return;
+  var cells = Array.prototype.slice.call(grid.querySelectorAll(".slot.answer"));
+  // A closed poll is read-only and stays exactly as rendered.
+  if (!cells.length || cells[0].querySelector("input[disabled]")) return;
+
+  var ORDER = ["yes", "if_needed", "no"];
+  var WORDS = { yes: "yes", if_needed: "if needed", no: "no" };
+
+  var stateOf = function (cell) {
+    var checked = cell.querySelector("input:checked");
+    return checked ? checked.value : "no";
+  };
+  var paint = function (cell, state) {
+    var input = cell.querySelector('input[value="' + state + '"]');
+    if (input) input.checked = true;
+    cell.setAttribute("data-state", state);
+    cell.querySelector(".state").textContent = WORDS[state];
+    var when = cell.querySelector(".when");
+    var len = cell.querySelector(".len");
+    cell.setAttribute("aria-label",
+      (when ? when.textContent : "") + (len ? " " + len.textContent : "") +
+      " — your answer: " + WORDS[state] + ". Press to change.");
+  };
+  var apply = function (cell, state) {
+    if (stateOf(cell) === state && cell.getAttribute("data-state") === state) return;
+    paint(cell, state);
+    queueSave();
+  };
+
+  grid.classList.add("paint");
+  form.classList.add("autosaves");
+  cells.forEach(function (cell) {
+    var chip = document.createElement("span");
+    chip.className = "state";
+    cell.appendChild(chip);
+    cell.setAttribute("role", "button");
+    cell.setAttribute("tabindex", "0");
+    paint(cell, stateOf(cell));
+  });
+
+  // Tap cycles one cell; a drag paints every cell it crosses with the state
+  // the first tap produced — the anchor decides the stroke, so a mixed drag
+  // never flickers (when2meet's own mechanic).
+  var stroke = null;
+  var cellAt = function (event) {
+    var el = document.elementFromPoint(event.clientX, event.clientY);
+    return el && el.closest ? el.closest(".slot.answer") : null;
+  };
+  grid.addEventListener("pointerdown", function (event) {
+    var cell = cellAt(event);
+    if (!cell) return;
+    event.preventDefault();
+    stroke = ORDER[(ORDER.indexOf(stateOf(cell)) + 1) % ORDER.length];
+    apply(cell, stroke);
+    try { grid.setPointerCapture(event.pointerId); } catch (e) {}
+  });
+  grid.addEventListener("pointermove", function (event) {
+    if (stroke === null) return;
+    var cell = cellAt(event);
+    if (cell) apply(cell, stroke);
+  });
+  ["pointerup", "pointercancel"].forEach(function (name) {
+    grid.addEventListener(name, function () { stroke = null; });
+  });
+  grid.addEventListener("keydown", function (event) {
+    if (event.key !== " " && event.key !== "Enter") return;
+    var cell = event.target.closest && event.target.closest(".slot.answer");
+    if (!cell) return;
+    event.preventDefault();
+    apply(cell, ORDER[(ORDER.indexOf(stateOf(cell)) + 1) % ORDER.length]);
+  });
+
+  // Autosave: every commit POSTs, debounced. A failed save says so and
+  // hands back the button — the JS-off path is also the degraded path.
+  var status = document.getElementById("savestate");
+  var timer = null;
+  var inflight = false;
+  var again = false;
+  var say = function (text) {
+    if (status) { status.hidden = false; status.textContent = text; }
+  };
+  var fallback = function () {
+    say("Couldn’t save — use the button below.");
+    form.classList.remove("autosaves");
+  };
+  var save = function () {
+    if (inflight) { again = true; return; }
+    inflight = true;
+    var body = new URLSearchParams(new FormData(form));
+    fetch(window.location.pathname, {
+      method: "POST", body: body, headers: { Accept: "application/json" }
+    })
+      .then(function (res) {
+        if (res.status === 204) say("Saved — you can change your answers until the poll closes.");
+        else fallback();
+      })
+      .catch(fallback)
+      .then(function () {
+        inflight = false;
+        if (again) { again = false; save(); }
+      });
+  };
+  var queueSave = function () {
+    if (timer) window.clearTimeout(timer);
+    say("Saving…");
+    timer = window.setTimeout(save, 700);
+  };
 })();
 "#;
 
@@ -774,11 +1166,11 @@ mod tests {
             .unwrap();
         let html = &page.html;
         assert!(html.contains(r#"name="_slot" value="2026-08-11T17:00:00Z|30""#));
-        assert!(html.contains(r#"value="2026-08-11T17:00:00Z|60""#));
         // 17:00Z is 1pm Eastern in August; the column is the local day.
         assert!(html.contains("1:00 pm"), "host-zone rendering");
-        assert!(html.contains("Tue Aug 11"));
-        assert!(html.contains("Thu Aug 13"));
+        assert!(html.contains(r#"<span class="dow">Tue</span>"#));
+        assert!(html.contains(r#"<span class="date">Aug 11</span>"#));
+        assert!(html.contains(r#"<span class="date">Aug 13</span>"#));
         assert!(html.contains("Times are shown in America/New_York"));
         assert!(html.contains(r#"name="requester_email""#), "details fields ride along");
         assert!(html.contains("Book this time"));
@@ -786,7 +1178,83 @@ mod tests {
         // Both scripts external, one stylesheet.
         assert!(html.contains("booking.js") && html.contains("form.js"));
         let names: Vec<&str> = page.assets().iter().map(|(n, _)| *n).collect();
-        assert_eq!(names, ["booking.css", "form.js", "booking.js"]);
+        assert_eq!(names, ["booking.css", "form.js", "booking.js", "poll.js"]);
+    }
+
+    /// One start time renders once: the meeting length is a server-side
+    /// choice made through links, exactly like week paging, so the page
+    /// dedupes with JavaScript off and the links preserve each other's state.
+    #[test]
+    fn each_length_is_its_own_view_and_the_links_work_without_js() {
+        let slots = [
+            slot("2026-08-11T17:00:00Z", 30),
+            slot("2026-08-11T17:00:00Z", 60),
+            slot("2026-08-13T18:30:00Z", 30),
+        ];
+        // Default: the shortest length, so nothing renders twice.
+        let page = booking()
+            .booking_page(&slots, &options("2026-08-10T12:00:00Z"))
+            .unwrap();
+        assert!(page.html.contains("2026-08-11T17:00:00Z|30"));
+        assert!(
+            !page.html.contains(r#"value="2026-08-11T17:00:00Z|60""#),
+            "the 60-minute slot lives on the 60-minute view"
+        );
+        // The switch is links with the current one marked.
+        assert!(page.html.contains(r#"aria-current="true">30 min</a>"#));
+        assert!(page.html.contains("&mins=60"));
+
+        // ?mins=60 shows the 60-minute slots and only those.
+        let mut hour = options("2026-08-10T12:00:00Z");
+        hour.duration = Some(60);
+        let page = booking().booking_page(&slots, &hour).unwrap();
+        assert!(page.html.contains(r#"value="2026-08-11T17:00:00Z|60""#));
+        assert!(!page.html.contains(r#"value="2026-08-11T17:00:00Z|30""#));
+        assert!(page.html.contains(r#"aria-current="true">60 min</a>"#));
+
+        // A length nobody offers falls back rather than rendering nothing.
+        let mut bogus = options("2026-08-10T12:00:00Z");
+        bogus.duration = Some(45);
+        let page = booking().booking_page(&slots, &bogus).unwrap();
+        assert!(page.html.contains(r#"value="2026-08-11T17:00:00Z|30""#));
+
+        // One length on offer: no switch at all, and no &mins= anywhere.
+        let single = [slot("2026-08-11T17:00:00Z", 30)];
+        let page = booking()
+            .booking_page(&single, &options("2026-08-10T12:00:00Z"))
+            .unwrap();
+        assert!(!page.html.contains("class=\"durations\""));
+        assert!(!page.html.contains("&mins="));
+    }
+
+    /// A rejected submission keeps what the visitor already did: the picked
+    /// slot arrives re-checked, the typed values ride the details fields,
+    /// and the error summary names fields by label, never by name.
+    #[test]
+    fn a_rejected_submission_keeps_the_slot_and_names_fields_by_label() {
+        let slots = [slot("2026-08-11T17:00:00Z", 30)];
+        let mut options = options("2026-08-10T12:00:00Z");
+        options.values.insert(
+            "_slot".into(),
+            "2026-08-11T17:00:00Z|30".into(),
+        );
+        options.values.insert("requester_name".into(), "Ada".into());
+        options.errors = vec![crate::ValidationError {
+            field: "requester_email".into(),
+            message: "is not a valid email address".into(),
+        }];
+        let page = booking().booking_page(&slots, &options).unwrap();
+        assert!(
+            page.html
+                .contains(r#"value="2026-08-11T17:00:00Z|30" checked"#),
+            "the picked slot survives the round trip"
+        );
+        assert!(page.html.contains(r#"value="Ada""#), "typed values survive");
+        assert!(
+            page.html.contains(">Your email</a>"),
+            "the summary says the label"
+        );
+        assert!(!page.html.contains(">requester_email</a>"));
     }
 
     #[test]
@@ -797,7 +1265,7 @@ mod tests {
         ];
         let now = "2026-08-10T12:00:00Z";
         let first = booking().booking_page(&slots, &options(now)).unwrap();
-        assert!(first.html.contains("later &rarr;"), "a later slot means a next link");
+        assert!(first.html.contains("?week=2026-08-17\">later"), "a later slot means a next link");
         assert!(!first.html.contains("earlier"), "the first week has no past");
         assert!(!first.html.contains("Aug 25"), "next week's slot is not shown");
 
@@ -848,6 +1316,52 @@ mod tests {
         )
         .unwrap();
         assert!(plain.booking_page(&[], &BookingOptions::default()).is_err());
+    }
+
+    /// The poll cell carries its heat as a discrete class and its count as
+    /// text, so the information never rides on colour alone — and the page
+    /// ships the autosave status element and both scripts.
+    #[test]
+    fn poll_cells_carry_discrete_heat_and_counts_in_text() {
+        let candidates = [
+            PollCandidate {
+                start: t("2030-02-05T18:00:00Z"),
+                end: t("2030-02-05T19:00:00Z"),
+                duration_minutes: 60,
+                mine: Some(PollAnswer::Yes),
+                yes_count: 3,
+            },
+            PollCandidate {
+                start: t("2030-02-06T15:00:00Z"),
+                end: t("2030-02-06T16:00:00Z"),
+                duration_minutes: 60,
+                mine: None,
+                yes_count: 0,
+            },
+        ];
+        let options = PollPageOptions {
+            title: "Lab meeting".into(),
+            participant: "Tal".into(),
+            timezone: chrono_tz::America::New_York,
+            action: String::new(),
+            assets: "/p/a/".into(),
+            theme: crate::theme::NOCTURNE,
+            deadline_local: None,
+            responded: 3,
+            total: 5,
+            open: true,
+            notice: None,
+        };
+        let page = poll_page(&candidates, &options);
+        // 3 of 5 yes → ceil(3·5/5) = 3 of the 5 heat steps.
+        assert!(page.html.contains("heat-3"));
+        assert!(page.html.contains("3 of 5 yes"));
+        // Nobody yet: the cold cell says nothing rather than "0 of 5".
+        assert!(page.html.contains("heat-0"));
+        assert!(!page.html.contains("0 of 5 yes"));
+        assert!(page.html.contains(r#"id="savestate""#));
+        assert!(page.html.contains("poll.js") && page.html.contains("booking.js"));
+        assert!(!page.html.contains("<script>"), "no inline script under the gate CSP");
     }
 
     #[test]

@@ -7,63 +7,125 @@
 
   // 1. Times in the visitor's zone — every stamp and the zone line together,
   // or nothing: a page half-converted is worse than a labelled host zone.
+  var zone = config.timezone;
   try {
-    var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-    if (zone && zone !== config.timezone) {
-      var whens = document.querySelectorAll(".when[data-utc]");
+    var detected = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    if (detected && detected !== config.timezone) {
+      zone = detected;
       var fmt = new Intl.DateTimeFormat(undefined,
         { hour: "numeric", minute: "2-digit", timeZone: zone });
-      whens.forEach(function (el) {
+      document.querySelectorAll(".when[data-utc]").forEach(function (el) {
         el.textContent = fmt.format(new Date(el.getAttribute("data-utc"))).toLowerCase();
       });
-      var nowFmt = new Intl.DateTimeFormat(undefined,
-        { hour: "numeric", minute: "2-digit", timeZone: zone });
       var note = document.getElementById("zone-note");
       if (note) {
         note.textContent = "Times are shown in your time zone (" + zone +
-          " — currently " + nowFmt.format(new Date()).toLowerCase() + ").";
+          " — currently " + fmt.format(new Date()).toLowerCase() + ").";
       }
     }
-  } catch (e) { /* the server-rendered labels stand */ }
+  } catch (e) { zone = config.timezone; /* the server-rendered labels stand */ }
 
-  // 2. The duration filter, built only when there is something to filter.
-  var minutes = [];
-  document.querySelectorAll(".slot .mins[data-minutes]").forEach(function (el) {
-    var m = el.getAttribute("data-minutes");
-    if (minutes.indexOf(m) < 0) minutes.push(m);
+  // 2. The picked time, echoed in full above the details — the reveal is
+  // CSS; this chip is the only part a script writes, and losing it loses a
+  // restatement, never the booking.
+  var picked = document.getElementById("picked");
+  var describe = function (input) {
+    var raw = input.value.split("|");
+    var start = new Date(raw[0]);
+    var minutes = parseInt(raw[1], 10) || 0;
+    var end = new Date(start.getTime() + minutes * 60000);
+    try {
+      var day = new Intl.DateTimeFormat(undefined,
+        { weekday: "long", month: "short", day: "numeric", timeZone: zone });
+      var time = new Intl.DateTimeFormat(undefined,
+        { hour: "numeric", minute: "2-digit", timeZone: zone });
+      return day.format(start) + " · " + time.format(start).toLowerCase() +
+        " – " + time.format(end).toLowerCase() + " (" + minutes + " min)";
+    } catch (e) { return ""; }
+  };
+  var updatePicked = function () {
+    if (!picked) return;
+    var checked = document.querySelector('input[name="_slot"]:checked');
+    picked.textContent = checked ? describe(checked) : "";
+  };
+  document.addEventListener("change", function (event) {
+    if (event.target && event.target.name === "_slot") updatePicked();
   });
-  var week = document.querySelector(".week");
-  if (week && minutes.length > 1) {
-    minutes.sort(function (a, b) { return a - b; });
-    var bar = document.createElement("div");
-    bar.className = "durations";
-    bar.setAttribute("role", "group");
-    bar.setAttribute("aria-label", "Meeting length");
-    var apply = function (wanted) {
-      document.querySelectorAll(".slot").forEach(function (slot) {
-        var m = slot.querySelector(".mins").getAttribute("data-minutes");
-        var show = wanted === null || m === wanted;
-        slot.hidden = !show;
-        if (!show) {
-          var input = slot.querySelector("input");
-          if (input.checked) input.checked = false;
-        }
-      });
-      bar.querySelectorAll("button").forEach(function (b) {
-        b.setAttribute("aria-pressed", String(b.dataset.minutes === (wanted === null ? "all" : wanted)));
-      });
+  updatePicked(); // a rejected submission arrives with its slot re-checked
+
+  // 3. Live availability. The page polls the same truth the POST checks, so
+  // a slot someone else just held leaves the page instead of waiting to fail
+  // at submit; if it was *your* pick, the page says so out loud. New slots
+  // (a freed cancellation, a fresh push) reload a pristine page — anything
+  // typed makes the reload an offer instead, never a theft.
+  var note = document.getElementById("live-note");
+  if (config.slots_url && note && window.fetch) {
+    var dirty = false;
+    document.addEventListener("input", function (event) {
+      if (event.target && event.target.closest && event.target.closest(".details")) dirty = true;
+    });
+    var hostDay = null;
+    try {
+      hostDay = new Intl.DateTimeFormat("en-CA",
+        { timeZone: config.timezone, year: "numeric", month: "2-digit", day: "2-digit" });
+    } catch (e) {}
+    var inShownWeek = function (iso) {
+      if (!hostDay || !config.week_start) return false;
+      var day = hostDay.format(new Date(iso));
+      return day >= config.week_start && day < config.week_end;
     };
-    var mk = function (label, value) {
-      var b = document.createElement("button");
-      b.type = "button";
-      b.textContent = label;
-      b.dataset.minutes = value === null ? "all" : value;
-      b.addEventListener("click", function () { apply(value); });
-      bar.appendChild(b);
-      return b;
+    var tell = function (message, withReload) {
+      note.textContent = message;
+      if (withReload) {
+        var link = document.createElement("a");
+        link.href = window.location.href;
+        link.textContent = "Show them";
+        note.appendChild(document.createTextNode(" — "));
+        note.appendChild(link);
+      }
+      note.hidden = false;
     };
-    minutes.forEach(function (m) { mk(m + " min", m); });
-    mk("all", null).setAttribute("aria-pressed", "true");
-    week.parentNode.insertBefore(bar, week);
+    var sweep = function (offered) {
+      var open = {};
+      offered.forEach(function (s) { open[s.start + "|" + s.duration_minutes] = true; });
+      var shown = {};
+      var pickTaken = false;
+      document.querySelectorAll('.week input[name="_slot"]').forEach(function (input) {
+        var slot = input.closest(".slot");
+        if (!slot || slot.classList.contains("gone")) return;
+        if (open[input.value]) { shown[input.value] = true; return; }
+        if (input.checked) { input.checked = false; pickTaken = true; }
+        slot.classList.add("gone");
+        window.setTimeout(function () {
+          var day = slot.closest(".day");
+          slot.remove();
+          if (day && !day.querySelector(".slot")) day.remove();
+        }, 350);
+      });
+      if (pickTaken) {
+        updatePicked();
+        tell("That time was just taken — these are still open.");
+      }
+      var fresh = offered.some(function (s) {
+        return s.duration_minutes === config.duration &&
+          !shown[s.start + "|" + s.duration_minutes] &&
+          inShownWeek(s.start) && new Date(s.start) > new Date();
+      });
+      if (fresh) {
+        var untouched = !dirty && !document.querySelector('input[name="_slot"]:checked');
+        if (untouched) { window.location.reload(); }
+        else if (note.hidden) { tell("More times just opened up.", true); }
+      }
+    };
+    var refresh = function () {
+      fetch(config.slots_url, { headers: { Accept: "application/json" } })
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (data) { if (data && data.slots) sweep(data.slots); })
+        .catch(function () { /* offline is not an error the page can fix */ });
+    };
+    window.setInterval(refresh, 30000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") refresh();
+    });
   }
 })();

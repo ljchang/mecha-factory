@@ -26,6 +26,70 @@ const STALE_AFTER_HOURS: i64 = 24;
 #[derive(serde::Deserialize)]
 pub struct WeekQuery {
     week: Option<String>,
+    /// The meeting length being viewed, from the page's own links. A string
+    /// parsed leniently, like `week`: a mangled query on a public page gets
+    /// the default view, never a 400.
+    mins: Option<String>,
+}
+
+impl WeekQuery {
+    fn duration(&self) -> Option<u32> {
+        self.mins.as_deref().and_then(|m| m.parse().ok())
+    }
+}
+
+/// What the page offers right now: the pushed cache minus live holds and
+/// confirmed bookings, future-only. One computation behind the page, the
+/// race-loser re-render, and `slots.json`, because two copies of a
+/// subtraction is how two surfaces end up disagreeing about what is open.
+fn open_slots(
+    app: &Shared,
+    user_id: &str,
+    id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (Vec<mecha_manifest::availability::Slot>, Option<String>) {
+    let now_stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let blocking = app
+        .db
+        .bookings_blocking(user_id, id, &now_stamp)
+        .unwrap_or_default();
+    let Some(row) = app.db.slots_get(user_id, id).ok().flatten() else {
+        // No cache yet: the page exists and says nothing is open, which is
+        // what a just-created instrument honestly offers.
+        return (Vec::new(), None);
+    };
+    let mut slots: Vec<mecha_manifest::availability::Slot> =
+        serde_json::from_str(&row.slots).unwrap_or_default();
+    slots.retain(|s| {
+        s.start > now
+            && !blocking.iter().any(|(b_start, b_end)| {
+                match (
+                    chrono::DateTime::parse_from_rfc3339(b_start),
+                    chrono::DateTime::parse_from_rfc3339(b_end),
+                ) {
+                    (Ok(bs), Ok(be)) => {
+                        bs.with_timezone(&chrono::Utc) < s.end
+                            && s.start < be.with_timezone(&chrono::Utc)
+                    }
+                    // An unparseable row blocks nothing it can name — but it
+                    // must not unblock anything either; treat it as covering
+                    // everything, because a corrupt ledger row is a bug to
+                    // surface, not free time.
+                    _ => true,
+                }
+            })
+    });
+    let stale = chrono::DateTime::parse_from_rfc3339(&row.generated_at)
+        .map(|g| now - g.with_timezone(&chrono::Utc) > chrono::Duration::hours(STALE_AFTER_HOURS))
+        // An unparseable stamp is stale, not fresh.
+        .unwrap_or(true);
+    let notice = stale.then(|| {
+        format!(
+            "Availability was last refreshed {} — recent changes may not show.",
+            row.generated_at
+        )
+    });
+    (slots, notice)
 }
 
 /// Whose booking page, and which — or nothing, in a way that says nothing,
@@ -71,55 +135,10 @@ pub async fn page(
     };
 
     let now = chrono::Utc::now();
-    let now_stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     // The box subtracts, never adds: live holds and confirmed bookings come
     // off whatever home pushed, judged against the clock at query time so an
     // abandoned hold frees its slot with no sweeper anywhere.
-    let blocking = app
-        .db
-        .bookings_blocking(&user.id, &id, &now_stamp)
-        .unwrap_or_default();
-    let blocked = |start: &chrono::DateTime<chrono::Utc>,
-                   end: &chrono::DateTime<chrono::Utc>|
-     -> bool {
-        blocking.iter().any(|(b_start, b_end)| {
-            let parse = |raw: &str| {
-                chrono::DateTime::parse_from_rfc3339(raw)
-                    .map(|t| t.with_timezone(&chrono::Utc))
-            };
-            match (parse(b_start), parse(b_end)) {
-                (Ok(bs), Ok(be)) => bs < *end && *start < be,
-                // An unparseable row blocks nothing it can name — but it
-                // must not unblock anything either; treat it as covering
-                // everything, because a corrupt ledger row is a bug to
-                // surface, not free time.
-                _ => true,
-            }
-        })
-    };
-    let cache = app.db.slots_get(&user.id, &id).ok().flatten();
-    let (slots, stale_notice) = match &cache {
-        Some(row) => {
-            let mut slots: Vec<mecha_manifest::availability::Slot> =
-                serde_json::from_str(&row.slots).unwrap_or_default();
-            slots.retain(|s| !blocked(&s.start, &s.end));
-            let stale = chrono::DateTime::parse_from_rfc3339(&row.generated_at)
-                .map(|g| now - g.with_timezone(&chrono::Utc)
-                    > chrono::Duration::hours(STALE_AFTER_HOURS))
-                // An unparseable stamp is stale, not fresh.
-                .unwrap_or(true);
-            let notice = stale.then(|| {
-                format!(
-                    "Availability was last refreshed {} — recent changes may not show.",
-                    row.generated_at
-                )
-            });
-            (slots, notice)
-        }
-        // No cache yet: the page exists and says nothing is open, which is
-        // what a just-created instrument honestly offers.
-        None => (Vec::new(), None),
-    };
+    let (slots, stale_notice) = open_slots(&app, &user.id, &id, now);
 
     let options = BookingOptions {
         action: format!("/s/{handle}/{id}"),
@@ -127,7 +146,9 @@ pub async fn page(
         theme: mecha_manifest::Theme::by_name(&app.config.theme),
         now,
         week: query.week.as_deref().and_then(|w| w.parse().ok()),
+        duration: query.duration(),
         stale_notice,
+        live_slots_url: Some(format!("/s/{handle}/{id}/slots.json")),
         ..BookingOptions::default()
     };
     match parsed.booking_page(&slots, &options) {
@@ -142,6 +163,35 @@ pub async fn page(
             Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
         }
     }
+}
+
+/// `GET /s/{handle}/{id}/slots.json` — what is open, right now.
+///
+/// The page's own live refresh: the same subtraction the GET and the POST
+/// judge, as data, so an open tab can drop a slot the moment someone else
+/// holds it instead of selling it until the next full load. `no-store`,
+/// because a cached copy of "what is open right now" is a contradiction.
+pub async fn slots_json(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, id)): Path<(String, String)>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((user, _)) = resolve(&app, &handle, &id) else {
+        return nothing_here();
+    };
+    let (slots, _) = open_slots(&app, &user.id, &id, chrono::Utc::now());
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({ "slots": slots }).to_string(),
+    )
+        .into_response()
 }
 
 /// `GET /s/{handle}/{id}/{name}` — the page's stylesheet and scripts.
@@ -238,14 +288,16 @@ pub async fn submit(
     fields_only.retain(|k, _| !k.starts_with('_'));
     let submission = match parsed.validate_at(&fields_only, mecha_manifest::Phase::Submit) {
         Ok(submission) => submission,
-        Err(_) => {
-            // Their week back with the message; re-rendering the form with
-            // per-field errors folds in when the page grows error display
-            // for the POST path.
-            return page_with_notice(
-                &app, &user, &parsed, &handle, &id,
-                "Some answers need attention — please try again.",
-            );
+        Err(errors) => {
+            // Everything the visitor already did survives the rejection: the
+            // typed values ride back into the fields, the errors render as
+            // the form's own summary-plus-per-field messages, and `_slot`
+            // stays in the values so their picked time arrives re-checked.
+            return page_back(&app, &user, &parsed, &handle, &id, Rejection {
+                notice: None,
+                values: raw,
+                errors,
+            });
         }
     };
     let Some(address) = submission
@@ -280,11 +332,14 @@ pub async fn submit(
     match app.db.booking_hold(&hold, &now_stamp) {
         Ok(true) => {}
         Ok(false) => {
-            // The race, lost gracefully: the refreshed week, with the truth.
-            return page_with_notice(
-                &app, &user, &parsed, &handle, &id,
-                "That time was just taken — these are still open.",
-            );
+            // The race, lost gracefully: the refreshed week with the truth —
+            // and everything they typed still in the form, because losing a
+            // slot must not also cost the details.
+            return page_back(&app, &user, &parsed, &handle, &id, Rejection {
+                notice: Some("That time was just taken — these are still open.".into()),
+                values: raw,
+                errors: Vec::new(),
+            });
         }
         Err(e) => {
             tracing::error!(%id, error = %e, "taking a hold");
@@ -349,43 +404,42 @@ pub async fn submit(
     )
 }
 
-/// The weekly page with a line of truth above it — the race loser's view,
-/// and the invalid submission's. Rendered by the same path as the GET so
-/// what it offers is already narrowed by every live hold including the one
-/// that just beat this visitor.
-fn page_with_notice(
+/// What a rejected POST carries back onto the page: a one-line notice (the
+/// race loser's truth), the visitor's own values — `_slot` included, so a
+/// still-open pick arrives re-checked — and any per-field errors.
+struct Rejection {
+    notice: Option<String>,
+    values: serde_json::Map<String, serde_json::Value>,
+    errors: Vec<mecha_manifest::ValidationError>,
+}
+
+/// The weekly page with everything the visitor already did still on it —
+/// the race loser's view, and the invalid submission's. Rendered by the
+/// same path as the GET so what it offers is already narrowed by every live
+/// hold including the one that just beat this visitor.
+fn page_back(
     app: &Shared,
     user: &UserRow,
     parsed: &RequestType,
     handle: &str,
     id: &str,
-    notice: &str,
+    rejection: Rejection,
 ) -> Response {
     let now = chrono::Utc::now();
-    let now_stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let blocking = app
-        .db
-        .bookings_blocking(&user.id, id, &now_stamp)
-        .unwrap_or_default();
-    let mut slots: Vec<mecha_manifest::availability::Slot> = app
-        .db
-        .slots_get(&user.id, id)
-        .ok()
-        .flatten()
-        .and_then(|row| serde_json::from_str(&row.slots).ok())
-        .unwrap_or_default();
-    slots.retain(|s| {
-        !blocking.iter().any(|(b_start, b_end)| {
-            match (
-                chrono::DateTime::parse_from_rfc3339(b_start),
-                chrono::DateTime::parse_from_rfc3339(b_end),
-            ) {
-                (Ok(bs), Ok(be)) => {
-                    bs.with_timezone(&chrono::Utc) < s.end
-                        && s.start < be.with_timezone(&chrono::Utc)
-                }
-                _ => true,
-            }
+    let (slots, _) = open_slots(app, &user.id, id, now);
+    // The view follows the picked slot: its length, and (when still open)
+    // its week, so the re-render shows the visitor the page they were on.
+    let picked = rejection
+        .values
+        .get("_slot")
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.split_once('|'));
+    let duration = picked.and_then(|(_, mins)| mins.parse().ok());
+    let week = picked.and_then(|(start, _)| {
+        chrono::DateTime::parse_from_rfc3339(start).ok().and_then(|t| {
+            parsed.availability_policy().and_then(|p| p.ok()).map(|p| {
+                t.with_timezone(&p.timezone).date_naive()
+            })
         })
     });
     let options = BookingOptions {
@@ -393,8 +447,12 @@ fn page_with_notice(
         assets: format!("/s/{handle}/{id}/"),
         theme: mecha_manifest::Theme::by_name(&app.config.theme),
         now,
-        stale_notice: Some(notice.to_string()),
-        ..BookingOptions::default()
+        week,
+        duration,
+        values: rejection.values,
+        errors: rejection.errors,
+        stale_notice: rejection.notice,
+        live_slots_url: Some(format!("/s/{handle}/{id}/slots.json")),
     };
     match parsed.booking_page(&slots, &options) {
         Ok(page) => (
@@ -511,10 +569,19 @@ pub async fn confirm(
         Ok(false) => {
             let (_, _) = app.db.queue_ack(&user.id, &[verified.seq]).unwrap_or_default();
             tracing::info!(%booking_id, "a hold lapsed before its click");
-            return page_with_notice(
-                &app, &user, &parsed, &handle, &id,
-                "Your held time lapsed before you confirmed — these are still open.",
-            );
+            // Their answers came through the verified payload, so the page
+            // they get back has everything filled in — all that is left to
+            // do is pick a still-open time. The lapsed `_slot` is stripped:
+            // re-checking a time that is gone would be a lie.
+            let mut values = values.clone();
+            values.retain(|k, _| !k.starts_with('_'));
+            return page_back(&app, &user, &parsed, &handle, &id, Rejection {
+                notice: Some(
+                    "Your held time lapsed before you confirmed — these are still open.".into(),
+                ),
+                values,
+                errors: Vec::new(),
+            });
         }
         Err(e) => {
             tracing::error!(error = %e, "converting a hold");

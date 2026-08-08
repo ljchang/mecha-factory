@@ -191,13 +191,20 @@ pub async fn page(
 
 /// `POST /p/{handle}/{poll_id}/{token}` — this participant's answers,
 /// wholesale. The newest submission replaces the last: changing your mind
-/// is ordinary. Redirects back to the GET (a reload must not resubmit).
+/// is ordinary. Redirects back to the GET (a reload must not resubmit) —
+/// unless the caller asked for JSON, which is poll.js autosaving: a bare
+/// 204 says saved, anything else tells the script to hand back the button.
 pub async fn answer(
     State(app): State<Shared>,
     Extension(origin): Extension<Origin>,
     Path((handle, poll_id, token)): Path<(String, String, String)>,
+    headers: axum::http::HeaderMap,
     body: String,
 ) -> Response {
+    let wants_json = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/json"));
     if v1::not_on_gate(&origin).is_some() {
         return nothing_here();
     }
@@ -205,7 +212,11 @@ pub async fn answer(
         return nothing_here();
     };
     if !still_open(&poll, chrono::Utc::now()) {
-        // A stale tab after the close: the read-only page is the answer.
+        // A stale tab after the close: the read-only page is the answer,
+        // and an autosave is told plainly rather than shown a page.
+        if wants_json {
+            return StatusCode::CONFLICT.into_response();
+        }
         return render(&app, &poll, &name, None);
     }
 
@@ -236,6 +247,7 @@ pub async fn answer(
         .db
         .poll_answer(&crate::intake::hash_token(&token), &payload, &crate::db::now())
     {
+        Ok(true) if wants_json => StatusCode::NO_CONTENT.into_response(),
         Ok(true) => (
             StatusCode::SEE_OTHER,
             [(
@@ -244,6 +256,7 @@ pub async fn answer(
             )],
         )
             .into_response(),
+        Ok(false) if wants_json => StatusCode::CONFLICT.into_response(),
         Ok(false) => render(&app, &poll, &name, None),
         Err(e) => {
             tracing::error!(poll = %poll_id, error = %e, "storing answers");

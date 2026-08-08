@@ -439,32 +439,115 @@ td button { padding: 0.25rem 0.625rem; font-size: 0.8125rem; }
   header.site { padding: 1rem 1.25rem 0; }
 }
 
-.booking .weeknav { display:flex; justify-content:space-between; align-items:baseline; margin:1.5rem 0 0.5rem; }
-.booking .weeknav .range { font-weight:600; }
-.booking .zone { color:var(--muted); font-size:0.9rem; }
+/* --- the week frame ----------------------------------------------------- */
+
+.booking .weeknav { display:grid; grid-template-columns:1fr auto 1fr; align-items:center;
+  gap:0.75rem; margin:2rem 0 1rem; }
+.booking .weeknav a { font-family:var(--font-mono); font-size:0.8125rem; text-decoration:none;
+  color:var(--muted); border:1px solid var(--line); border-radius:999px; padding:0.3rem 0.9rem;
+  justify-self:start; white-space:nowrap; transition:color .12s ease, border-color .12s ease; }
+.booking .weeknav a:hover { color:var(--text); border-color:var(--muted); }
+.booking .weeknav > :last-child { justify-self:end; }
+.booking .weeknav .range { font-family:var(--font-mono); font-size:0.8125rem; font-weight:500;
+  letter-spacing:0.06em; text-transform:uppercase; }
+
+.booking .durations { display:inline-flex; gap:0.25rem; border:1px solid var(--line);
+  border-radius:999px; padding:0.25rem; margin:0 0 1.25rem; }
+.booking .durations a { font-family:var(--font-mono); font-size:0.8125rem; text-decoration:none;
+  color:var(--muted); padding:0.25rem 0.9rem; border-radius:999px; transition:color .12s ease; }
+.booking .durations a:hover { color:var(--text); }
+.booking .durations a[aria-current="true"] { background:var(--accent); color:var(--on-accent); }
+
+.booking .zone { color:var(--muted); font-size:0.875rem; margin:0 0 1.25rem; }
 .booking .stale { color:var(--signal); font-size:0.9rem; }
-.booking .week { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(7.5rem,1fr);
-  gap:0.75rem; overflow-x:auto; scroll-snap-type:x proximity; padding-bottom:0.5rem; }
-.booking .day { scroll-snap-align:start; }
-.booking .day h2 { font-size:0.95rem; margin:0 0 0.5rem; color:var(--muted); font-weight:600; }
-.booking .slot { display:flex; gap:0.5rem; align-items:baseline; justify-content:space-between;
-  border:1px solid var(--line); border-radius:var(--radius); padding:0.45rem 0.7rem;
-  margin-bottom:0.5rem; cursor:pointer; background:var(--surface); }
-.booking .slot:hover { border-color:var(--accent); }
-.booking .slot input { position:absolute; opacity:0; pointer-events:none; }
-.booking .slot:has(input:checked) { border-color:var(--accent); outline:2px solid var(--ring); }
-.booking .slot .mins { color:var(--muted); font-size:0.85rem; white-space:nowrap; }
+.booking .notice { color:var(--signal); border-left:2px solid var(--signal);
+  padding:0.25rem 0 0.25rem 1rem; font-size:0.9375rem; }
+.booking .notice a { color:var(--signal); }
 .booking .empty { color:var(--muted); margin:2rem 0; }
-.booking .durations { display:inline-flex; gap:0; border:1px solid var(--line);
-  border-radius:var(--radius); overflow:hidden; margin:0 0 0.75rem; }
-.booking .durations button { border:0; background:var(--surface); color:var(--text);
-  padding:0.35rem 0.9rem; cursor:pointer; }
-.booking .durations button[aria-pressed="true"] { background:var(--accent); color:var(--on-accent); }
-.booking .slot.answer { display:block; cursor:default; }
-.booking .slot.answer legend { font-weight:600; padding:0; }
-.booking .slot.answer .tri { display:inline-flex; gap:0.3rem; align-items:center;
+
+.booking .week { display:grid; grid-auto-flow:column; grid-auto-columns:minmax(7.25rem,1fr);
+  gap:1rem; overflow-x:auto; scroll-snap-type:x proximity; padding-bottom:0.75rem; }
+.booking .day { scroll-snap-align:start; min-width:0; }
+.booking .day h2 { display:flex; flex-direction:column; gap:0.125rem; margin:0 0 0.75rem;
+  padding:0 0 0.5rem; border-bottom:1px solid var(--line); }
+.booking .day .dow { font-family:var(--font-mono); font-size:0.75rem; font-weight:500;
+  text-transform:uppercase; letter-spacing:0.08em; }
+.booking .day .date { font-size:0.8125rem; font-weight:400; color:var(--muted); }
+
+/* --- slots: the time is the button -------------------------------------- */
+
+.booking .slot { display:block; text-align:center; font-family:var(--font-mono);
+  font-size:0.875rem; font-variant-numeric:tabular-nums; border:1px solid var(--line);
+  border-radius:var(--radius); padding:0.55rem 0.5rem; margin-bottom:0.5rem; cursor:pointer;
+  background:var(--surface); transition:border-color .12s ease, background .12s ease,
+  color .12s ease, opacity .3s ease, transform .3s ease; }
+.booking .slot:not(.answer):hover { border-color:var(--accent); color:var(--accent); }
+.booking .slot input { position:absolute; opacity:0; pointer-events:none; }
+/* The fill is the *booking* pick alone. A poll cell is also a `.slot` and
+   always holds a checked tri-state radio, so keying this on `input:checked`
+   would flood every cell — the selector names the booking radio on purpose. */
+.booking .slot:has(input[name="_slot"]:checked) { background:var(--accent);
+  border-color:var(--accent); color:var(--on-accent); }
+.booking .slot:has(input:focus-visible) { border-color:var(--ring);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
+/* A slot someone else just took leaves quietly; its day follows when empty. */
+.booking .slot.gone { opacity:0; transform:scale(0.96); pointer-events:none; }
+
+/* --- the reveal: pick a time, get the form ------------------------------- */
+
+.booking .pick-hint { color:var(--muted); font-size:0.9375rem; margin:1.5rem 0 0; }
+.booking .picked { display:none; }
+.booking .picked:not(:empty) { display:block; font-family:var(--font-mono); font-size:0.875rem;
+  border:1px solid var(--accent); border-left-width:3px; border-radius:var(--radius);
+  padding:0.6rem 0.9rem; margin:1.5rem 0 1.5rem; }
+.booking .details { margin-top:1.5rem; }
+@supports selector(:has(*)) {
+  .booking form:not(:has(input[name="_slot"]:checked)) .details,
+  .booking form:not(:has(input[name="_slot"]:checked)) button[type="submit"] { display:none; }
+  .booking form:has(input[name="_slot"]:checked) .pick-hint { display:none; }
+  .booking form:not(:has(input[name="_slot"])) .pick-hint { display:none; }
+}
+
+/* --- the poll grid ------------------------------------------------------- */
+
+.booking .slot.answer { display:block; text-align:left; font-family:var(--font-sans);
+  cursor:default; padding:0.55rem 0.75rem; }
+.booking .slot.answer legend { font-family:var(--font-mono); font-size:0.8125rem;
+  font-weight:500; padding:0; float:left; width:100%; text-transform:none;
+  letter-spacing:0.01em; color:var(--text); }
+.booking .slot.answer .len { color:var(--muted); font-weight:400; }
+.booking .count { color:var(--muted); font-size:0.75rem; white-space:nowrap;
+  float:right; font-weight:400; }
+.booking .slot.answer .tri { display:inline-flex; gap:0.3rem; align-items:center; clear:both;
   margin:0.35rem 0.9rem 0 0; cursor:pointer; color:var(--muted); font-size:0.9rem; }
 .booking .slot.answer .tri input { position:static; opacity:1; pointer-events:auto; }
 .booking .slot.answer:has(input[value="yes"]:checked) { border-color:var(--accent);
   outline:2px solid var(--ring); }
 .booking .slot.answer:has(input[value="if_needed"]:checked) { border-color:var(--signal); }
+
+/* Heat: how many others said yes, in six tellable steps. Colour never
+   carries it alone — the count is in the cell's text and accessible name. */
+.booking .heat-1 { background:color-mix(in srgb, var(--accent) 8%, var(--surface)); }
+.booking .heat-2 { background:color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.booking .heat-3 { background:color-mix(in srgb, var(--accent) 24%, var(--surface)); }
+.booking .heat-4 { background:color-mix(in srgb, var(--accent) 33%, var(--surface)); }
+.booking .heat-5 { background:color-mix(in srgb, var(--accent) 42%, var(--surface)); }
+
+/* poll.js upgrades the grid to tap-to-cycle painting: the radios leave the
+   page (they stay in the form), the whole cell becomes the control, and the
+   state chip says what your answer is. */
+.booking .week.poll.paint .slot.answer { cursor:pointer; touch-action:none;
+  user-select:none; -webkit-user-select:none; }
+.booking .paint .slot.answer .tri { display:none; }
+.booking .slot.answer .state { display:none; }
+.booking .paint .slot.answer .state { display:inline-block; font-family:var(--font-mono);
+  font-size:0.75rem; margin-top:0.35rem; padding:0.1rem 0.5rem; border-radius:999px;
+  border:1px solid var(--line); color:var(--muted); }
+.booking .paint .slot.answer[data-state="yes"] .state { background:var(--accent);
+  border-color:var(--accent); color:var(--on-accent); }
+.booking .paint .slot.answer[data-state="if_needed"] .state { border-color:var(--signal);
+  color:var(--signal); }
+.booking .paint .slot.answer:focus-visible { outline:none; border-color:var(--ring);
+  box-shadow:0 0 0 3px color-mix(in srgb, var(--ring) 35%, transparent); }
+.booking .savestate { font-family:var(--font-mono); font-size:0.8125rem; color:var(--muted); }
+.booking form.autosaves button[type="submit"] { display:none; }

@@ -180,6 +180,10 @@ pub fn router(app: Shared) -> Router {
         // The booking page: the same gate, the same no-script posture as the
         // forms — server-rendered HTML whose scripts are same-origin files.
         .route("/s/{handle}/{type_id}", get(booking::page).post(booking::submit))
+        // The live half of the page: what is open right now, as data, for
+        // the open tab that polls it. A static segment, so it wins over the
+        // `{name}` asset route below.
+        .route("/s/{handle}/{type_id}/slots.json", get(booking::slots_json))
         .route("/s/{handle}/{type_id}/{name}", get(booking::asset))
         // GET is a button and POST is the booking, for the same
         // scanner reason as the form's confirm route.

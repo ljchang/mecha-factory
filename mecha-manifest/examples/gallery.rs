@@ -178,17 +178,12 @@ enum Variant {
     /// The week view of a `kind = "booking"` type. `weeks` pages forward from
     /// the first week holding a slot, which is what a "next week" link does.
     Booking { weeks: i64 },
-    /// A booking page re-served with the details form rejected.
-    ///
-    /// The one variant here that is **not** a state the box reaches today:
-    /// `booking_page` renders `values` and `errors`, but both server callers
-    /// pass `BookingOptions::default()`, so a failed POST currently gets the
-    /// week back with a one-line notice instead (`http/booking.rs`, which says
-    /// so). Rendered anyway, because it is what the POST path is growing into
-    /// and seeing it is how the two remaining gaps became visible — the
-    /// summary lists raw field *names* where the form's own summary lists
-    /// labels, and no `_slot` radio comes back checked, so a visitor who
-    /// mistypes an address loses the time they picked.
+    /// A booking page re-served with the details form rejected — the state
+    /// the box's POST path really produces (`http/booking.rs::page_back`):
+    /// the summary names fields by label, the typed values ride back, and
+    /// the picked `_slot` arrives re-checked. Rendering this page in the
+    /// gallery is what surfaced both of those requirements before the
+    /// server path existed, which is the gallery doing its job.
     BookingErrors,
     /// The poll page: the same weekly frame over seeded candidates, each a
     /// tri-state answer.
@@ -447,6 +442,7 @@ fn render_booking(
             values,
             errors,
             stale_notice: None,
+            ..BookingOptions::default()
         },
     )?;
     Ok(page)
