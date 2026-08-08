@@ -172,6 +172,12 @@ pub fn router(app: Shared) -> Router {
         // forms — server-rendered HTML whose scripts are same-origin files.
         .route("/s/{handle}/{type_id}", get(booking::page).post(booking::submit))
         .route("/s/{handle}/{type_id}/{name}", get(booking::asset))
+        // GET is a button and POST is the booking, for the same
+        // scanner reason as the form's confirm route.
+        .route(
+            "/s/{handle}/{type_id}/c/{token}",
+            get(booking::confirm_page).post(booking::confirm),
+        )
         // GET is a page with a button and POST is the verification, because
         // mail scanners follow GETs — see `intake::confirm_page`.
         .route(

@@ -312,8 +312,16 @@ pub fn record_from(row: &Value, now: &str) -> Record {
         attachments: attachments_from(row, seq),
     };
 
+    // Keys beginning with `_` are the boundary's own bookkeeping — a
+    // booking's slot rides as `_slot_start`/`_booking_id` — never the
+    // stranger's answers, so they are stripped before validation exactly as
+    // the box stripped them before its own. They stay on the record's
+    // values, where home's handler reads them as typed data.
+    let mut fields_only = raw.clone();
+    fields_only.retain(|k, _| !k.starts_with('_'));
+
     match local_type(&type_id) {
-        Ok(Some(request_type)) => match request_type.validate(&raw) {
+        Ok(Some(request_type)) => match request_type.validate(&fields_only) {
             Ok(mut submission) => {
                 record.valid = true;
                 // Strip the stranger's filenames out of the typed values;
@@ -341,8 +349,15 @@ pub fn record_from(row: &Value, now: &str) -> Record {
                     .map(str::to_string);
                 // The coerced values: a form POSTs strings, and everything
                 // downstream should read real booleans and integers rather than
-                // parsing them again, differently.
+                // parsing them again, differently. The machinery keys ride
+                // back in beside them, uncoerced — they never went through
+                // the validator.
                 record.values = submission.values;
+                for (key, value) in &raw {
+                    if key.starts_with('_') {
+                        record.values.insert(key.clone(), value.clone());
+                    }
+                }
             }
             Err(errors) => {
                 record.invalid_reason = Some(format!(
@@ -688,5 +703,55 @@ field = "requester_email"
         std::fs::create_dir_all(root.join("0000000099-lookslike")).unwrap();
         assert_eq!(store.known().unwrap(), Vec::<i64>::new());
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A drained booking carries its machinery: `_`-prefixed keys are the
+    /// boundary's bookkeeping, stripped before validation on both ends —
+    /// leaving them in would fail every booking against its own manifest —
+    /// and kept on the record, where home's handler reads the slot from
+    /// them. Prose keys still sweep to free_text exactly as before.
+    #[test]
+    fn booking_machinery_keys_skip_validation_and_stay_on_the_record() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let types = home.path().join("factory").join("types");
+        std::fs::create_dir_all(&types).unwrap();
+        std::fs::copy(
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../mecha-manifest/types/book.toml"
+            ),
+            types.join("book.toml"),
+        )
+        .unwrap();
+
+        let row = json!({
+            "seq": 21,
+            "type": "book",
+            "created_at": "2026-08-08T00:00:00Z",
+            "payload": r#"{
+                "requester_name": "Priya",
+                "requester_email": "priya@example.edu",
+                "purpose": "advising",
+                "_slot_start": "2026-08-25T18:00:00Z",
+                "_slot_end": "2026-08-25T18:30:00Z",
+                "_duration_minutes": 30,
+                "_booking_id": "abc123"
+            }"#,
+        });
+        let record = record_from(&row, "2026-08-08T01:00:00Z");
+        std::env::remove_var("MECHA_HOME");
+
+        assert!(record.valid, "{:?}", record.invalid_reason);
+        assert_eq!(record.values["_slot_start"], json!("2026-08-25T18:00:00Z"));
+        assert_eq!(record.values["_booking_id"], json!("abc123"));
+        assert_eq!(record.values["requester_name"], json!("Priya"));
+        assert_eq!(record.reply_to.as_deref(), Some("priya@example.edu"));
+        assert!(
+            !record.free_text.iter().any(|f| f.starts_with('_')),
+            "machinery is typed data, never swept prose: {:?}",
+            record.free_text
+        );
     }
 }

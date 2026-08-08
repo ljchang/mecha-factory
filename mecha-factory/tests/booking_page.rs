@@ -306,3 +306,100 @@ fn a_submission_holds_the_slot_and_the_race_loser_gets_the_week_back() {
         .send(server.gate);
     assert_eq!(reply.status, 404, "{}", reply.body);
 }
+
+/// The whole claim, outside-in: submit holds, the mailed link's POST books,
+/// and the queue row survives to drain. Then the other ending: a hold that
+/// lapsed before its click deletes the queue row — a record that drained
+/// would become a calendar event for a meeting that never happened — and
+/// the stranger gets the week back with the truth.
+#[test]
+fn the_click_books_and_a_lapsed_hold_never_drains() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let put_type = |toml: &str| {
+        let reply = Request::new("PUT", "/v1/types/book", &gate)
+            .auth(&server.key(Scope::Release))
+            .body(toml.as_bytes().to_vec())
+            .send(server.gate);
+        assert_eq!(reply.status, 200, "{}", reply.body);
+    };
+    put_type(BOOK_TOML);
+    let (push, stamp) = future_slot_push();
+    let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    let form = format!(
+        "_slot={}%7C30&requester_name=Priya&requester_email=priya%40example.edu",
+        stamp.replace(':', "%3A")
+    );
+    let submit = |form: &str| {
+        Request::new("POST", "/s/alice/book", &gate)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(form.to_string())
+            .send(server.gate)
+    };
+    assert_eq!(submit(&form).status, 200);
+    let token = server.verification_token();
+
+    // The GET is a button that spends nothing: the row is still unverified
+    // after a scanner's fetch, and the queue still drains nothing.
+    let get = server.get(server.gate, &format!("/s/alice/book/c/{token}"));
+    assert_eq!(get.status, 200);
+    assert!(get.body.contains("Confirm and book"), "{}", get.body);
+    assert_eq!(server.db.queue_depth(Some(&server.user.id)).unwrap(), 0);
+
+    // The click books.
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(reply.body.contains("booked"), "{}", reply.body);
+    assert_eq!(
+        server.db.queue_depth(Some(&server.user.id)).unwrap(),
+        1,
+        "a booked booking drains"
+    );
+    // A second click finds the token spent, and does not double-book.
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
+        .send(server.gate);
+    assert_eq!(reply.status, 404);
+
+    // Round two, with a policy whose holds lapse instantly.
+    put_type(&format!("{BOOK_TOML}\n[policy]\nhold_minutes = 0\n"));
+    // A different slot, so round one's confirmed booking does not block it.
+    let start: chrono::DateTime<chrono::Utc> = stamp.parse().unwrap();
+    let late = (start + chrono::Duration::hours(2))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let late_end = (start + chrono::Duration::hours(2) + chrono::Duration::minutes(30))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let push = serde_json::json!({
+        "generated_at": chrono::Utc::now()
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "horizon_days": 60,
+        "slots": [{"start": late, "end": late_end, "duration_minutes": 30}],
+    })
+    .to_string();
+    let reply = Request::new("PUT", "/v1/instruments/book/slots", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+
+    let form = format!(
+        "_slot={}%7C30&requester_name=Tal&requester_email=tal%40example.edu",
+        late.replace(':', "%3A")
+    );
+    assert_eq!(submit(&form).status, 200);
+    let token = server.verification_token();
+    let reply = Request::new("POST", &format!("/s/alice/book/c/{token}"), &gate)
+        .send(server.gate);
+    assert_eq!(reply.status, 200);
+    assert!(reply.body.contains("lapsed"), "{}", reply.body);
+    assert_eq!(
+        server.db.queue_depth(Some(&server.user.id)).unwrap(),
+        1,
+        "only round one's booking is in the queue — the lapsed one is gone"
+    );
+}

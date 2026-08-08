@@ -406,3 +406,165 @@ fn page_with_notice(
         Err(_) => Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
     }
 }
+
+/// `GET /s/{handle}/{id}/c/{token}` — one button, no token touched.
+///
+/// The same scanner rule as the form's confirm: a GET that spent the token
+/// would let a mail scanner's robot book meetings. The token is not even
+/// looked at — a page that varied on its state would be an oracle.
+pub async fn confirm_page(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, id, _token)): Path<(String, String, String)>,
+) -> Response {
+    use super::intake;
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((_, parsed)) = resolve(&app, &handle, &id) else {
+        return nothing_here();
+    };
+    intake::page(
+        StatusCode::OK,
+        intake::shell(
+            &parsed.title,
+            "<h1>Confirm your booking</h1>\
+             <p>One click to make it real — this is what keeps a mail \
+             scanner's robot from booking on your behalf. Confirming claims \
+             your held time.</p>\
+             <form method=\"post\"><button type=\"submit\">Confirm and book</button></form>",
+            &format!("/s/{handle}/{id}/"),
+        ),
+    )
+}
+
+/// `POST /s/{handle}/{id}/c/{token}` — the click that books.
+///
+/// Two spends in sequence, and the order is the design: the verify token
+/// first (the stranger proved the address; that is true whatever happens
+/// next), then the hold's conversion. When the conversion fails — the hold
+/// lapsed before the click, or the slot was re-blocked under it — the
+/// just-verified queue row is **deleted**, not left to drain: a drained
+/// record is a booking home will put on a calendar, and this one never
+/// happened. The stranger gets the truth and the week back.
+pub async fn confirm(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, id, token)): Path<(String, String, String)>,
+) -> Response {
+    use super::intake;
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((user, parsed)) = resolve(&app, &handle, &id) else {
+        return nothing_here();
+    };
+
+    let hash = crate::intake::hash_token(&token);
+    let now = crate::db::now();
+    let verified = match app
+        .db
+        .submission_verify(&user.id, &hash, &now, crate::db::VerifyNext::Queued)
+    {
+        Ok(Some(row)) => row,
+        // One page for expired, spent, and never-existed alike — which it
+        // was is not a stranger's business.
+        Ok(None) => {
+            return intake::page(
+                StatusCode::NOT_FOUND,
+                intake::shell(
+                    "Link expired",
+                    &format!(
+                        "<h1>This link is no longer valid</h1>\
+                         <p>It may have expired or already been used. \
+                         <a href=\"/s/{handle}/{id}\">Pick a time</a> to start again.</p>"
+                    ),
+                    &format!("/s/{handle}/{id}/"),
+                ),
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "verifying a booking");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+
+    let values: serde_json::Map<String, serde_json::Value> =
+        serde_json::from_str(&verified.payload).unwrap_or_default();
+    let Some(booking_id) = values.get("_booking_id").and_then(|v| v.as_str()) else {
+        // A queue row with no booking id is not a booking submission; do not
+        // guess. The row is removed for the same never-drain reason.
+        let _ = app.db.queue_ack(&user.id, &[verified.seq]);
+        tracing::error!(seq = verified.seq, "a booking confirm with no _booking_id");
+        return nothing_here();
+    };
+
+    let manage_token = crate::intake::mint_token();
+    let converted = app.db.booking_confirm(
+        booking_id,
+        &crate::intake::hash_token(&manage_token),
+        &now,
+    );
+    match converted {
+        Ok(true) => {}
+        Ok(false) => {
+            let (_, _) = app.db.queue_ack(&user.id, &[verified.seq]).unwrap_or_default();
+            tracing::info!(%booking_id, "a hold lapsed before its click");
+            return page_with_notice(
+                &app, &user, &parsed, &handle, &id,
+                "Your held time lapsed before you confirmed — these are still open.",
+            );
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "converting a hold");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    tracing::info!(handle = %user.handle, %id, seq = verified.seq, "booked");
+
+    // The when, in the host's zone, from the booking row — the record, not
+    // the payload's copy of it.
+    let when = app
+        .db
+        .booking_get(booking_id)
+        .ok()
+        .flatten()
+        .map(|b| booking_when(&parsed, &b))
+        .unwrap_or_default();
+    let body = match &parsed.confirmation {
+        Some(confirmation) => format!(
+            "<h1>{}</h1>\n{when}<p>{}</p>\n",
+            mecha_manifest::escape_text(&confirmation.heading),
+            mecha_manifest::escape_text(confirmation.render(&values).trim()),
+        ),
+        None => format!("<h1>You're booked</h1>\n{when}"),
+    };
+    intake::page(
+        StatusCode::OK,
+        intake::shell(&parsed.title, &body, &format!("/s/{handle}/{id}/")),
+    )
+}
+
+/// "Tuesday, Aug 25 · 2:00 pm – 2:30 pm (America/New_York)", or nothing if
+/// anything about the row does not parse — a wrong time on a confirmation
+/// page is worse than none.
+fn booking_when(parsed: &RequestType, booking: &crate::db::BookingRow) -> String {
+    let Some(Ok(policy)) = parsed.availability_policy() else {
+        return String::new();
+    };
+    let parse = |raw: &str| {
+        chrono::DateTime::parse_from_rfc3339(raw).map(|t| t.with_timezone(&policy.timezone))
+    };
+    let (Ok(start), Ok(end)) = (parse(&booking.slot_start), parse(&booking.slot_end)) else {
+        return String::new();
+    };
+    format!(
+        "<p class=\"intro\"><strong>{} · {} – {}</strong> ({})</p>\n",
+        start.format("%A, %b %-d"),
+        start.format("%-I:%M %p").to_string().to_lowercase(),
+        end.format("%-I:%M %p").to_string().to_lowercase(),
+        policy.timezone
+    )
+}
