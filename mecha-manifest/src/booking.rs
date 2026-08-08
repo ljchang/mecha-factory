@@ -281,6 +281,90 @@ pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> Boo
     }
 }
 
+/// One candidate's standing once answers are in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedCandidate {
+    pub start: DateTime<Utc>,
+    pub duration_minutes: u32,
+    pub yes: usize,
+    pub if_needed: usize,
+    pub no: usize,
+    /// Everyone who answered could attend (yes or if-needed).
+    pub feasible: bool,
+    /// Every participant answered plain yes — nobody pays anything.
+    pub unanimous: bool,
+}
+
+/// Rank a closed (or closing) poll. Pure, so the guardrail is testable:
+/// feasibility first, then the most yeses, then the fewest if-neededs (the
+/// cost — CalBench's point is that "found a time" and "found a time nobody
+/// pays for" are different numbers), then the earliest start as the tie
+/// among equals. A participant who never answered counts as no everywhere,
+/// which only understates — the guardrail below demands full attendance
+/// anyway.
+pub fn rank_poll(
+    candidates: &[(DateTime<Utc>, u32)],
+    answers: &[std::collections::BTreeMap<String, PollAnswer>],
+    total_participants: usize,
+) -> Vec<RankedCandidate> {
+    let mut ranked: Vec<RankedCandidate> = candidates
+        .iter()
+        .map(|(start, duration)| {
+            let key = format!(
+                "{}|{duration}",
+                start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            );
+            let mut yes = 0;
+            let mut if_needed = 0;
+            for participant in answers {
+                match participant.get(&key) {
+                    Some(PollAnswer::Yes) => yes += 1,
+                    Some(PollAnswer::IfNeeded) => if_needed += 1,
+                    _ => {}
+                }
+            }
+            let no = total_participants - yes - if_needed;
+            RankedCandidate {
+                start: *start,
+                duration_minutes: *duration,
+                yes,
+                if_needed,
+                no,
+                feasible: yes + if_needed == total_participants,
+                unanimous: yes == total_participants,
+            }
+        })
+        .collect();
+    ranked.sort_by(|a, b| {
+        b.feasible
+            .cmp(&a.feasible)
+            .then(b.yes.cmp(&a.yes))
+            .then(a.if_needed.cmp(&b.if_needed))
+            .then(a.start.cmp(&b.start))
+    });
+    ranked
+}
+
+/// The auto-book guardrail, exactly as decided: a booking happens by itself
+/// only when every participant answered and exactly one candidate is
+/// unanimous plain-yes. A tie between two unanimous slots, an if-needed in
+/// the best option, or a silent participant all mean judgment — rank and
+/// stage, never guess.
+pub fn clean_winner(
+    ranked: &[RankedCandidate],
+    responded: usize,
+    total_participants: usize,
+) -> Option<&RankedCandidate> {
+    if responded != total_participants {
+        return None;
+    }
+    let mut unanimous = ranked.iter().filter(|c| c.unanimous);
+    match (unanimous.next(), unanimous.next()) {
+        (Some(winner), None) => Some(winner),
+        _ => None,
+    }
+}
+
 /// The Monday of the week holding `date`.
 pub fn week_of(date: NaiveDate) -> NaiveDate {
     date - Duration::days(i64::from(date.weekday().num_days_from_monday()))
@@ -771,5 +855,56 @@ mod tests {
         assert_eq!(week_of("2026-08-13".parse().unwrap()), "2026-08-10".parse().unwrap());
         assert_eq!(week_of("2026-08-10".parse().unwrap()), "2026-08-10".parse().unwrap());
         assert_eq!(week_of("2026-08-16".parse().unwrap()), "2026-08-10".parse().unwrap());
+    }
+
+    /// The guardrail, against every murky shape it must refuse: a tie of
+    /// unanimous slots, an if-needed in the best, a silent participant —
+    /// and the one clean shape it must accept.
+    #[test]
+    fn the_clean_winner_is_unique_unanimous_and_fully_attended() {
+        use std::collections::BTreeMap;
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let candidates = vec![
+            (t("2030-02-05T18:00:00Z"), 60u32),
+            (t("2030-02-06T15:00:00Z"), 60u32),
+        ];
+        let answer = |wed: &str, thu: &str| -> BTreeMap<String, PollAnswer> {
+            [
+                ("2030-02-05T18:00:00Z|60".to_string(), PollAnswer::parse(wed).unwrap()),
+                ("2030-02-06T15:00:00Z|60".to_string(), PollAnswer::parse(thu).unwrap()),
+            ]
+            .into()
+        };
+
+        // Clean: both answered, exactly one unanimous slot.
+        let answers = vec![answer("yes", "no"), answer("yes", "yes")];
+        let ranked = rank_poll(&candidates, &answers, 2);
+        assert_eq!(ranked[0].start, t("2030-02-05T18:00:00Z"));
+        assert!(ranked[0].unanimous);
+        let winner = clean_winner(&ranked, 2, 2).expect("clean");
+        assert_eq!(winner.start, t("2030-02-05T18:00:00Z"));
+
+        // A tie of unanimous slots: judgment, not a guess.
+        let answers = vec![answer("yes", "yes"), answer("yes", "yes")];
+        let ranked = rank_poll(&candidates, &answers, 2);
+        assert!(clean_winner(&ranked, 2, 2).is_none(), "two unanimous = stage");
+
+        // The best needs an if-needed: someone pays, so someone decides.
+        let answers = vec![answer("yes", "no"), answer("if_needed", "no")];
+        let ranked = rank_poll(&candidates, &answers, 2);
+        assert!(ranked[0].feasible && !ranked[0].unanimous);
+        assert!(clean_winner(&ranked, 2, 2).is_none());
+
+        // A silent participant blocks auto even if the answered are unanimous.
+        let answers = vec![answer("yes", "no")];
+        let ranked = rank_poll(&candidates, &answers, 2);
+        assert!(clean_winner(&ranked, 1, 2).is_none(), "silence blocks auto");
+
+        // Feasible-with-cost still outranks infeasible, and fewer
+        // if-neededs outrank more at equal yeses.
+        let answers = vec![answer("yes", "if_needed"), answer("if_needed", "if_needed")];
+        let ranked = rank_poll(&candidates, &answers, 2);
+        assert!(ranked[0].feasible);
+        assert_eq!(ranked[0].if_needed, 1, "the cheaper feasible slot leads");
     }
 }

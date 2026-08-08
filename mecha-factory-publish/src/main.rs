@@ -244,6 +244,56 @@ enum Command {
     /// An instrument's availability: computed here, served by the box.
     #[command(subcommand)]
     Slots(SlotsAction),
+    /// Group polls: seeded candidates out, tri-state answers back.
+    #[command(subcommand)]
+    Polls(PollsAction),
+}
+
+#[derive(Subcommand)]
+enum PollsAction {
+    /// Create a poll from the availability pipeline:
+    ///
+    ///   mecha-mail freebusy --days 60 --json |     ///     factory-publish polls create book lab-feb --policy …     ///     --title "Lab meeting" --duration 60     ///     --participant "Priya=priya@example.edu" --participant "Tal=tal@w.edu"
+    ///
+    /// The candidates are the engine's earliest feasible slots — already
+    /// minus the user's real busy time — capped small, because a poll a
+    /// colleague answers in ten seconds is the one that gets answered. The
+    /// box mints one capability URL per participant and this prints them;
+    /// addresses never leave this machine, so mailing the links is the
+    /// agent's (outbox-reviewed) or the user's own act.
+    Create {
+        /// The instrument whose policy seeds this.
+        instrument: String,
+        /// A new poll id (lowercase, digits, -, _).
+        poll_id: String,
+        #[arg(long)]
+        policy: PathBuf,
+        #[arg(long)]
+        title: String,
+        /// Meeting length in minutes; must be one the policy offers.
+        #[arg(long)]
+        duration: u32,
+        /// `Name=email`, repeatable.
+        #[arg(long = "participant", required = true)]
+        participants: Vec<String>,
+        /// RFC 3339. After this, answers freeze on their own.
+        #[arg(long)]
+        deadline: Option<String>,
+        /// How many candidate slots to offer (5–15 is the point).
+        #[arg(long, default_value_t = 10)]
+        max_candidates: usize,
+    },
+    /// The tally, ranked, with the auto-book guardrail's verdict.
+    Status {
+        instrument: String,
+        poll_id: String,
+        /// One JSON object for the agent: candidates, answers, ranked,
+        /// clean_winner.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Freeze the answers.
+    Close { instrument: String, poll_id: String },
 }
 
 #[derive(Subcommand)]
@@ -526,6 +576,7 @@ fn main() -> Result<()> {
             policy,
             dry_run,
         }) => slots_push_command(&id, &policy, dry_run)?,
+        Command::Polls(action) => polls_command(action)?,
 
         Command::Remote => match remote::Remote::configured()? {
             Some(remote) => {
@@ -1480,5 +1531,249 @@ fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<
         reply["stored"].as_u64().unwrap_or(slots.len() as u64),
         doc.generated_at,
     );
+    Ok(())
+}
+
+fn polls_command(action: PollsAction) -> Result<()> {
+    use mecha_factory_publish::availability::{self, Interval};
+    use mecha_manifest::{clean_winner, rank_poll, PollAnswer};
+
+    let remote = || -> Result<remote::Remote> {
+        remote::Remote::configured_for(remote::Scope::Slots)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "no factory gate configured — write `gate = \"https://…\"` to \
+                 ~/.mecha/factory/config.toml and install slots.key beside it"
+            )
+        })
+    };
+
+    match action {
+        PollsAction::Create {
+            instrument,
+            poll_id,
+            policy,
+            title,
+            duration,
+            participants,
+            deadline,
+            max_candidates,
+        } => {
+            let policy_text = std::fs::read_to_string(&policy)
+                .with_context(|| format!("reading {}", policy.display()))?;
+            let policy = availability::Policy::from_toml(&policy_text)
+                .with_context(|| format!("{}", policy.display()))?;
+            anyhow::ensure!(
+                policy.durations.contains(&duration),
+                "the policy offers {:?}-minute meetings, not {duration}",
+                policy.durations
+            );
+            let mut named = Vec::new();
+            for spec in &participants {
+                let Some((name, email)) = spec.split_once('=') else {
+                    bail!("participant `{spec}` is not Name=email");
+                };
+                anyhow::ensure!(
+                    email.contains('@') && !name.trim().is_empty(),
+                    "participant `{spec}` is not Name=email"
+                );
+                named.push((name.trim().to_string(), email.trim().to_string()));
+            }
+
+            // The same stdin contract as `slots push`, the same anchoring,
+            // the same refusals — a poll seeded from stale or short busy
+            // data would offer colleagues times the user does not have.
+            let stdin = std::io::read_to_string(std::io::stdin()).context("reading stdin")?;
+            #[derive(serde::Deserialize)]
+            struct FreebusyDoc {
+                generated_at: String,
+                time_max: String,
+                busy: Vec<Interval>,
+            }
+            let doc: FreebusyDoc = serde_json::from_str(&stdin)
+                .context("stdin is not `mecha-mail freebusy --json` output")?;
+            let generated_at = chrono::DateTime::parse_from_rfc3339(&doc.generated_at)
+                .context("generated_at")?
+                .with_timezone(&chrono::Utc);
+            anyhow::ensure!(
+                chrono::Utc::now() - generated_at <= chrono::Duration::hours(1),
+                "this freebusy answer is over an hour old; re-run the pipeline"
+            );
+            let time_max = chrono::DateTime::parse_from_rfc3339(&doc.time_max)
+                .context("time_max")?
+                .with_timezone(&chrono::Utc);
+            anyhow::ensure!(
+                time_max >= generated_at + chrono::Duration::days(i64::from(policy.horizon_days)),
+                "the freebusy window is shorter than the policy horizon — \
+                 run `mecha-mail freebusy --days {}` or more",
+                policy.horizon_days
+            );
+
+            let slots = availability::availability(&policy, &doc.busy, &[], &[], generated_at);
+            let candidates: Vec<_> = slots
+                .iter()
+                .filter(|s| s.duration_minutes == duration)
+                .take(max_candidates)
+                .collect();
+            anyhow::ensure!(
+                !candidates.is_empty(),
+                "the policy yields no {duration}-minute slots in the horizon"
+            );
+
+            let payload = serde_json::json!({
+                "title": title,
+                "timezone": policy.timezone.to_string(),
+                "duration_minutes": duration,
+                "deadline": deadline,
+                "candidates": candidates,
+                "participants": named.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+            });
+            let reply = remote()?.poll_create(&instrument, &poll_id, &payload)?;
+            let urls = reply["urls"].as_object().cloned().unwrap_or_default();
+
+            // The local record: who the names are, which the box never
+            // learns. This is what lets the agent mail the links and the
+            // finalize step invite real addresses.
+            let dir = remote::Remote::dir()?.join("polls");
+            std::fs::create_dir_all(&dir)?;
+            let record = serde_json::json!({
+                "instrument": instrument,
+                "poll_id": poll_id,
+                "title": title,
+                "duration_minutes": duration,
+                "deadline": deadline,
+                "created_at": doc.generated_at,
+                "participants": named
+                    .iter()
+                    .map(|(name, email)| {
+                        serde_json::json!({
+                            "name": name,
+                            "email": email,
+                            "url": urls.get(name.as_str()),
+                        })
+                    })
+                    .collect::<Vec<_>>(),
+            });
+            let path = dir.join(format!("{poll_id}.json"));
+            std::fs::write(&path, serde_json::to_string_pretty(&record)?)?;
+
+            println!(
+                "poll `{poll_id}`: {} candidate(s), {} participant(s)",
+                candidates.len(),
+                named.len()
+            );
+            for (name, email) in &named {
+                let url = urls
+                    .get(name.as_str())
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("(no url?)");
+                println!("  {name} <{email}>\n    {url}");
+            }
+            println!("\nrecord: {}", path.display());
+            println!("Send each person their own link — it is their identity on the poll.");
+        }
+        PollsAction::Status {
+            instrument,
+            poll_id,
+            json,
+        } => {
+            let tally = remote()?.poll_status(&instrument, &poll_id)?;
+            let candidates: Vec<(chrono::DateTime<chrono::Utc>, u32)> = tally["candidates"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|c| {
+                    Some((
+                        c["start"].as_str()?.parse().ok()?,
+                        c["duration_minutes"].as_u64()? as u32,
+                    ))
+                })
+                .collect();
+            let participants = tally["participants"].as_array().cloned().unwrap_or_default();
+            let answers: Vec<std::collections::BTreeMap<String, PollAnswer>> = participants
+                .iter()
+                .filter_map(|p| p["answers"].as_object())
+                .map(|map| {
+                    map.iter()
+                        .filter_map(|(k, v)| {
+                            v.as_str().and_then(PollAnswer::parse).map(|a| (k.clone(), a))
+                        })
+                        .collect()
+                })
+                .collect();
+            let responded = participants
+                .iter()
+                .filter(|p| !p["responded_at"].is_null())
+                .count();
+            let total = participants.len();
+            let ranked = rank_poll(&candidates, &answers, total);
+            let winner = clean_winner(&ranked, responded, total);
+
+            if json {
+                let ranked_json: Vec<serde_json::Value> = ranked
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "start": r.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            "duration_minutes": r.duration_minutes,
+                            "yes": r.yes, "if_needed": r.if_needed, "no": r.no,
+                            "feasible": r.feasible, "unanimous": r.unanimous,
+                        })
+                    })
+                    .collect();
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "poll": poll_id,
+                        "state": tally["state"],
+                        "responded": responded,
+                        "total": total,
+                        "ranked": ranked_json,
+                        "clean_winner": winner.map(|w| serde_json::json!({
+                            "start": w.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                            "duration_minutes": w.duration_minutes,
+                        })),
+                    })
+                );
+                return Ok(());
+            }
+
+            println!(
+                "poll `{poll_id}` ({}): {responded} of {total} answered",
+                tally["state"].as_str().unwrap_or("?")
+            );
+            for r in ranked.iter().take(5) {
+                println!(
+                    "  {}  {:>3} min   yes {}  if-needed {}  no {}{}",
+                    r.start.format("%a %Y-%m-%d %H:%M UTC"),
+                    r.duration_minutes,
+                    r.yes,
+                    r.if_needed,
+                    r.no,
+                    if r.unanimous { "   ← unanimous" } else { "" },
+                );
+            }
+            match winner {
+                Some(w) => println!(
+                    "\nclean winner: {} — book it and close the poll",
+                    w.start.format("%a %Y-%m-%d %H:%M UTC")
+                ),
+                None => println!(
+                    "\nno clean winner{} — judgment call: pick from the ranking above",
+                    if responded < total { " yet (answers outstanding)" } else { "" }
+                ),
+            }
+        }
+        PollsAction::Close {
+            instrument,
+            poll_id,
+        } => {
+            let reply = remote()?.poll_close(&instrument, &poll_id)?;
+            match reply["closed"].as_bool() {
+                Some(true) => println!("poll `{poll_id}` closed; answers are frozen"),
+                _ => println!("poll `{poll_id}` was already closed"),
+            }
+        }
+    }
     Ok(())
 }

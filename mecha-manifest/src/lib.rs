@@ -70,8 +70,8 @@ pub mod theme;
 mod validate;
 
 pub use booking::{
-    booking_assets, poll_page, week_of, BookingOptions, BookingPage, PollAnswer, PollCandidate,
-    PollPageOptions,
+    booking_assets, clean_winner, poll_page, rank_poll, week_of, BookingOptions, BookingPage,
+    PollAnswer, PollCandidate, PollPageOptions, RankedCandidate,
 };
 pub use brand::{FAVICON_DATA_URI, FAVICON_LINK, LOGO_MONO_SVG};
 pub use bundle::{BundleManifest, ContentClass, Visibility};

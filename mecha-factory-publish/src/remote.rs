@@ -268,6 +268,42 @@ impl Remote {
         self.request("GET", "/v1/types", None)
     }
 
+    /// Create a poll on the box; the reply carries the capability URLs.
+    pub fn poll_create(
+        &self,
+        instrument_id: &str,
+        poll_id: &str,
+        payload: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.send(
+            "PUT",
+            &format!("/v1/instruments/{instrument_id}/polls/{poll_id}"),
+            Some(payload.to_string().as_bytes()),
+            "application/json",
+        )
+        .with_context(|| format!("creating poll `{poll_id}`"))
+    }
+
+    /// The tally, typed: names, tri-state answers, state.
+    pub fn poll_status(&self, instrument_id: &str, poll_id: &str) -> Result<serde_json::Value> {
+        self.request(
+            "GET",
+            &format!("/v1/instruments/{instrument_id}/polls/{poll_id}"),
+            None,
+        )
+        .with_context(|| format!("reading poll `{poll_id}`"))
+    }
+
+    pub fn poll_close(&self, instrument_id: &str, poll_id: &str) -> Result<serde_json::Value> {
+        self.send(
+            "POST",
+            &format!("/v1/instruments/{instrument_id}/polls/{poll_id}/close"),
+            Some(b"{}"),
+            "application/json",
+        )
+        .with_context(|| format!("closing poll `{poll_id}`"))
+    }
+
     /// Replace one instrument's slot cache on the box.
     pub fn slots_push(
         &self,
