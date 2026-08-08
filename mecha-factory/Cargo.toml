@@ -42,6 +42,7 @@ axum = { version = "0.8", features = ["multipart"] }
 # ledger beside it.
 libc = "0.2"
 chrono.workspace = true
+chrono-tz.workspace = true
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

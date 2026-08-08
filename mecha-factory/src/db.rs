@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 10;
+const SCHEMA: i64 = 11;
 
 #[derive(Clone)]
 pub struct Db {
@@ -354,6 +354,31 @@ pub struct BookingRow {
     pub created_at: String,
     pub confirmed_at: Option<String>,
     pub cancelled_at: Option<String>,
+}
+
+/// One group poll, as the box serves it.
+#[derive(Debug, Clone)]
+pub struct PollRow {
+    pub user_id: String,
+    pub id: String,
+    pub title: String,
+    pub timezone: String,
+    pub duration_minutes: i64,
+    pub deadline: Option<String>,
+    /// JSON `[{start, end}]`, shape-validated at the endpoint.
+    pub candidates: String,
+    pub state: String,
+    pub created_at: String,
+    pub closed_at: Option<String>,
+}
+
+/// One participant's row: a name, a hashed capability, answers when given.
+#[derive(Debug, Clone)]
+pub struct PollParticipantRow {
+    pub name: String,
+    /// JSON `{slot_start: "yes"|"if_needed"|"no"}`, absent until they answer.
+    pub answers: Option<String>,
+    pub responded_at: Option<String>,
 }
 
 /// A submission on its way in, before anybody has proved anything.
@@ -1855,6 +1880,119 @@ impl Db {
         })
     }
 
+    // ---- polls ----------------------------------------------------------
+
+    /// Create a poll and its participants in one transaction. Refuses an id
+    /// that already exists — a poll is append-only once its links are in
+    /// inboxes, and "replace it" would orphan every capability already sent.
+    pub fn poll_create(
+        &self,
+        row: &PollRow,
+        participants: &[(String, String)], // (name, token_hash)
+    ) -> Result<bool> {
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO polls (user_id, id, title, timezone,                  duration_minutes, deadline, candidates, state, created_at)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'open', ?8)",
+                params![
+                    row.user_id,
+                    row.id,
+                    row.title,
+                    row.timezone,
+                    row.duration_minutes,
+                    row.deadline,
+                    row.candidates,
+                    row.created_at
+                ],
+            )?;
+            if inserted == 0 {
+                return Ok(false);
+            }
+            for (name, token_hash) in participants {
+                tx.execute(
+                    "INSERT INTO poll_participants (user_id, poll_id, name, token_hash)                      VALUES (?1, ?2, ?3, ?4)",
+                    params![row.user_id, row.id, name, token_hash],
+                )?;
+            }
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
+    pub fn poll_get(&self, user_id: &str, id: &str) -> Result<Option<PollRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT user_id, id, title, timezone, duration_minutes, deadline,                      candidates, state, created_at, closed_at FROM polls                      WHERE user_id = ?1 AND id = ?2",
+                    params![user_id, id],
+                    poll_row,
+                )
+                .optional()?)
+        })
+    }
+
+    /// The poll a participant token names, with the participant's name —
+    /// the capability is the identity.
+    pub fn poll_by_token(&self, token_hash: &str) -> Result<Option<(PollRow, String)>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT p.user_id, p.id, p.title, p.timezone, p.duration_minutes,                      p.deadline, p.candidates, p.state, p.created_at, p.closed_at, pp.name                      FROM poll_participants pp                      JOIN polls p ON p.user_id = pp.user_id AND p.id = pp.poll_id                      WHERE pp.token_hash = ?1",
+                    params![token_hash],
+                    |r| Ok((poll_row(r)?, r.get::<_, String>(10)?)),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Record one participant's answers, wholesale — the newest submission
+    /// is their answer, replacing any earlier one; changing your mind is
+    /// ordinary, not an error. Only while the poll is open.
+    pub fn poll_answer(
+        &self,
+        token_hash: &str,
+        answers: &str,
+        now: &str,
+    ) -> Result<bool> {
+        self.with(|conn| {
+            let updated = conn.execute(
+                "UPDATE poll_participants SET answers = ?2, responded_at = ?3                  WHERE token_hash = ?1 AND EXISTS (SELECT 1 FROM polls p                    WHERE p.user_id = poll_participants.user_id                      AND p.id = poll_participants.poll_id AND p.state = 'open')",
+                params![token_hash, answers, now],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
+    pub fn poll_participants(
+        &self,
+        user_id: &str,
+        poll_id: &str,
+    ) -> Result<Vec<PollParticipantRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT name, answers, responded_at FROM poll_participants                  WHERE user_id = ?1 AND poll_id = ?2 ORDER BY name",
+            )?;
+            let rows = stmt.query_map(params![user_id, poll_id], |r| {
+                Ok(PollParticipantRow {
+                    name: r.get(0)?,
+                    answers: r.get(1)?,
+                    responded_at: r.get(2)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    pub fn poll_close(&self, user_id: &str, id: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let updated = conn.execute(
+                "UPDATE polls SET state = 'closed', closed_at = ?3                  WHERE user_id = ?1 AND id = ?2 AND state = 'open'",
+                params![user_id, id, now],
+            )?;
+            Ok(updated == 1)
+        })
+    }
+
     // ---- the queue ------------------------------------------------------
 
     pub fn queue_add(
@@ -2424,6 +2562,21 @@ fn user_row(r: &rusqlite::Row) -> rusqlite::Result<UserRow> {
     })
 }
 
+fn poll_row(r: &rusqlite::Row) -> rusqlite::Result<PollRow> {
+    Ok(PollRow {
+        user_id: r.get(0)?,
+        id: r.get(1)?,
+        title: r.get(2)?,
+        timezone: r.get(3)?,
+        duration_minutes: r.get(4)?,
+        deadline: r.get(5)?,
+        candidates: r.get(6)?,
+        state: r.get(7)?,
+        created_at: r.get(8)?,
+        closed_at: r.get(9)?,
+    })
+}
+
 fn queue_row(r: &rusqlite::Row) -> rusqlite::Result<QueueRow> {
     Ok(QueueRow {
         seq: r.get(0)?,
@@ -2863,6 +3016,40 @@ fn migrate(conn: &Connection) -> Result<()> {
         -- is the owner previewing; a reader's email is re-checked against
         -- the live shares at every use, so revoking a grant bites at the
         -- next fetch rather than at the token's expiry.
+        -- One group poll: the candidates home seeded (already feasible for
+        -- the user, already minus every readable participant's busy time),
+        -- and nothing else. Participant *names only* — the box never holds
+        -- their addresses; home keeps name→email and mails the invites from
+        -- the user's own account. The candidates column is JSON the endpoint
+        -- shape-validated, exactly like the slot cache.
+        CREATE TABLE IF NOT EXISTS polls (
+            user_id          TEXT NOT NULL,
+            id               TEXT NOT NULL,
+            title            TEXT NOT NULL,
+            timezone         TEXT NOT NULL,
+            duration_minutes INTEGER NOT NULL,
+            deadline         TEXT,
+            candidates       TEXT NOT NULL,
+            state            TEXT NOT NULL DEFAULT 'open',
+            created_at       TEXT NOT NULL,
+            closed_at        TEXT,
+            PRIMARY KEY (user_id, id)
+        );
+
+        -- One participant: a name, a capability (hashed, like every
+        -- credential here), and their answers when they have any. The token
+        -- is the identity — no account, no password, and no way to typo
+        -- yourself into a duplicate respondent.
+        CREATE TABLE IF NOT EXISTS poll_participants (
+            user_id      TEXT NOT NULL,
+            poll_id      TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            token_hash   TEXT NOT NULL UNIQUE,
+            answers      TEXT,
+            responded_at TEXT,
+            PRIMARY KEY (user_id, poll_id, name)
+        );
+
         CREATE TABLE IF NOT EXISTS view_caps (
             id          TEXT PRIMARY KEY,
             user_id     TEXT NOT NULL,

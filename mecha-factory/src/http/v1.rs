@@ -678,6 +678,221 @@ pub async fn put_slots(
         .into_response()
 }
 
+/// The poll push body: candidates and names, nothing else. Addresses stay
+/// home — the box holds who is asked, never how to reach them.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PollPush {
+    title: String,
+    timezone: String,
+    duration_minutes: u32,
+    #[serde(default)]
+    deadline: Option<String>,
+    candidates: Vec<PushedSlot>,
+    participants: Vec<String>,
+}
+
+/// `PUT /v1/instruments/{id}/polls/{poll_id}` — create a poll.
+///
+/// `Scope::Slots`, like the cache it seeds from: the same timer-adjacent
+/// credential, the same class of data. The box mints one capability per
+/// participant and answers with the URLs — minted here because they are
+/// *hashed* here, and a token the box generated is one the box never has to
+/// be trusted to have stored honestly. Creation is refused on an existing
+/// id (409): a poll whose links are in inboxes is append-only, and
+/// replacing it would orphan every capability already sent.
+pub async fn put_poll(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((id, poll_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match authorised(&app, &headers, Scope::Slots) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    let bad = |message: String| Failure::json(StatusCode::BAD_REQUEST, message).into_response();
+    for name in [&id, &poll_id] {
+        let ok = !name.is_empty()
+            && name.len() <= 64
+            && name
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+        if !ok {
+            return bad(format!("`{name}` must be 1–64 of lowercase, digits, `-`, `_`"));
+        }
+    }
+    let push: PollPush = match serde_json::from_str(&body) {
+        Ok(push) => push,
+        Err(e) => return bad(format!("poll push: {e}")),
+    };
+    if push.title.trim().is_empty() || push.title.len() > 200 {
+        return bad("title must be 1–200 characters".into());
+    }
+    if push.participants.is_empty() || push.participants.len() > 50 {
+        return bad("participants must be 1–50 names".into());
+    }
+    if push.candidates.is_empty() || push.candidates.len() > 100 {
+        return bad("candidates must be 1–100 slots — the seeding is the point".into());
+    }
+    let stamp = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw);
+    for (i, slot) in push.candidates.iter().enumerate() {
+        let (Ok(start), Ok(end)) = (stamp(&slot.start), stamp(&slot.end)) else {
+            return bad(format!("candidate {i}: unparseable start or end"));
+        };
+        if end <= start
+            || end - start != chrono::Duration::minutes(i64::from(slot.duration_minutes))
+        {
+            return bad(format!("candidate {i}: times disagree with the duration"));
+        }
+    }
+    if let Some(deadline) = &push.deadline {
+        if stamp(deadline).is_err() {
+            return bad(format!("deadline `{deadline}` is not RFC 3339"));
+        }
+    }
+    let mut names = std::collections::BTreeSet::new();
+    for name in &push.participants {
+        if name.trim().is_empty() || name.len() > 80 || !names.insert(name.trim()) {
+            return bad(format!("participant `{name}` is empty, too long, or repeated"));
+        }
+    }
+
+    let mut tokens = Vec::new();
+    let mut participants = Vec::new();
+    for name in &push.participants {
+        let token = crate::intake::mint_token();
+        participants.push((name.trim().to_string(), crate::intake::hash_token(&token)));
+        tokens.push((name.trim().to_string(), token));
+    }
+    let row = crate::db::PollRow {
+        user_id: user.id.clone(),
+        id: poll_id.clone(),
+        title: push.title.clone(),
+        timezone: push.timezone.clone(),
+        duration_minutes: i64::from(push.duration_minutes),
+        deadline: push.deadline.clone(),
+        candidates: serde_json::to_string(&push.candidates).unwrap_or_else(|_| "[]".into()),
+        state: "open".into(),
+        created_at: crate::db::now(),
+        closed_at: None,
+    };
+    match app.db.poll_create(&row, &participants) {
+        Ok(true) => {}
+        Ok(false) => {
+            return Failure::json(StatusCode::CONFLICT, "this poll id already exists")
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(%poll_id, error = %e, "creating a poll");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    let base = app.config.base_url(Role::Gate);
+    let urls: serde_json::Map<String, serde_json::Value> = tokens
+        .into_iter()
+        .map(|(name, token)| {
+            (
+                name,
+                format!("{base}/p/{}/{poll_id}/{token}", user.handle).into(),
+            )
+        })
+        .collect();
+    tracing::info!(%poll_id, participants = urls.len(), "poll created");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "poll": poll_id,
+            "participants": urls.len(),
+            "urls": urls,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/instruments/{id}/polls/{poll_id}` — the tally, for home's
+/// ranker. Names and tri-state answers; the free-text-free shape is the
+/// whole point of the poll being typed.
+pub async fn get_poll(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((_id, poll_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match authorised(&app, &headers, Scope::Slots) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    let Ok(Some(poll)) = app.db.poll_get(&user.id, &poll_id) else {
+        return Failure::json(StatusCode::NOT_FOUND, "no such poll").into_response();
+    };
+    let participants = app
+        .db
+        .poll_participants(&user.id, &poll_id)
+        .unwrap_or_default();
+    let answers: Vec<serde_json::Value> = participants
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.name,
+                "responded_at": p.responded_at,
+                "answers": p.answers.as_deref()
+                    .and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok()),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "poll": poll.id,
+            "title": poll.title,
+            "timezone": poll.timezone,
+            "duration_minutes": poll.duration_minutes,
+            "deadline": poll.deadline,
+            "state": poll.state,
+            "candidates": serde_json::from_str::<serde_json::Value>(&poll.candidates)
+                .unwrap_or_default(),
+            "participants": answers,
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/instruments/{id}/polls/{poll_id}/close` — no more answers.
+pub async fn close_poll(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((_id, poll_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match authorised(&app, &headers, Scope::Slots) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    match app.db.poll_close(&user.id, &poll_id, &crate::db::now()) {
+        Ok(closed) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"poll": poll_id, "closed": closed})),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(%poll_id, error = %e, "closing a poll");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct DrainQuery {
     /// The highest sequence number home already holds.

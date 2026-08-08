@@ -87,6 +87,200 @@ pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 3] {
     ]
 }
 
+/// One candidate in a poll page, with everything the cell shows.
+pub struct PollCandidate {
+    pub start: DateTime<Utc>,
+    pub end: DateTime<Utc>,
+    pub duration_minutes: u32,
+    /// This participant's current answer, if they have one.
+    pub mine: Option<PollAnswer>,
+    /// How many others have said yes so far — the heat, server-rendered.
+    pub yes_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PollAnswer {
+    Yes,
+    IfNeeded,
+    No,
+}
+
+impl PollAnswer {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PollAnswer::Yes => "yes",
+            PollAnswer::IfNeeded => "if_needed",
+            PollAnswer::No => "no",
+        }
+    }
+    pub fn parse(raw: &str) -> Option<PollAnswer> {
+        match raw {
+            "yes" => Some(PollAnswer::Yes),
+            "if_needed" => Some(PollAnswer::IfNeeded),
+            "no" => Some(PollAnswer::No),
+            _ => None,
+        }
+    }
+}
+
+/// What the server supplies to render one participant's view.
+pub struct PollPageOptions {
+    pub title: String,
+    pub participant: String,
+    pub timezone: Tz,
+    pub action: String,
+    pub assets: String,
+    pub theme: crate::Theme,
+    pub deadline_local: Option<String>,
+    pub responded: usize,
+    pub total: usize,
+    /// Closed polls render read-only: the answers stand, the form is gone.
+    pub open: bool,
+    /// A one-line notice ("Saved — you can change this until…").
+    pub notice: Option<String>,
+}
+
+/// The participant's page: the booking page's weekly frame over the seeded
+/// candidates, each a tri-state answer. Works with JavaScript off — the
+/// three states are radios; `booking.js`'s zone re-render applies to the
+/// same `.when[data-utc]` labels; tap-to-cycle arrives with the polish
+/// pass. Never a blank 7×24 grid: what is rendered is only what the
+/// organizer can actually do, which is the entire point of the seeding.
+pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> BookingPage {
+    let tz = options.timezone;
+    let mut body = String::new();
+    body.push_str(&format!("<h1>{}</h1>\n", escape_text(&options.title)));
+    body.push_str(&format!(
+        "<p class=\"intro\">Hi {} — mark the times you could do. \
+         {} of {} have answered so far.</p>\n",
+        escape_text(&options.participant),
+        options.responded,
+        options.total
+    ));
+    if let Some(notice) = &options.notice {
+        body.push_str(&format!(
+            "<p class=\"stale\" role=\"note\">{}</p>\n",
+            escape_text(notice)
+        ));
+    }
+    if let Some(deadline) = &options.deadline_local {
+        body.push_str(&format!(
+            "<p class=\"zone\">Answers close {}.</p>\n",
+            escape_text(deadline)
+        ));
+    }
+    body.push_str(&format!(
+        "<p class=\"zone\" id=\"zone-note\">Times are shown in {}.</p>\n",
+        escape_text(&tz.to_string())
+    ));
+
+    if !options.open {
+        body.push_str("<p class=\"empty\">This poll is closed; answers can no longer change.</p>\n");
+    }
+    body.push_str(&format!(
+        "<form method=\"post\" action=\"{}\">\n",
+        escape_text(&options.action)
+    ));
+    body.push_str("<div class=\"week poll\" role=\"group\" aria-label=\"Candidate times\">\n");
+
+    let mut sorted: Vec<&PollCandidate> = candidates.iter().collect();
+    sorted.sort_by_key(|c| (c.start, c.duration_minutes));
+    let mut day = None;
+    for candidate in &sorted {
+        let local = candidate.start.with_timezone(&tz);
+        let this_day = local.date_naive();
+        if day != Some(this_day) {
+            if day.is_some() {
+                body.push_str("</section>\n");
+            }
+            body.push_str(&format!(
+                "<section class=\"day\"><h2>{}</h2>\n",
+                this_day.format("%a %b %-d")
+            ));
+            day = Some(this_day);
+        }
+        let key = format!(
+            "a_{}|{}",
+            candidate.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            candidate.duration_minutes
+        );
+        let label = local.format("%-I:%M %p").to_string().to_lowercase();
+        let heat = if candidate.yes_count > 0 {
+            format!(
+                "<span class=\"mins\">{} yes</span>",
+                candidate.yes_count
+            )
+        } else {
+            String::new()
+        };
+        body.push_str(&format!(
+            "<fieldset class=\"slot answer\"><legend><span class=\"when\" \
+             data-utc=\"{utc}\">{label}</span> · {mins} min {heat}</legend>\n",
+            utc = candidate
+                .start
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            mins = candidate.duration_minutes,
+        ));
+        for answer in [PollAnswer::Yes, PollAnswer::IfNeeded, PollAnswer::No] {
+            // Unanswered defaults to "no": when2meet's rule — you paint the
+            // times you CAN do, and silence is unavailability.
+            let checked = match candidate.mine {
+                Some(mine) => mine == answer,
+                None => answer == PollAnswer::No,
+            };
+            let word = match answer {
+                PollAnswer::Yes => "yes",
+                PollAnswer::IfNeeded => "if needed",
+                PollAnswer::No => "no",
+            };
+            body.push_str(&format!(
+                "<label class=\"tri\"><input type=\"radio\" name=\"{key}\" \
+                 value=\"{value}\"{checked}{disabled}> {word}</label>\n",
+                value = answer.as_str(),
+                checked = if checked { " checked" } else { "" },
+                disabled = if options.open { "" } else { " disabled" },
+            ));
+        }
+        body.push_str("</fieldset>\n");
+    }
+    if day.is_some() {
+        body.push_str("</section>\n");
+    }
+    body.push_str("</div>\n");
+    if options.open {
+        body.push_str("<button type=\"submit\">Save my answers</button>\n");
+    }
+    body.push_str("</form>\n");
+    body.push_str(&format!(
+        "<script src=\"{0}booking.js\" defer></script>\n",
+        escape_text(&options.assets)
+    ));
+
+    let html = format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n\
+         <meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{}</title>\n\
+         {}\n\
+         <link rel=\"stylesheet\" href=\"{}booking.css\">\n\
+         </head>\n<body>\n{}<main class=\"booking\">\n{}</main>\n</body>\n</html>\n",
+        escape_text(&options.title),
+        crate::brand::FAVICON_LINK,
+        escape_text(&options.assets),
+        crate::form::site_header(),
+        body
+    );
+    BookingPage {
+        html,
+        style: format!(
+            "{}{}{}",
+            options.theme.css(),
+            crate::form::FORM_STRUCTURE,
+            BOOKING_STRUCTURE
+        ),
+    }
+}
+
 /// The Monday of the week holding `date`.
 pub fn week_of(date: NaiveDate) -> NaiveDate {
     date - Duration::days(i64::from(date.weekday().num_days_from_monday()))
@@ -338,6 +532,14 @@ const BOOKING_STRUCTURE: &str = r#"
 .booking .durations button { border:0; background:var(--surface); color:var(--text);
   padding:0.35rem 0.9rem; cursor:pointer; }
 .booking .durations button[aria-pressed="true"] { background:var(--accent); color:var(--on-accent); }
+.booking .slot.answer { display:block; cursor:default; }
+.booking .slot.answer legend { font-weight:600; padding:0; }
+.booking .slot.answer .tri { display:inline-flex; gap:0.3rem; align-items:center;
+  margin:0.35rem 0.9rem 0 0; cursor:pointer; color:var(--muted); font-size:0.9rem; }
+.booking .slot.answer .tri input { position:static; opacity:1; pointer-events:auto; }
+.booking .slot.answer:has(input[value="yes"]:checked) { border-color:var(--accent);
+  outline:2px solid var(--ring); }
+.booking .slot.answer:has(input[value="if_needed"]:checked) { border-color:var(--signal); }
 "#;
 
 /// Enhancement only — nothing a submission depends on happens here.

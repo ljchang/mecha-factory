@@ -69,7 +69,10 @@ mod schema;
 pub mod theme;
 mod validate;
 
-pub use booking::{booking_assets, week_of, BookingOptions, BookingPage};
+pub use booking::{
+    booking_assets, poll_page, week_of, BookingOptions, BookingPage, PollAnswer, PollCandidate,
+    PollPageOptions,
+};
 pub use brand::{FAVICON_DATA_URI, FAVICON_LINK, LOGO_MONO_SVG};
 pub use bundle::{BundleManifest, ContentClass, Visibility};
 pub use condition::{Condition, Operator};
