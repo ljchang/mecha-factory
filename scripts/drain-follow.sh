@@ -15,7 +15,8 @@
 # the ledger makes re-runs idempotent. A drain failure sleeps and retries —
 # the box being down must not turn this into a busy loop.
 #
-# Install: cp scripts/mecha-drain.service ~/.config/systemd/user/
+# Install: install -m 0755 scripts/drain-follow.sh ~/.cargo/bin/mecha-drain-follow
+#          cp scripts/mecha-drain.service ~/.config/systemd/user/
 #          systemctl --user daemon-reload
 #          systemctl --user enable --now mecha-drain.service
 set -u
