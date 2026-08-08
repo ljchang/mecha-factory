@@ -419,14 +419,22 @@ pub async fn finish(
         return nothing_here();
     }
     let now = crate::db::now();
-    let user_id = match app
-        .db
-        .signin_redeem(&crate::intake::hash_token(&token), &now)
-    {
-        Ok(Some(user_id)) => user_id,
+    let session_token = crate::intake::mint_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::days(crate::intake::SESSION_EXPIRY_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    // One transaction spends the link and mints the session, so a failure
+    // between the two cannot burn the link — a retried click still works,
+    // and the "expired" page below is only ever the truth.
+    match app.db.signin(
+        &crate::intake::hash_token(&token),
+        &crate::intake::hash_token(&session_token),
+        &now,
+        &expires,
+    ) {
+        Ok(Some(_)) => {}
         Ok(None) => {
-            // Spent, expired, never real: one page, like every dead token
-            // in this program.
+            // Spent, expired, never real, or a suspended account: one page,
+            // like every dead token in this program.
             return page(
                 StatusCode::NOT_FOUND,
                 shell(
@@ -438,24 +446,10 @@ pub async fn finish(
             );
         }
         Err(e) => {
-            tracing::error!(error = %e, "redeeming a sign-in link");
+            tracing::error!(error = %e, "signing in");
             return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
                 .into_response();
         }
-    };
-
-    let session_token = crate::intake::mint_token();
-    let expires = (chrono::Utc::now() + chrono::Duration::days(crate::intake::SESSION_EXPIRY_DAYS))
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    if let Err(e) = app.db.session_create(
-        &user_id,
-        &crate::intake::hash_token(&session_token),
-        &now,
-        &expires,
-    ) {
-        tracing::error!(error = %e, "creating a session");
-        return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-            .into_response();
     }
 
     // 303: the token has been spent, and a refresh of this URL must land on

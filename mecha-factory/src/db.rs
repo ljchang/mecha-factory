@@ -839,19 +839,44 @@ impl Db {
         })
     }
 
-    /// Spend a sign-in link: single-use, in one statement, exactly like a
-    /// verification token. Returns whose it was.
-    pub fn signin_redeem(&self, token_hash: &str, now: &str) -> Result<Option<String>> {
+    /// Spend a sign-in link and mint its session — one transaction, the
+    /// same shape as [`Db::operator_signin`] and for the same reason: the
+    /// link is consumed only when the session lands, so a failure between
+    /// the two cannot burn it, and the "expired" page a retry sees is only
+    /// ever the truth. The redeem also demands the user still active, so a
+    /// suspended account's link is a dead link that never spends. Two
+    /// methods rather than one parameterised over the tables, because the
+    /// tables are the boundary between the two session surfaces — SQL
+    /// cannot parameterise a table name, and this code should not try.
+    /// Returns whose session it now is.
+    pub fn signin(
+        &self,
+        link_hash: &str,
+        session_hash: &str,
+        now: &str,
+        session_expires: &str,
+    ) -> Result<Option<String>> {
+        let id = crate::keys::random_id();
         self.with(|conn| {
-            let user_id: Option<String> = conn
+            let tx = conn.unchecked_transaction()?;
+            let user_id: Option<String> = tx
                 .query_row(
                     "UPDATE signin_links SET used_at = ?2 \
                      WHERE token_hash = ?1 AND used_at IS NULL AND expires_at > ?2 \
+                     AND user_id IN (SELECT id FROM users WHERE status = 'active') \
                      RETURNING user_id",
-                    params![token_hash, now],
+                    params![link_hash, now],
                     |r| r.get(0),
                 )
                 .optional()?;
+            if let Some(user_id) = &user_id {
+                tx.execute(
+                    "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, user_id, session_hash, now, session_expires],
+                )?;
+            }
+            tx.commit()?;
             Ok(user_id)
         })
     }

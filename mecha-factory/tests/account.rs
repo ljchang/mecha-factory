@@ -240,6 +240,26 @@ fn signing_out_ends_the_session_server_side() {
     assert!(after.body.contains("Sign in"), "{}", after.body);
 }
 
+/// A suspended account's link is a dead link: the redeem demands the user
+/// active, so it never spends — no session is minted, and because nothing
+/// was burned, the same link works again if the account is restored within
+/// its window.
+#[test]
+fn a_suspended_accounts_link_never_spends() {
+    let server = common::start();
+    post(&server, "/account/signin", "email=alice%40example.org", None);
+    let link = server.verification_token();
+    server.db.user_status(&server.user.id, "suspended").unwrap();
+
+    let refused = post(&server, &format!("/account/s/{link}"), "", None);
+    assert_eq!(refused.status, 404, "{}", refused.head);
+    assert!(refused.header("set-cookie").is_none());
+
+    server.db.user_status(&server.user.id, "active").unwrap();
+    let finished = post(&server, &format!("/account/s/{link}"), "", None);
+    assert_eq!(finished.status, 303, "{}", finished.head);
+}
+
 /// Suspension ends the signed-in page with everything else, mid-session.
 #[test]
 fn a_suspended_account_loses_its_session() {
