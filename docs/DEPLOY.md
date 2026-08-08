@@ -335,6 +335,17 @@ Rotation is mint, install, revoke — both keys work until the old one is
 revoked, and `factory key revoke <id>` never deletes the row, because the row is
 the record that the key existed and when it stopped.
 
+**The email door** (2026-08-08): with `operator_email = "you@example.org"` in
+`factory.toml`, a signed-out `/admin` grows one button that mails that address
+a one-time sign-in link — admin from any browser, no operate key on the
+machine, no password anywhere. The sessions both doors mint now last 30 days
+and roll forward on use. The door hangs off a well-known key row
+(`email-door`, minted on first use, unable to authenticate a bearer): revoking
+that key from the panel or `factory-publish operator revoke-key` is the door's
+kill switch, and nothing resurrects it short of deleting the row on the box.
+Needs `[mail]` configured, or the links go to the journal like every other
+unmailed link.
+
 ## Mail
 
 The box sends exactly one kind of message: the verification link a stranger

@@ -40,6 +40,10 @@ impl mecha_factory::intake::Mailer for CapturedMail {
         self.0.lock().unwrap().push(link.to_string());
     }
 
+    fn send_operator_signin(&self, _address: &str, link: &str) {
+        self.0.lock().unwrap().push(link.to_string());
+    }
+
     fn send_share(&self, _address: &str, _owner: &str, _title: &str, link: &str) {
         self.0.lock().unwrap().push(link.to_string());
     }
@@ -200,6 +204,7 @@ pub fn start() -> Server {
         tls: None,
         limits: Limits::default(),
         docs_url: None,
+        operator_email: Some("root@example.org".into()),
         redirect_hosts: vec![],
     };
     let db = Db::open(&config.db_path()).unwrap();

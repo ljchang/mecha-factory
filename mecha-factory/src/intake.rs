@@ -108,6 +108,9 @@ pub trait Mailer: Send + Sync {
     /// because one address can hold several and the link signs into exactly
     /// one.
     fn send_signin(&self, address: &str, handle: &str, link: &str);
+    /// An operator sign-in link — the email door on `/admin`. The address is
+    /// configuration's, never a request's, so there is no handle to name.
+    fn send_operator_signin(&self, address: &str, link: &str);
     /// "Somebody shared a page with you." Sent when an owner grants this
     /// address a bundle; `title` is the owner's own bundle title.
     fn send_share(&self, address: &str, owner: &str, title: &str, link: &str);
@@ -153,6 +156,14 @@ impl Mailer for LogMailer {
             handle,
             link,
             "sign-in link (not sent: no mailer configured)"
+        );
+    }
+
+    fn send_operator_signin(&self, address: &str, link: &str) {
+        tracing::info!(
+            to = address,
+            link,
+            "operator sign-in link (not sent: no mailer configured)"
         );
     }
 

@@ -33,6 +33,10 @@ pub struct Db {
     conn: Arc<Mutex<Connection>>,
 }
 
+/// The one key id that is a name rather than random: the anchor row the
+/// email door's sessions resolve to. See [`Db::email_door_key`].
+pub const EMAIL_DOOR_KEY: &str = "email-door";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRow {
     pub id: String,
@@ -1013,6 +1017,73 @@ impl Db {
     // signed in, an operator session is a *key* signed in. Nothing here
     // reads `users` at all, which is what "shares nothing with tenant
     // sessions" means as a property of queries rather than of intention.
+
+    /// The key row the email door hangs its sessions on: get-or-create,
+    /// respecting revocation. An emailed link is born from no bearer key,
+    /// but an operator session must still resolve to a *key* — that join is
+    /// what keeps the surface apart from the tenants' and what makes
+    /// break-glass revocation end browser sessions. So the door is anchored
+    /// to one well-known row whose hash is of a token nobody was ever shown:
+    /// it can anchor sessions but can never authenticate a bearer. Revoking
+    /// it from the panel *is* how the door is disabled, so a revoked row is
+    /// never resurrected here — that would turn the kill switch into a nap.
+    pub fn email_door_key(&self, now: &str) -> Result<Option<String>> {
+        self.with(|conn| {
+            let revoked: Option<Option<String>> = conn
+                .query_row(
+                    "SELECT revoked_at FROM keys WHERE id = ?1",
+                    params![EMAIL_DOOR_KEY],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match revoked {
+                Some(None) => Ok(Some(EMAIL_DOOR_KEY.to_string())),
+                Some(Some(_)) => Ok(None),
+                None => {
+                    let unusable =
+                        crate::intake::hash_token(&crate::intake::mint_token());
+                    conn.execute(
+                        "INSERT INTO keys (id, user_id, scope, hash, label, created_at) \
+                         VALUES (?1, '', 'operate', ?2, 'email sign-in door', ?3)",
+                        params![EMAIL_DOOR_KEY, unusable, now],
+                    )?;
+                    Ok(Some(EMAIL_DOOR_KEY.to_string()))
+                }
+            }
+        })
+    }
+
+    /// Links minted through one key today — the email door's daily budget.
+    pub fn operator_links_today(&self, key_id: &str, today: &str) -> Result<i64> {
+        self.with(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM operator_links WHERE key_id = ?1 \
+                 AND substr(created_at, 1, 10) = ?2",
+                params![key_id, today],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// Push a live session's expiry out — the rolling half of "a visit a
+    /// month keeps you signed in". Only ever forward: a session is never
+    /// shortened here, and a revoked or expired one is never revived.
+    pub fn operator_session_touch(
+        &self,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "UPDATE operator_sessions SET expires_at = ?3 \
+                 WHERE token_hash = ?1 AND revoked_at IS NULL \
+                 AND expires_at > ?2 AND expires_at < ?3",
+                params![token_hash, now, expires_at],
+            )?;
+            Ok(())
+        })
+    }
 
     /// Record a one-time browser link for an operate key.
     pub fn operator_link_create(

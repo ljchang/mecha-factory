@@ -349,6 +349,13 @@ pub struct Config {
     /// do not render — a deployment with no docs has no dead link.
     #[serde(default)]
     pub docs_url: Option<String>,
+    /// Where an operator sign-in link may be mailed. Present, the gate's
+    /// `/admin` grows a second door: one button that mails this address a
+    /// one-time link — nothing to type, and the page never says what the
+    /// address is. Absent, the only way in stays the CLI-minted link, which
+    /// is the right shape for a box whose operator is always near the key.
+    #[serde(default)]
+    pub operator_email: Option<String>,
     /// Which built-in palette forms are served in. See `mecha_manifest::theme`.
     ///
     /// A deployment-wide setting rather than a per-type one: a manifest
@@ -418,6 +425,7 @@ impl Config {
             tls: None,
             limits: Limits::default(),
             docs_url: None,
+            operator_email: None,
             redirect_hosts: Vec::new(),
         }
     }
@@ -449,6 +457,7 @@ impl Config {
             }),
             limits: Limits::default(),
             docs_url: None,
+            operator_email: None,
             redirect_hosts: Vec::new(),
         }
     }

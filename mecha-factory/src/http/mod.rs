@@ -154,9 +154,11 @@ pub fn router(app: Shared) -> Router {
         // The operate key asking for a browser: the one bridge between the
         // key surface and the operator's session surface below.
         .route("/v1/admin/signin", post(admin::signin_link))
-        // The operator's panel — its own cookie, its own tables, and no way
-        // in but the link the CLI minted. See http/admin.rs.
+        // The operator's panel — its own cookie, its own tables, and two
+        // ways in: the link the CLI minted, and the email door when an
+        // operator address is configured. See http/admin.rs.
         .route("/admin", get(admin::overview))
+        .route("/admin/signin", post(admin::email_signin))
         .route(
             "/admin/s/{token}",
             get(admin::finish_page).post(admin::finish),

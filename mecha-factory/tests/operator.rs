@@ -536,3 +536,130 @@ fn an_operator_withholds_and_restores_a_version() {
         .unwrap();
     assert!(row.withheld_at.is_none());
 }
+
+// ---- the email door ------------------------------------------------------
+//
+// The second way in: one button, the address is config's, and the emailed
+// link redeems into the same session the CLI link does — anchored to the
+// `email-door` key row, whose revocation is the door's kill switch.
+
+/// The whole email path: button → mailed link → interstitial → session,
+/// with no operate key anywhere near a browser, and the link dead after one
+/// use.
+#[test]
+fn the_email_door_signs_in_without_the_key() {
+    let server = common::start();
+
+    // Signed out, the page offers the button beside the CLI instructions.
+    let out = panel_get(&server, "/admin", None);
+    assert!(out.body.contains("Email me a sign-in link"), "{}", out.body);
+
+    let asked = panel_post(&server, "/admin/signin", "", None);
+    assert_eq!(asked.status, 200, "{}", asked.body);
+    assert_eq!(server.sent_links(), 1, "one link mailed");
+    let link = server.last_link();
+    let token = link.rsplit('/').next().unwrap().to_string();
+
+    // The person's path: interstitial spends nothing, the POST signs in.
+    let interstitial = panel_get(&server, &format!("/admin/s/{token}"), None);
+    assert_eq!(interstitial.status, 200, "{}", interstitial.body);
+    let finished = panel_post(&server, &format!("/admin/s/{token}"), "", None);
+    assert_eq!(finished.status, 303, "{}", finished.head);
+    let session = finished
+        .header("set-cookie")
+        .expect("a session cookie")
+        .split_once('=')
+        .unwrap()
+        .1
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    let page = panel_get(&server, "/admin", Some(&session));
+    assert_eq!(page.status, 200);
+    assert!(page.body.contains("email-door"), "{}", page.body);
+    assert!(page.body.contains("Accounts"), "{}", page.body);
+
+    // A refresh of the panel re-extends the cookie — the rolling session.
+    assert!(
+        page.header("set-cookie")
+            .expect("a refreshed cookie")
+            .contains("Max-Age"),
+        "{}",
+        page.head
+    );
+
+    // The spent link is any dead token.
+    let again = panel_post(&server, &format!("/admin/s/{token}"), "", None);
+    assert_eq!(again.status, 404, "{}", again.head);
+}
+
+/// The button answers with one page whatever happened, and stops mailing at
+/// the daily budget — the two properties that keep a public button from
+/// being an oracle or a mail cannon.
+#[test]
+fn the_email_door_is_budgeted_and_answers_identically() {
+    let server = common::start();
+
+    let first = panel_post(&server, "/admin/signin", "", None);
+    assert_eq!(first.status, 200);
+    for _ in 1..mecha_factory::http::admin::EMAIL_LINKS_PER_DAY {
+        panel_post(&server, "/admin/signin", "", None);
+    }
+    assert_eq!(
+        server.sent_links() as i64,
+        mecha_factory::http::admin::EMAIL_LINKS_PER_DAY
+    );
+
+    // Over budget: the same bytes, and nothing sent.
+    let over = panel_post(&server, "/admin/signin", "", None);
+    assert_eq!(over.status, 200);
+    assert_eq!(over.body, first.body, "the page must not become an oracle");
+    assert_eq!(
+        server.sent_links() as i64,
+        mecha_factory::http::admin::EMAIL_LINKS_PER_DAY,
+        "over-budget clicks mail nothing"
+    );
+}
+
+/// Break-glass revoking the `email-door` key is the door's kill switch: the
+/// button goes quiet, existing email sessions die, and nothing here ever
+/// resurrects the row.
+#[test]
+fn revoking_the_email_door_key_closes_the_door_and_its_sessions() {
+    let server = common::start();
+
+    // Sign in through the door first, so there is a session to kill.
+    panel_post(&server, "/admin/signin", "", None);
+    let token = server.last_link().rsplit('/').next().unwrap().to_string();
+    let finished = panel_post(&server, &format!("/admin/s/{token}"), "", None);
+    let session = finished
+        .header("set-cookie")
+        .expect("a session cookie")
+        .split_once('=')
+        .unwrap()
+        .1
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(panel_get(&server, "/admin", Some(&session)).status, 200);
+
+    server
+        .db
+        .key_revoke(mecha_factory::db::EMAIL_DOOR_KEY, "2026-08-08T00:00:00Z")
+        .unwrap();
+
+    // The session died with its key…
+    let after = panel_get(&server, "/admin", Some(&session));
+    assert!(
+        after.body.contains("factory-publish operator signin"),
+        "{}",
+        after.body
+    );
+    // …and the button mails nothing, while answering the same page.
+    let sent_before = server.sent_links();
+    let quiet = panel_post(&server, "/admin/signin", "", None);
+    assert_eq!(quiet.status, 200);
+    assert_eq!(server.sent_links(), sent_before, "a revoked door is closed");
+}

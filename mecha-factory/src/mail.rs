@@ -311,6 +311,28 @@ impl crate::intake::Mailer for SesMailer {
         }
     }
 
+    fn send_operator_signin(&self, address: &str, link: &str) {
+        let subject = "Operator sign-in";
+        let text = format!(
+            "An operator sign-in link for this box was requested from its \
+             /admin page:\n\n\
+             {link}\n\n\
+             It works once and expires in {} minutes.\n\n\
+             If you did not ask for this, ignore it — nothing happens unless \
+             the link is opened, and only somebody reading this mailbox can \
+             open it.\n",
+            crate::http::admin::EMAIL_LINK_EXPIRY_MINUTES
+        );
+        match self.send(address, subject, &text, chrono::Utc::now()) {
+            Ok(()) => tracing::info!("operator sign-in link sent"),
+            Err(e) => tracing::error!(
+                error = %e,
+                link,
+                "sending an operator sign-in link failed — the CLI door still works"
+            ),
+        }
+    }
+
     fn send_share(&self, address: &str, owner: &str, title: &str, link: &str) {
         let subject = format!("{owner} shared a page with you");
         let text = format!(

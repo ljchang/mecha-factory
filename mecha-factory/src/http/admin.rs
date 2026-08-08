@@ -3,6 +3,7 @@
 //! ```text
 //!   POST /v1/admin/signin      operate key → a one-time URL (the CLI's verb)
 //!   GET  /admin                signed out: how to sign in · signed in: the panel
+//!   POST /admin/signin         the email door: mail the configured operator a link
 //!   GET  /admin/s/<token>      a page with one button, and no database read
 //!   POST /admin/s/<token>      the link becomes a session cookie
 //!   POST /admin/signout        the session stops working now
@@ -13,17 +14,24 @@
 //!   POST /admin/withhold       take a version out of service, or put it back
 //! ```
 //!
-//! **The way in is the CLI, and there is deliberately no form.** A signed-out
-//! `/admin` tells you to run `factory-publish operator signin`; it has nothing
-//! to type into. The operate key is the most powerful credential this box
-//! knows, and a page that accepted it would teach its holder to paste it into
-//! browsers — which is what a look-alike page needs and a one-time link
-//! forecloses: the CLI holds the key, asks the box it already knows for a URL,
-//! and the URL is worthless in minutes and after one use. The GET/POST split
-//! on redeeming is the same mail-scanner armour the tenant links wear, not
-//! because these links travel through mail — they travel through a terminal —
-//! but because a prefetching browser bar hits GETs too, and one rule for
-//! every token is one rule.
+//! **There are two doors, and neither has anything to type into.** The operate
+//! key is the most powerful credential this box knows, and a page that
+//! accepted it would teach its holder to paste it into browsers — which is
+//! what a look-alike page needs and a one-time link forecloses. So the CLI
+//! door: `factory-publish operator signin` holds the key, asks the box it
+//! already knows for a URL, and the URL is worthless in minutes and after one
+//! use. And the email door, when `operator_email` is configured: one button
+//! that mails a one-time link to an address only configuration knows — the
+//! same no-password shape as the tenant surface, so signing in from a machine
+//! without the key means holding the operator's inbox, not remembering a
+//! secret. The emailed link redeems into the same session the CLI link does,
+//! anchored to a well-known key row (`email-door`) that can never authenticate
+//! a bearer — which keeps "an operator session resolves to a key" true, and
+//! makes break-glass revoking that row the door's kill switch. The GET/POST
+//! split on redeeming is the same mail-scanner armour the tenant links wear —
+//! for the emailed link it is load-bearing, exactly the Safe-Links robot the
+//! tenant flow met; for the CLI link it is one rule for every token being one
+//! rule.
 //!
 //! **An operator session shares nothing with a tenant session.** Its own
 //! cookie (`__Host-factory-operator`), its own tables, and the opposite join:
@@ -58,9 +66,25 @@ const COOKIE: &str = "__Host-factory-operator";
 /// their own terminal, so this bounds an attacker's window, not a human's.
 pub const LINK_EXPIRY_MINUTES: i64 = 10;
 
-/// A working day, not a tenant's week: this session suspends accounts and
-/// kills keys, so it re-earns itself daily.
-pub const SESSION_EXPIRY_HOURS: i64 = 12;
+/// A month, and rolling: every signed-in visit pushes the expiry back out,
+/// so an operator who checks the panel at all stays signed in. This used to
+/// be a working day on the argument that a session this powerful re-earns
+/// itself — but the email door made re-entry a formality (anyone holding the
+/// inbox just clicks again), so a short expiry was friction without a
+/// boundary. The real kill switch was never the clock: break-glass revoking
+/// the key ends its sessions in the same query that would have authorised
+/// them.
+pub const SESSION_EXPIRY_DAYS: i64 = 30;
+
+/// The emailed link waits like a tenant's sign-in link: the person asked,
+/// but mail takes a moment to arrive. The CLI link above stays shorter —
+/// its holder is watching their own terminal.
+pub const EMAIL_LINK_EXPIRY_MINUTES: i64 = 15;
+
+/// Emailed operator links per day. The button is on a public page and asks
+/// for nothing, so the bound is what keeps it from filling the operator's
+/// inbox.
+pub const EMAIL_LINKS_PER_DAY: i64 = 5;
 
 fn nothing_here() -> Response {
     page(
@@ -140,7 +164,17 @@ fn session(
             // the same contract: a panel session is the key acting, and the
             // liveness ledger must not miss exactly the most powerful
             // activity on the box. Best-effort there, best-effort here.
-            app.db.key_touch(&key.id, &crate::db::now());
+            let now = crate::db::now();
+            app.db.key_touch(&key.id, &now);
+            // The rolling half of the month-long session: using the panel
+            // is what keeps it alive. Best-effort like the stamp above —
+            // a failed extension costs a sign-in, not a session.
+            let extended = (chrono::Utc::now()
+                + chrono::Duration::days(SESSION_EXPIRY_DAYS))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let _ = app
+                .db
+                .operator_session_touch(&crate::intake::hash_token(&token), &now, &extended);
             Ok(Some((token, key)))
         }
         Ok(None) => Ok(None),
@@ -153,21 +187,100 @@ fn session(
     }
 }
 
-/// The signed-out page: instructions, and deliberately nothing to type into.
-fn how_to_sign_in() -> Response {
+/// The signed-out page: instructions, and still nothing to type into. The
+/// email door, when configured, is one button — the address is config's and
+/// the page never says what it is, so there is nothing here to enumerate.
+fn how_to_sign_in(app: &Shared) -> Response {
+    let email_door = if app.config.operator_email.is_some() {
+        "<form method=\"post\" action=\"/admin/signin\">\
+         <button type=\"submit\">Email me a sign-in link</button></form>\
+         <p>The link goes to the operator address this box was configured \
+         with. Or, on the machine holding the operate key:</p>"
+    } else {
+        "<p>This page signs in from the operator&rsquo;s CLI, not from a \
+         form. On the machine holding the operate key, run:</p>"
+    };
     page(
         StatusCode::OK,
         shell(
             "Operator",
-            "<h1>Operator</h1>\
-             <p>This page signs in from the operator&rsquo;s CLI, not from a \
-             form. On the machine holding the operate key, run:</p>\
-             <pre><code>factory-publish operator signin</code></pre>\
-             <p>and open the link it prints. The link works once and expires \
-             in minutes; the key itself never enters a browser.</p>",
+            &format!(
+                "<h1>Operator</h1>\
+                 {email_door}\
+                 <pre><code>factory-publish operator signin</code></pre>\
+                 <p>and open the link it prints. The link works once and \
+                 expires in minutes; the key itself never enters a browser.</p>"
+            ),
             "/account/a/",
         ),
     )
+}
+
+/// `POST /admin/signin` — the email door. One button, no fields: the address
+/// is configuration's, never the request's, which is what there is to trust
+/// about it. One answer whatever happened — door unconfigured, door revoked,
+/// budget spent, ledger down — so the button is not an oracle for any of
+/// them.
+pub async fn email_signin(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    if let Some(address) = app.config.operator_email.clone() {
+        send_operator_link(&app, &address);
+    }
+    page(
+        StatusCode::OK,
+        shell(
+            "Check the email",
+            "<h1>Check the email</h1><p>If this box has an operator address \
+             configured, a sign-in link is on its way. It works once and \
+             expires in a few minutes.</p>",
+            "/account/a/",
+        ),
+    )
+}
+
+/// The work behind the button, none of which changes the page.
+fn send_operator_link(app: &Shared, address: &str) {
+    let now = crate::db::now();
+    let key_id = match app.db.email_door_key(&now) {
+        Ok(Some(id)) => id,
+        Ok(None) => {
+            tracing::warn!("email door key is revoked; not sending");
+            return;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "reading the email door key");
+            return;
+        }
+    };
+    match app.db.operator_links_today(&key_id, &crate::db::today()) {
+        Ok(sent) if sent >= EMAIL_LINKS_PER_DAY => {
+            tracing::warn!("operator email link budget exhausted for today");
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "counting operator links");
+            return;
+        }
+    }
+    let token = crate::intake::mint_token();
+    let expires = (chrono::Utc::now() + chrono::Duration::minutes(EMAIL_LINK_EXPIRY_MINUTES))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if let Err(e) =
+        app.db
+            .operator_link_create(&key_id, &crate::intake::hash_token(&token), &now, &expires)
+    {
+        tracing::error!(error = %e, "recording an operator link");
+        return;
+    }
+    let link = format!("{}/admin/s/{token}", app.config.base_url(Role::Gate));
+    app.mailer.send_operator_signin(address, &link);
+    tracing::info!("operator sign-in link mailed");
 }
 
 /// `GET /admin` — the panel, or the way in.
@@ -180,8 +293,21 @@ pub async fn overview(
         return nothing_here();
     }
     match session(&app, &headers) {
-        Ok(Some((token, key))) => render_panel(&app, &token, &key, None),
-        Ok(None) => how_to_sign_in(),
+        Ok(Some((token, key))) => {
+            // The cookie's half of the rolling expiry: `session()` pushed
+            // the ledger's date out, and a browser whose cookie still died
+            // thirty days after sign-in would make that extension a lie.
+            let mut response = render_panel(&app, &token, &key, None);
+            if let Ok(refreshed) = header::HeaderValue::from_str(&super::session_cookie(
+                COOKIE,
+                &token,
+                SESSION_EXPIRY_DAYS * 24 * 60 * 60,
+            )) {
+                response.headers_mut().append(header::SET_COOKIE, refreshed);
+            }
+            response
+        }
+        Ok(None) => how_to_sign_in(&app),
         Err(refusal) => *refusal,
     }
 }
@@ -217,7 +343,7 @@ pub async fn finish(
     }
     let now = crate::db::now();
     let session_token = crate::intake::mint_token();
-    let expires = (chrono::Utc::now() + chrono::Duration::hours(SESSION_EXPIRY_HOURS))
+    let expires = (chrono::Utc::now() + chrono::Duration::days(SESSION_EXPIRY_DAYS))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     // One transaction spends the link and mints the session, so a failure
     // between the two cannot burn the link — a retried click still works,
@@ -257,7 +383,7 @@ pub async fn finish(
             (header::LOCATION, "/admin".to_string()),
             (
                 header::SET_COOKIE,
-                super::session_cookie(COOKIE, &session_token, SESSION_EXPIRY_HOURS * 60 * 60),
+                super::session_cookie(COOKIE, &session_token, SESSION_EXPIRY_DAYS * 24 * 60 * 60),
             ),
         ],
     )
@@ -277,7 +403,7 @@ fn mutating(
     }
     let (token, key) = match session(app, headers) {
         Ok(Some(pair)) => pair,
-        Ok(None) => return Err(Box::new(how_to_sign_in())),
+        Ok(None) => return Err(Box::new(how_to_sign_in(app))),
         Err(refusal) => return Err(refusal),
     };
     let values = form_values(body);

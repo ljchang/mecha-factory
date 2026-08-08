@@ -65,6 +65,7 @@ fn start() -> Port80 {
         }),
         limits: Limits::default(),
         docs_url: None,
+        operator_email: None,
         redirect_hosts: vec![],
     };
     let db = Db::open(&config.db_path()).unwrap();
