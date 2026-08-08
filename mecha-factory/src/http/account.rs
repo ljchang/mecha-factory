@@ -588,6 +588,154 @@ pub async fn revoke(
     render_overview(&app, &token, &user)
 }
 
+/// Where a share verb lands afterwards: back on the viewer that posted it,
+/// or the overview.
+fn back_or_overview(
+    app: &Shared,
+    token: &str,
+    user: &UserRow,
+    values: &serde_json::Map<String, serde_json::Value>,
+) -> Response {
+    let back = values
+        .get("return")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    if back.starts_with("/view/") && !back.starts_with("//") {
+        return (
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, back.to_string())],
+        )
+            .into_response();
+    }
+    render_overview(app, token, user)
+}
+
+/// `POST /account/share` — grant an address this bundle, and have the box
+/// mail them the viewer link.
+///
+/// The grant is the owner's decision about their own bundle, but the mail
+/// reaches a stranger on a tenant's say-so — the shape of a mail cannon —
+/// so it is budgeted per owner per day, and a duplicate grant mails
+/// nothing: the row already exists, and the reader page mails its own
+/// sign-in links on request.
+pub async fn share(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (token, user, values) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let field = |name: &str| {
+        values
+            .get(name)
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string()
+    };
+    let id = field("id");
+    if mecha_manifest::valid_id(&id, "bundle id").is_err() {
+        return nothing_here();
+    }
+    let email = crate::intake::normalize_email(&field("email"));
+    if email.is_empty() || !email.contains('@') {
+        return nothing_here();
+    }
+    // Only something that exists is shareable — a grant on nothing would
+    // mail a stranger a link to a 404 signed with your handle.
+    let versions = app.db.bundle_versions(&user.id, &id).unwrap_or_default();
+    if versions.is_empty() {
+        return nothing_here();
+    }
+    match app.db.shares_today(&user.id, &crate::db::today()) {
+        Ok(minted) if minted >= crate::intake::SHARES_PER_DAY => {
+            return page(
+                StatusCode::OK,
+                shell(
+                    "Sharing limit reached",
+                    "<h1>Sharing limit reached</h1><p>Sharing mails people \
+                     on your behalf, so it is bounded per day. Try again \
+                     tomorrow.</p><p><a href=\"/account\">Back to your \
+                     page.</a></p>",
+                    "/account/a/",
+                ),
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "counting shares");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    match app.db.share_create(&user.id, &id, &email, &crate::db::now()) {
+        Ok(true) => {
+            // The mailed link is the bare viewer URL: stable while the
+            // alias moves, and the sign-in flow hangs off it.
+            let live = app
+                .db
+                .alias(&user.id, &id)
+                .ok()
+                .flatten()
+                .and_then(|alias| alias.version);
+            let title = live
+                .or_else(|| versions.iter().max().copied())
+                .and_then(|v| app.db.bundle(&user.id, &id, v).ok().flatten())
+                .map(|row| row.title)
+                .unwrap_or_else(|| id.clone());
+            let link = format!(
+                "{}/view/{}/{id}",
+                app.config.base_url(Role::Gate),
+                user.handle
+            );
+            app.mailer.send_share(&email, &user.handle, &title, &link);
+            tracing::info!(handle = %user.handle, %id, "bundle shared");
+        }
+        Ok(false) => {
+            // Already granted: nothing new to record, nobody to re-mail.
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "recording a share");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    back_or_overview(&app, &token, &user, &values)
+}
+
+/// `POST /account/share-revoke` — a grant stops working now. Ownership is
+/// the WHERE clause: somebody else's share id revokes nothing.
+pub async fn share_revoke(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (token, user, values) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let share = values
+        .get("share")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    match app.db.share_revoke(&user.id, share, &crate::db::now()) {
+        Ok(revoked) => {
+            if revoked {
+                tracing::info!(handle = %user.handle, share, "share revoked");
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "revoking a share");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    back_or_overview(&app, &token, &user, &values)
+}
+
 /// `POST /account/pair` — a fresh code, as the command to run.
 pub async fn pair(
     State(app): State<Shared>,

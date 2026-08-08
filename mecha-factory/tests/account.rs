@@ -435,9 +435,13 @@ fn the_viewer_knows_its_owner_and_its_controls_return_there() {
         mecha_manifest::Visibility::Private
     );
 
-    // Private now: the owner still gets the viewer; a stranger gets nothing.
+    // Private now: the owner still gets the viewer; a visitor with no
+    // session gets the reader sign-in gate — the page every private or
+    // absent viewer URL answers with, so it confirms nothing.
     assert_eq!(get(&server, "/view/alice/brief/1", Some(&session)).status, 200);
-    assert_eq!(get(&server, "/view/alice/brief/1", None).status, 404);
+    let stranger = get(&server, "/view/alice/brief/1", None);
+    assert_eq!(stranger.status, 200);
+    assert!(stranger.body.contains("Sign in to view"), "{}", stranger.body);
 
     // A return address outside /view/ is not followed.
     let elsewhere = post(

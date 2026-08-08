@@ -68,6 +68,30 @@ pub const SESSION_EXPIRY_DAYS: i64 = 7;
 /// bound is what stops it being a way to fill somebody's inbox.
 pub const SIGNIN_LINKS_PER_DAY: i64 = 5;
 
+/// The reader's numbers, shaped like the tenant's: the link is minutes (the
+/// person just asked), the session is days (re-proving an inbox daily
+/// defeats sharing), the links-per-day bound is what keeps the reader
+/// sign-in form from filling an inbox.
+pub const VIEWER_LINK_EXPIRY_MINUTES: i64 = 15;
+pub const VIEWER_SESSION_EXPIRY_DAYS: i64 = 7;
+pub const VIEWER_LINKS_PER_DAY: i64 = 5;
+
+/// How long a view capability lets a frame fetch one version's bytes. An
+/// hour covers a long read and a lazy-loading notebook; a revoked *grant*
+/// does not wait this out — the capability re-proves its share at every use.
+pub const VIEW_CAP_EXPIRY_MINUTES: i64 = 60;
+
+/// Grants one owner may mint in a day. Sharing mails a stranger on a
+/// tenant's say-so, which is the shape of a mail cannon unless bounded.
+pub const SHARES_PER_DAY: i64 = 20;
+
+/// One spelling of an address for grant rows and grant checks alike, so
+/// `Casey@Example.org` in the share form matches `casey@example.org` at the
+/// sign-in — matching is on this, never on what either party typed.
+pub fn normalize_email(address: &str) -> String {
+    address.trim().to_ascii_lowercase()
+}
+
 /// Where a verification link goes.
 pub trait Mailer: Send + Sync {
     fn send_verification(
@@ -84,6 +108,11 @@ pub trait Mailer: Send + Sync {
     /// because one address can hold several and the link signs into exactly
     /// one.
     fn send_signin(&self, address: &str, handle: &str, link: &str);
+    /// "Somebody shared a page with you." Sent when an owner grants this
+    /// address a bundle; `title` is the owner's own bundle title.
+    fn send_share(&self, address: &str, owner: &str, title: &str, link: &str);
+    /// A reader's sign-in link — proves the inbox a grant names.
+    fn send_viewer_link(&self, address: &str, link: &str);
     /// What `factory check` prints.
     fn describe(&self) -> String;
 }
@@ -124,6 +153,24 @@ impl Mailer for LogMailer {
             handle,
             link,
             "sign-in link (not sent: no mailer configured)"
+        );
+    }
+
+    fn send_share(&self, address: &str, owner: &str, title: &str, link: &str) {
+        tracing::info!(
+            to = address,
+            owner,
+            title,
+            link,
+            "share notice (not sent: no mailer configured)"
+        );
+    }
+
+    fn send_viewer_link(&self, address: &str, link: &str) {
+        tracing::info!(
+            to = address,
+            link,
+            "reader sign-in link (not sent: no mailer configured)"
         );
     }
 

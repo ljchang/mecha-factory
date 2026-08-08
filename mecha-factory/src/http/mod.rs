@@ -219,6 +219,10 @@ pub fn router(app: Shared) -> Router {
         .route("/account/release", post(account::release))
         .route("/account/revoke", post(account::revoke))
         .route("/account/pair", post(account::pair))
+        // Sharing: the owner's grants, driven from the viewer's Manage menu
+        // on the same session and CSRF as every other account verb.
+        .route("/account/share", post(account::share))
+        .route("/account/share-revoke", post(account::share_revoke))
         .route("/account/a/{name}", get(account::asset))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
@@ -228,12 +232,27 @@ pub fn router(app: Shared) -> Router {
         .route("/b/{id}/v/", get(artifacts::versions_index))
         // The signed-in viewer lives on the GATE — where the session is —
         // and frames the bundle cross-origin; see http/viewer.rs for the
-        // inversion. The artifact-origin spelling redirects to it.
+        // inversion. `/view/{a}/{b}` is two pages behind one shape: the
+        // artifact-origin redirect, and the gate's bare viewer URL a share
+        // mail carries — the dispatcher branches on origin.
         .route("/view/{handle}/{id}/{version}", get(viewer::view))
-        .route("/view/{id}/{version}", get(artifacts::viewer))
+        .route("/view/{a}/{b}", get(viewer::two_seg))
+        // The reader's way in: an email proves its inbox and becomes the
+        // third session surface. See http/viewer.rs.
+        .route("/view/signin", post(viewer::signin))
+        .route(
+            "/view/r/{token}",
+            get(viewer::finish_page).post(viewer::finish),
+        )
+        .route("/view/signout", post(viewer::signout))
         .route("/b/{id}/v/{version}", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/", get(artifacts::version_root))
         .route("/b/{id}/v/{version}/{*path}", get(artifacts::version_file))
+        // The capability path: one version's bytes for whoever presents a
+        // token the gate minted. Artifact origins only; see http/artifacts.rs.
+        .route("/g/{cap}", get(artifacts::grant_bare))
+        .route("/g/{cap}/", get(artifacts::grant_root))
+        .route("/g/{cap}/{*path}", get(artifacts::grant_file))
         .fallback(fallback)
         .layer(axum::middleware::from_fn_with_state(app.clone(), guard))
         .with_state(app)

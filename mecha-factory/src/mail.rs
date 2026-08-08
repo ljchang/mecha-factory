@@ -311,6 +311,49 @@ impl crate::intake::Mailer for SesMailer {
         }
     }
 
+    fn send_share(&self, address: &str, owner: &str, title: &str, link: &str) {
+        let subject = format!("{owner} shared a page with you");
+        let text = format!(
+            "`{owner}` shared \u{201c}{title}\u{201d} with this email address:\n\n\
+             {link}\n\n\
+             Opening it will ask you to sign in with this address — a link is \
+             mailed here, no password and no account. Access lasts until \
+             `{owner}` withdraws it.\n\n\
+             If you were not expecting this, ignore it — nothing happens \
+             unless you sign in.\n"
+        );
+        match self.send(address, &subject, &text, chrono::Utc::now()) {
+            Ok(()) => tracing::info!(owner, "share notice sent"),
+            Err(e) => tracing::error!(
+                error = %e,
+                owner,
+                link,
+                "sending a share notice failed — the page link can be passed by hand"
+            ),
+        }
+    }
+
+    fn send_viewer_link(&self, address: &str, link: &str) {
+        let subject = "Your sign-in link";
+        let text = format!(
+            "A sign-in link for a page shared with this address was requested:\n\n\
+             {link}\n\n\
+             It works once and expires in {} minutes.\n\n\
+             If you did not ask for this, ignore it — nothing happens unless \
+             the link is opened, and only somebody reading this mailbox can \
+             open it.\n",
+            crate::intake::VIEWER_LINK_EXPIRY_MINUTES
+        );
+        match self.send(address, subject, &text, chrono::Utc::now()) {
+            Ok(()) => tracing::info!("reader sign-in link sent"),
+            Err(e) => tracing::error!(
+                error = %e,
+                link,
+                "sending a reader sign-in link failed — it can be delivered by hand"
+            ),
+        }
+    }
+
     fn describe(&self) -> String {
         format!("Amazon SES — {} from {}", self.region, self.from)
     }

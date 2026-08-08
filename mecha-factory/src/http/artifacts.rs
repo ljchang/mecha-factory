@@ -139,23 +139,25 @@ pub async fn share(
 /// `/view/<id>/<version>` on an artifact origin — a redirect to the real
 /// viewer, which lives on the gate where the session is. One viewer, not
 /// two: the chrome that knows who you are cannot run here, and a second
-/// anonymous chrome would drift from the first.
-pub async fn viewer(
-    State(app): State<Shared>,
-    Extension(origin): Extension<Origin>,
-    Path((id, version)): Path<(String, u32)>,
+/// anonymous chrome would drift from the first. Called through the gate
+/// viewer's route dispatcher, which owns the `/view/{a}/{b}` shape.
+pub(crate) fn viewer_redirect(
+    app: &Shared,
+    origin: &Origin,
+    id: &str,
+    version: u32,
 ) -> Response {
-    if origin.role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
+    if origin.role == Role::Gate || mecha_manifest::valid_id(id, "bundle id").is_err() {
         return missing();
     }
-    let Some(user) = owner(&app, &origin) else {
+    let Some(user) = owner(app, origin) else {
         return missing();
     };
     // Same one-answer rule before revealing even the redirect: a private or
     // unknown bundle's viewer URL answers like nothing was ever here.
-    match access(&app, &user.id, &id) {
+    match access(app, &user.id, id) {
         Access::Nothing => return missing(),
-        Access::Gone => return gone(&id),
+        Access::Gone => return gone(id),
         Access::Current(_) => {}
     }
     let target = format!(
@@ -349,6 +351,155 @@ async fn serve(
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    response
+}
+
+// ---- the capability path -------------------------------------------------
+//
+// `/g/<cap>/…` serves one version's bytes to whoever presents the token —
+// which is exactly as designed: the gate authorised a *person* (the owner,
+// or an email a share names) and minted this short-lived spelling of that
+// decision, because this origin holds no session and must learn no identity.
+// The alias and its visibility are deliberately not consulted — the
+// capability is the authority — but a withhold still covers everything, and
+// a reader's capability re-proves its share inside `view_cap_lookup`, so a
+// revoked grant dies at the next fetch, not at the token's expiry.
+
+/// `/g/<cap>` — normalise onto the slash, so the bundle's relative paths
+/// resolve under the capability.
+pub async fn grant_bare(
+    Extension(origin): Extension<Origin>,
+    Path(cap): Path<String>,
+) -> Response {
+    if origin.role == Role::Gate || !cap.chars().all(|c| c.is_ascii_hexdigit()) {
+        return missing();
+    }
+    (
+        StatusCode::FOUND,
+        [
+            (header::LOCATION, format!("/g/{cap}/")),
+            (header::CACHE_CONTROL, "no-store".into()),
+        ],
+    )
+        .into_response()
+}
+
+/// `/g/<cap>/` — the version's index.
+pub async fn grant_root(
+    state: State<Shared>,
+    origin: Extension<Origin>,
+    Path(cap): Path<String>,
+) -> Response {
+    serve_cap(state, origin, cap, String::new()).await
+}
+
+/// `/g/<cap>/<path>` — a file inside the version.
+pub async fn grant_file(
+    state: State<Shared>,
+    origin: Extension<Origin>,
+    Path((cap, path)): Path<(String, String)>,
+) -> Response {
+    serve_cap(state, origin, cap, path).await
+}
+
+async fn serve_cap(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    cap: String,
+    path: String,
+) -> Response {
+    if origin.role == Role::Gate {
+        return missing();
+    }
+    let Some(user) = owner(&app, &origin) else {
+        return missing();
+    };
+    let row = match app
+        .db
+        .view_cap_lookup(&crate::intake::hash_token(&cap), &crate::db::now())
+    {
+        Ok(Some(row)) => row,
+        Ok(None) => return missing(),
+        Err(e) => {
+            tracing::error!(error = %e, "reading a view capability");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    // A capability only opens bytes under their owner's own origins — one
+    // tenant's token must never make another tenant's subdomain serve.
+    if row.user_id != user.id {
+        return missing();
+    }
+
+    let bundle = match app.db.bundle(&user.id, &row.bundle_id, row.version) {
+        Ok(Some(bundle)) => bundle,
+        Ok(None) => return missing(),
+        Err(e) => {
+            tracing::error!(error = %e, "reading a bundle row");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    };
+    // A withhold covers capabilities too, or it is a suggestion.
+    if bundle.withheld_at.is_some() {
+        return missing();
+    }
+    // The class decides the origin here exactly as on the public path.
+    let belongs = Role::for_class(bundle.class);
+    if belongs != origin.role {
+        let target = format!(
+            "{}/g/{cap}/{}",
+            app.config.user_url(belongs, &user.handle),
+            path.trim_start_matches('/')
+        );
+        return (
+            StatusCode::FOUND,
+            [
+                (header::LOCATION, target),
+                (header::CACHE_CONTROL, "no-store".into()),
+            ],
+        )
+            .into_response();
+    }
+
+    let Some(file) = app
+        .files
+        .resolve(&user.id, &row.bundle_id, row.version, &path)
+    else {
+        return missing();
+    };
+    let bytes = match std::fs::read(&file) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!(path = %file.display(), error = %e, "reading a published file");
+            return missing();
+        }
+    };
+
+    let mut response = (
+        StatusCode::OK,
+        [(
+            header::CONTENT_TYPE,
+            mecha_manifest::content_type(&file.to_string_lossy()),
+        )],
+        bytes,
+    )
+        .into_response();
+
+    let headers = response.headers_mut();
+    for (name, value) in bundle
+        .class
+        .headers_framed_by(Some(&app.config.base_url(crate::config::Role::Gate)))
+    {
+        if let Ok(value) = HeaderValue::from_str(&value) {
+            headers.insert(name, value);
+        }
+    }
+    // Private bytes, unlike a public version's: nothing here may rest in a
+    // shared cache, however immutable the underlying version is.
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
     );
     response
 }

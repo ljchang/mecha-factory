@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 9;
+const SCHEMA: i64 = 10;
 
 #[derive(Clone)]
 pub struct Db {
@@ -273,6 +273,27 @@ pub struct BundleRow {
     /// response to a complaint is how you lose the ability to answer it.
     pub withheld_at: Option<String>,
     pub withheld_reason: Option<String>,
+}
+
+/// One live grant, as the owner's Manage menu lists it.
+#[derive(Debug, Clone)]
+pub struct ShareRow {
+    pub id: String,
+    pub user_id: String,
+    pub bundle_id: String,
+    pub email: String,
+    pub created_at: String,
+}
+
+/// What a view capability authorises: exactly one version's bytes.
+#[derive(Debug, Clone)]
+pub struct ViewCapRow {
+    pub user_id: String,
+    pub bundle_id: String,
+    pub version: u32,
+    /// Empty for the owner's own preview; a reader's verified address
+    /// otherwise, re-checked against the live shares at every use.
+    pub email: String,
 }
 
 /// One withheld version, as the operator's panel lists it.
@@ -947,7 +968,16 @@ impl Db {
                 "DELETE FROM operator_links WHERE expires_at <= ?1",
                 params![now],
             )?;
-            Ok(a + b + c + d)
+            let e = conn.execute(
+                "DELETE FROM viewer_sessions WHERE expires_at <= ?1",
+                params![now],
+            )?;
+            let f = conn.execute(
+                "DELETE FROM viewer_links WHERE expires_at <= ?1",
+                params![now],
+            )?;
+            let g = conn.execute("DELETE FROM view_caps WHERE expires_at <= ?1", params![now])?;
+            Ok(a + b + c + d + e + f + g)
         })
     }
 
@@ -1048,6 +1078,265 @@ impl Db {
                 params![token_hash, now],
             )?;
             Ok(n > 0)
+        })
+    }
+
+    // ---- shares, and the reader's sessions ------------------------------
+    //
+    // The third session surface: a reader is an *email*, never a user and
+    // never a key. Same verbs, own tables, opposite join — the property the
+    // other two surfaces already hold.
+
+    /// Grant an address a bundle, idempotently: a live duplicate is left in
+    /// place rather than doubled. Returns whether a new row was minted.
+    pub fn share_create(
+        &self,
+        user_id: &str,
+        bundle_id: &str,
+        email: &str,
+        now: &str,
+    ) -> Result<bool> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            let exists: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM shares WHERE user_id = ?1 AND bundle_id = ?2 \
+                 AND email = ?3 AND revoked_at IS NULL",
+                params![user_id, bundle_id, email],
+                |r| r.get(0),
+            )?;
+            if exists > 0 {
+                return Ok(false);
+            }
+            conn.execute(
+                "INSERT INTO shares (id, user_id, bundle_id, email, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, user_id, bundle_id, email, now],
+            )?;
+            Ok(true)
+        })
+    }
+
+    /// One bundle's live grants, for the owner's Manage menu.
+    pub fn shares_for_bundle(&self, user_id: &str, bundle_id: &str) -> Result<Vec<ShareRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, user_id, bundle_id, email, created_at FROM shares \
+                 WHERE user_id = ?1 AND bundle_id = ?2 AND revoked_at IS NULL \
+                 ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map(params![user_id, bundle_id], |r| {
+                Ok(ShareRow {
+                    id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    bundle_id: r.get(2)?,
+                    email: r.get(3)?,
+                    created_at: r.get(4)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Revoke a grant **belonging to this owner** — ownership is the WHERE
+    /// clause, like the tenant page's key revoke.
+    pub fn share_revoke(&self, user_id: &str, share_id: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE shares SET revoked_at = ?3 \
+                 WHERE id = ?1 AND user_id = ?2 AND revoked_at IS NULL",
+                params![share_id, user_id, now],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Does a live grant let this address read this bundle?
+    pub fn share_allows(&self, user_id: &str, bundle_id: &str, email: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM shares WHERE user_id = ?1 AND bundle_id = ?2 \
+                 AND email = ?3 AND revoked_at IS NULL",
+                params![user_id, bundle_id, email],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Does any live grant name this address at all? What decides whether a
+    /// reader sign-in request sends mail — an address nobody granted gets
+    /// the same page and no message.
+    pub fn email_has_shares(&self, email: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM shares WHERE email = ?1 AND revoked_at IS NULL",
+                params![email],
+                |r| r.get(0),
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Grants minted by an owner today — the share-mail budget's denominator.
+    pub fn shares_today(&self, user_id: &str, today: &str) -> Result<i64> {
+        self.with(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM shares WHERE user_id = ?1 \
+                 AND substr(created_at, 1, 10) = ?2",
+                params![user_id, today],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// Record a reader's sign-in link.
+    pub fn viewer_link_create(
+        &self,
+        email: &str,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO viewer_links (id, email, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, email, token_hash, now, expires_at],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Reader links sent to an address today — its budget's denominator.
+    pub fn viewer_links_today(&self, email: &str, today: &str) -> Result<i64> {
+        self.with(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM viewer_links WHERE email = ?1 \
+                 AND substr(created_at, 1, 10) = ?2",
+                params![email, today],
+                |r| r.get(0),
+            )?)
+        })
+    }
+
+    /// Spend a reader link and mint its session — the transactional shape
+    /// [`Db::signin`] and [`Db::operator_signin`] share, for the same
+    /// reason: the link is consumed only when the session lands. Returns
+    /// the email the session now speaks for.
+    pub fn viewer_signin(
+        &self,
+        link_hash: &str,
+        session_hash: &str,
+        now: &str,
+        session_expires: &str,
+    ) -> Result<Option<String>> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let email: Option<String> = tx
+                .query_row(
+                    "UPDATE viewer_links SET used_at = ?2 \
+                     WHERE token_hash = ?1 AND used_at IS NULL AND expires_at > ?2 \
+                     RETURNING email",
+                    params![link_hash, now],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(email) = &email {
+                tx.execute(
+                    "INSERT INTO viewer_sessions \
+                     (id, email, token_hash, created_at, expires_at) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![id, email, session_hash, now, session_expires],
+                )?;
+            }
+            tx.commit()?;
+            Ok(email)
+        })
+    }
+
+    /// The verified email behind a live reader session, or nothing.
+    pub fn viewer_session_email(&self, token_hash: &str, now: &str) -> Result<Option<String>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT email FROM viewer_sessions \
+                     WHERE token_hash = ?1 AND revoked_at IS NULL AND expires_at > ?2",
+                    params![token_hash, now],
+                    |r| r.get(0),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Sign out: the reader session stops working now.
+    pub fn viewer_session_revoke(&self, token_hash: &str, now: &str) -> Result<bool> {
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE viewer_sessions SET revoked_at = ?2 \
+                 WHERE token_hash = ?1 AND revoked_at IS NULL",
+                params![token_hash, now],
+            )?;
+            Ok(n > 0)
+        })
+    }
+
+    /// Mint a capability for one version's bytes — the row says what it
+    /// authorises, with an empty email for the owner's own preview.
+    pub fn view_cap_create(
+        &self,
+        cap: &ViewCapRow,
+        token_hash: &str,
+        now: &str,
+        expires_at: &str,
+    ) -> Result<()> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO view_caps \
+                 (id, user_id, bundle_id, version, email, token_hash, created_at, expires_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    id,
+                    cap.user_id,
+                    cap.bundle_id,
+                    cap.version,
+                    cap.email,
+                    token_hash,
+                    now,
+                    expires_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// What a presented capability authorises, or nothing. A reader's cap
+    /// re-proves its grant here, at every use — the EXISTS is what makes
+    /// revoking a share immediate instead of waiting out the token. The
+    /// owner's cap (empty email) answers to no share, because the owner is
+    /// not a grantee.
+    pub fn view_cap_lookup(&self, token_hash: &str, now: &str) -> Result<Option<ViewCapRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT c.user_id, c.bundle_id, c.version, c.email FROM view_caps c \
+                     WHERE c.token_hash = ?1 AND c.expires_at > ?2 \
+                     AND (c.email = '' OR EXISTS (SELECT 1 FROM shares s \
+                         WHERE s.user_id = c.user_id AND s.bundle_id = c.bundle_id \
+                         AND s.email = c.email AND s.revoked_at IS NULL))",
+                    params![token_hash, now],
+                    |r| {
+                        Ok(ViewCapRow {
+                            user_id: r.get(0)?,
+                            bundle_id: r.get(1)?,
+                            version: r.get(2)?,
+                            email: r.get(3)?,
+                        })
+                    },
+                )
+                .optional()?)
         })
     }
 
@@ -2528,6 +2817,61 @@ fn migrate(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL,
             expires_at  TEXT NOT NULL,
             revoked_at  TEXT
+        );
+
+        -- A grant: this address may read this bundle while the row is live.
+        -- Bundle-level like visibility — the alias still decides which
+        -- version a reader sees — and the email is plaintext like an
+        -- invite's: it is the owner's own record of who they let in.
+        CREATE TABLE IF NOT EXISTS shares (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            bundle_id   TEXT NOT NULL,
+            email       TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            revoked_at  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS shares_by_bundle ON shares (user_id, bundle_id);
+        CREATE INDEX IF NOT EXISTS shares_by_email ON shares (email);
+
+        -- A reader's identity: an email that proved itself by a link. The
+        -- third session surface, and again deliberately its own tables with
+        -- its own join — a viewer session resolves to an *email*, never a
+        -- user and never a key, so no query that answers one surface can be
+        -- handed another's cookie.
+        CREATE TABLE IF NOT EXISTS viewer_links (
+            id          TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            used_at     TEXT
+        );
+        CREATE TABLE IF NOT EXISTS viewer_sessions (
+            id          TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL,
+            revoked_at  TEXT
+        );
+
+        -- A short-lived capability for one version's bytes: minted by the
+        -- gate viewer after it authorised a reader, spent per-request by the
+        -- artifact origin, which holds no session and learns no identity —
+        -- the token in the frame URL is the entire authority. An empty email
+        -- is the owner previewing; a reader's email is re-checked against
+        -- the live shares at every use, so revoking a grant bites at the
+        -- next fetch rather than at the token's expiry.
+        CREATE TABLE IF NOT EXISTS view_caps (
+            id          TEXT PRIMARY KEY,
+            user_id     TEXT NOT NULL,
+            bundle_id   TEXT NOT NULL,
+            version     INTEGER NOT NULL,
+            email       TEXT NOT NULL DEFAULT '',
+            token_hash  TEXT NOT NULL UNIQUE,
+            created_at  TEXT NOT NULL,
+            expires_at  TEXT NOT NULL
         );
         ",
     )?;

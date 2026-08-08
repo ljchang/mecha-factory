@@ -40,6 +40,14 @@ impl mecha_factory::intake::Mailer for CapturedMail {
         self.0.lock().unwrap().push(link.to_string());
     }
 
+    fn send_share(&self, _address: &str, _owner: &str, _title: &str, link: &str) {
+        self.0.lock().unwrap().push(link.to_string());
+    }
+
+    fn send_viewer_link(&self, _address: &str, link: &str) {
+        self.0.lock().unwrap().push(link.to_string());
+    }
+
     fn describe(&self) -> String {
         "captured (test)".into()
     }
@@ -269,6 +277,18 @@ impl Server {
         let links = self.mail.0.lock().unwrap();
         let link = links.last().expect("no verification link was sent");
         link.rsplit('/').next().unwrap().to_string()
+    }
+
+    /// The most recent link in full, for mails whose link is a page rather
+    /// than a token — a share notice, a reader sign-in with its query.
+    pub fn last_link(&self) -> String {
+        self.mail
+            .0
+            .lock()
+            .unwrap()
+            .last()
+            .expect("no link was sent")
+            .clone()
     }
 
     pub fn key(&self, scope: mecha_factory::db::Scope) -> String {
