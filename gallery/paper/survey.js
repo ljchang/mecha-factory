@@ -84,6 +84,127 @@
     if (target.tagName === "TEXTAREA" || target.type === "number") queueSave();
   });
 
+  // --- the VAS track --------------------------------------------------
+  // A range input laid over the number field, thumbless until touched:
+  // a slider with a resting place would anchor answers to it, and an
+  // untouched control submitting 50 would invent a midpoint. The number
+  // input keeps the name and the keyboard path; the track only writes
+  // into it, so the form posts exactly what JS-off would.
+  Array.prototype.forEach.call(
+    form.querySelectorAll(".vas input[type=number]"),
+    function (num) {
+      var range = document.createElement("input");
+      range.type = "range";
+      range.min = "0";
+      range.max = "100";
+      range.className = "vas-range";
+      range.setAttribute("aria-hidden", "true");
+      range.tabIndex = -1;
+      if (num.value !== "") {
+        range.value = num.value;
+      } else {
+        range.value = "50";
+        range.className += " untouched";
+      }
+      num.classList.add("vas-number");
+      num.parentNode.insertBefore(range, num);
+      range.addEventListener("input", function () {
+        range.classList.remove("untouched");
+        num.value = range.value;
+        queueSave();
+      });
+      num.addEventListener("input", function () {
+        if (num.value === "") return;
+        range.value = num.value;
+        range.classList.remove("untouched");
+      });
+    }
+  );
+
+  // --- ranking by buttons ---------------------------------------------
+  // The rank selects give way to a list with move buttons and a polite
+  // live region — the poll grid's ARIA discipline applied to a list.
+  // Moving anything expresses a full order, so every select is synced to
+  // the list; partial rankings remain the JS-off affordance. (Drag can
+  // arrive later; the buttons are the accessible spine either way.)
+  Array.prototype.forEach.call(
+    form.querySelectorAll(".survey .question, section.question"),
+    function (section) {
+      var labels = section.querySelectorAll("label.opt.rank");
+      if (!labels.length) return;
+      var rows = Array.prototype.map.call(labels, function (label, index) {
+        var sel = label.querySelector("select");
+        return {
+          sel: sel,
+          name: label.querySelector(".optlabel").textContent,
+          rank: sel.value === "" ? null : parseInt(sel.value, 10),
+          declared: index
+        };
+      });
+      rows.sort(function (a, b) {
+        if (a.rank !== null && b.rank !== null) return a.rank - b.rank;
+        if (a.rank !== null) return -1;
+        if (b.rank !== null) return 1;
+        return a.declared - b.declared;
+      });
+
+      var list = document.createElement("ol");
+      list.className = "rank-list";
+      var live = document.createElement("p");
+      live.className = "visually-hidden";
+      live.setAttribute("aria-live", "polite");
+      section.classList.add("ranks-enhanced");
+      labels[0].parentNode.insertBefore(list, labels[0]);
+      section.appendChild(live);
+
+      var sync = function () {
+        rows.forEach(function (row, index) {
+          row.sel.value = String(index + 1);
+        });
+        queueSave();
+      };
+      var render = function (focus) {
+        list.textContent = "";
+        rows.forEach(function (row, index) {
+          var item = document.createElement("li");
+          var name = document.createElement("span");
+          name.className = "optlabel";
+          name.textContent = row.name;
+          var up = document.createElement("button");
+          up.type = "button";
+          up.textContent = "↑";
+          up.setAttribute("aria-label", "Move " + row.name + " up");
+          up.disabled = index === 0;
+          var down = document.createElement("button");
+          down.type = "button";
+          down.textContent = "↓";
+          down.setAttribute("aria-label", "Move " + row.name + " down");
+          down.disabled = index === rows.length - 1;
+          var move = function (delta) {
+            var to = index + delta;
+            rows.splice(to, 0, rows.splice(index, 1)[0]);
+            live.textContent =
+              row.name + " is now " + (to + 1) + " of " + rows.length + ".";
+            sync();
+            render({ row: row, dir: delta });
+          };
+          up.addEventListener("click", function () { move(-1); });
+          down.addEventListener("click", function () { move(1); });
+          item.appendChild(up);
+          item.appendChild(down);
+          item.appendChild(name);
+          list.appendChild(item);
+          // Focus follows the moved row, so arrows keep working from the
+          // keyboard without re-tabbing to it.
+          if (focus && focus.row === row) {
+            (focus.dir < 0 ? up : down).focus();
+          }
+        });
+      };
+      render(null);
+    }
+  );
+
   if (live) {
     window.setInterval(refreshResults, 10000);
     document.addEventListener("visibilitychange", function () {
