@@ -178,13 +178,21 @@ fn render_any(app: &Shared, poll: &PollRow, participant: &str, notice: Option<St
 /// The general poll's page: the stored spec's questions, this participant's
 /// saved ballot, and results exactly as the policy allows this viewer —
 /// decided here, where the bytes are emitted, never in the client.
-fn render_general(
-    app: &Shared,
-    poll: &PollRow,
-    spec: &PollSpec,
-    participant: &str,
-    notice: Option<String>,
-) -> Response {
+/// One viewer's standing in a general poll — computed once, used by the
+/// page and by `results.json`, so the two can never disagree about what
+/// this viewer may see.
+struct SurveyView {
+    ballots: Vec<(String, Ballot)>,
+    mine: Ballot,
+    open: bool,
+    identity: Identity,
+    /// Whether the policy shows this viewer results *now*.
+    visible: bool,
+    responded: usize,
+    total: usize,
+}
+
+fn survey_view(app: &Shared, poll: &PollRow, spec: &PollSpec, participant: &str) -> SurveyView {
     let others = app
         .db
         .poll_participants(&poll.user_id, &poll.id)
@@ -202,14 +210,34 @@ fn render_general(
         .map(|(_, ballot)| ballot.clone())
         .unwrap_or_default();
     let open = still_open(poll, chrono::Utc::now());
-    let identity = spec.results.identity(spec.audience.kind);
     let visible = match spec.results.show {
         Show::Live => true,
         Show::AfterVote => !mine.is_empty(),
         Show::AfterClose => !open,
         Show::Creator => false,
     };
-    let results = visible.then(|| build_results(spec, &ballots, identity, open));
+    SurveyView {
+        mine,
+        open,
+        identity: spec.results.identity(spec.audience.kind),
+        visible,
+        responded: others.iter().filter(|p| p.responded_at.is_some()).count(),
+        total: others.len(),
+        ballots,
+    }
+}
+
+fn render_general(
+    app: &Shared,
+    poll: &PollRow,
+    spec: &PollSpec,
+    participant: &str,
+    notice: Option<String>,
+) -> Response {
+    let view = survey_view(app, poll, spec, participant);
+    let results = view
+        .visible
+        .then(|| build_results(spec, &view.ballots, view.identity, view.open));
     let options = SurveyPageOptions {
         participant: Some(participant.to_string()),
         action: String::new(), // POST back to this same URL
@@ -223,18 +251,71 @@ fn render_general(
                 .map(|t| t.format("%a %b %-d, %-I:%M %p %Z").to_string())
                 .unwrap_or_else(|_| d.to_string())
         }),
-        responded: others.iter().filter(|p| p.responded_at.is_some()).count(),
-        total: Some(others.len()),
-        open,
+        responded: view.responded,
+        total: Some(view.total),
+        open: view.open,
         notice,
         show: spec.results.show,
-        identity,
+        identity: view.identity,
+        live: true,
     };
-    let page = survey_page(spec, &mine, results.as_deref(), &options);
+    let page = survey_page(spec, &view.mine, results.as_deref(), &options);
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
         page.html,
+    )
+        .into_response()
+}
+
+/// `GET /p/{handle}/{poll_id}/{token}/results.json` — what this viewer may
+/// see, right now: the intro line and, when the policy allows, each
+/// question's results as a server-rendered fragment. The same rendering
+/// the page embeds, so the live swap and a reload always agree. `no-store`
+/// because the answer is per-viewer and per-moment.
+pub async fn results(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, poll_id, token)): Path<(String, String, String)>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((poll, name)) = resolve(&app, &handle, &poll_id, &token) else {
+        return nothing_here();
+    };
+    let spec = match poll.general_spec() {
+        Ok(Some(spec)) => spec,
+        // A times poll has no results endpoint; its heat rides the page.
+        Ok(None) => return nothing_here(),
+        Err(e) => {
+            tracing::error!(poll = %poll.id, error = %e, "unreadable poll spec");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+    let view = survey_view(&app, &poll, &spec, &name);
+    let fragments = view.visible.then(|| {
+        let results = build_results(&spec, &view.ballots, view.identity, view.open);
+        let map: serde_json::Map<String, serde_json::Value> =
+            mecha_manifest::results_fragments(&spec, &results)
+                .into_iter()
+                .map(|(qid, html)| (qid, html.into()))
+                .collect();
+        serde_json::Value::Object(map)
+    });
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({
+            "open": view.open,
+            "intro": mecha_manifest::intro_line(Some(&name), view.responded, Some(view.total)),
+            "results": fragments,
+        })
+        .to_string(),
     )
         .into_response()
 }

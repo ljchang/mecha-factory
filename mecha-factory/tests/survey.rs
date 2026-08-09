@@ -101,6 +101,35 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
     assert!(!page.body.contains("tallybar"), "{}", page.body);
     assert!(!page.body.contains("better ablations"), "hidden means absent");
 
+    // The live endpoint answers each viewer by the same policy: Priya's
+    // carries the fragments, Tal's carries null — and both say no-store,
+    // because the answer is per-viewer and per-moment.
+    let live = server.get(server.gate, &format!("{priya_path}/results.json"));
+    assert_eq!(live.status, 200, "{}", live.body);
+    assert_eq!(live.header("cache-control").as_deref(), Some("no-store"));
+    let data = live.json();
+    assert_eq!(data["open"], true);
+    assert_eq!(data["intro"], "Hi Priya — 1 of 2 have answered so far.");
+    let fragment = data["results"]["paper"].as_str().unwrap();
+    assert!(fragment.contains("<meter"), "{fragment}");
+    assert!(
+        data["results"]["why"].as_str().unwrap().contains("better ablations"),
+        "{}",
+        data["results"]
+    );
+    let live = server.get(server.gate, &format!("{tal_path}/results.json"));
+    assert_eq!(live.status, 200);
+    assert!(live.json()["results"].is_null(), "{}", live.body);
+
+    // And the page wires the enhancement in: live form, script, slots.
+    let page = server.get(server.gate, priya_path);
+    assert!(page.body.contains("data-live=\"1\""), "{}", page.body);
+    assert!(page.body.contains("survey.js"), "{}", page.body);
+    assert!(page.body.contains("id=\"results-q-paper\""), "{}", page.body);
+    let asset = server.get(server.gate, "/p/a/survey.js");
+    assert_eq!(asset.status, 200);
+    assert!(asset.body.contains("results.json"), "{}", asset.body);
+
     // Home reads the spec and the tagged ballots back.
     let reply = Request::new("GET", "/v1/instruments/book/polls/paper-vote", &gate)
         .auth(&server.key(Scope::Slots))
@@ -131,6 +160,41 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
         .body("q_paper=affect-probes".to_string())
         .send(server.gate);
     assert_eq!(reply.status, 409);
+    // Closed is a state the live endpoint reports, not an error.
+    let live = server.get(server.gate, &format!("{priya_path}/results.json"));
+    assert_eq!(live.json()["open"], false);
+}
+
+#[test]
+fn a_times_poll_has_no_results_endpoint() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let reply = Request::new("PUT", "/v1/instruments/book/polls/lab-feb", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(
+            serde_json::json!({
+                "title": "Lab meeting",
+                "timezone": "America/New_York",
+                "duration_minutes": 60,
+                "candidates": [
+                    {"start": "2030-02-05T18:00:00Z", "end": "2030-02-05T19:00:00Z",
+                     "duration_minutes": 60},
+                ],
+                "participants": ["Priya"],
+            })
+            .to_string(),
+        )
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let url = reply.json()["urls"]["Priya"].as_str().unwrap().to_string();
+    let path = &url[url.find("/p/").unwrap()..];
+    assert_eq!(
+        server
+            .get(server.gate, &format!("{path}/results.json"))
+            .status,
+        404,
+        "a times poll's heat rides its page"
+    );
 }
 
 #[test]

@@ -37,6 +37,10 @@ pub struct SurveyPageOptions {
     /// the vote, in plain words, by [`promise_line`].
     pub show: Show,
     pub identity: Identity,
+    /// Whether the page may fetch `results.json` and autosave — a server
+    /// renders true, a gallery's golden file renders false and fetches
+    /// nothing.
+    pub live: bool,
 }
 
 /// One question's results, as the server decided this viewer may see them.
@@ -59,6 +63,20 @@ pub enum QuestionDisplay {
     Ranking { tally: RankingTally, complete: bool },
     /// (name when named, the prose). Escaped at render like everything.
     Text { entries: Vec<(Option<String>, String)> },
+}
+
+/// The greeting-and-count line. One wording for the rendered page and the
+/// results endpoint's live replacement of it — extracted so the swap can
+/// never disagree with the load.
+pub fn intro_line(participant: Option<&str>, responded: usize, total: Option<usize>) -> String {
+    let greeting = match participant {
+        Some(name) => format!("Hi {name} — "),
+        None => String::new(),
+    };
+    match total {
+        Some(total) => format!("{greeting}{responded} of {total} have answered so far."),
+        None => format!("{greeting}{responded} answered so far."),
+    }
 }
 
 /// The identity promise in the voter's language, stated before they answer.
@@ -98,18 +116,14 @@ pub fn survey_page(
     let mut body = String::new();
     body.push_str(&format!("<h1>{}</h1>\n", escape_text(&spec.title)));
 
-    let mut intro = match &options.participant {
-        Some(name) => format!("Hi {} — ", escape_text(name)),
-        None => String::new(),
-    };
-    match options.total {
-        Some(total) => intro.push_str(&format!(
-            "{} of {} have answered so far.",
-            options.responded, total
-        )),
-        None => intro.push_str(&format!("{} answered so far.", options.responded)),
-    }
-    body.push_str(&format!("<p class=\"intro\">{intro}</p>\n"));
+    body.push_str(&format!(
+        "<p class=\"intro\">{}</p>\n",
+        escape_text(&intro_line(
+            options.participant.as_deref(),
+            options.responded,
+            options.total
+        ))
+    ));
 
     if let Some(notice) = &options.notice {
         body.push_str(&format!(
@@ -134,8 +148,9 @@ pub fn survey_page(
     }
 
     body.push_str(&format!(
-        "<form method=\"post\" action=\"{}\" class=\"survey\">\n",
-        escape_text(&options.action)
+        "<form method=\"post\" action=\"{}\" class=\"survey\"{}>\n",
+        escape_text(&options.action),
+        if options.live { " data-live=\"1\"" } else { "" }
     ));
     for (index, question) in spec.questions.iter().enumerate() {
         body.push_str("<section class=\"question\">\n");
@@ -154,11 +169,19 @@ pub fn survey_page(
             ));
         }
         widget(&mut body, question, mine.get(&question.id), options.open);
+        // The container exists whether or not it holds anything yet: the
+        // `after_vote` reveal is survey.js swapping server-rendered
+        // fragments into slots the page already has.
+        body.push_str(&format!(
+            "<div class=\"results-slot\" id=\"results-q-{}\">",
+            escape_text(&question.id)
+        ));
         if let Some(results) = results {
             if let Some(question_results) = results.get(index) {
-                render_results(&mut body, question, question_results);
+                body.push_str(&results_html(question, question_results));
             }
         }
+        body.push_str("</div>\n");
         body.push_str("</section>\n");
     }
     if results.is_none() && options.show != Show::Creator {
@@ -168,7 +191,9 @@ pub fn survey_page(
             Show::AfterVote => "Results will appear here after you answer.",
             _ => "Results will appear here when the poll closes.",
         };
-        body.push_str(&format!("<p class=\"zone\">{when}</p>\n"));
+        body.push_str(&format!(
+            "<p class=\"zone\" id=\"results-when\">{when}</p>\n"
+        ));
     }
     if options.open {
         body.push_str(
@@ -177,6 +202,12 @@ pub fn survey_page(
         );
     }
     body.push_str("</form>\n");
+    if options.live {
+        body.push_str(&format!(
+            "<script src=\"{}survey.js\" defer></script>\n",
+            escape_text(&options.assets)
+        ));
+    }
 
     let html = format!(
         "<!doctype html>\n<html lang=\"en\">\n<head>\n\
@@ -369,7 +400,23 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
     }
 }
 
-fn render_results(body: &mut String, question: &PollQuestion, results: &QuestionResults) {
+/// Every question's results as (question id, HTML fragment) — what
+/// `survey_page` embeds and what the results endpoint answers with, so the
+/// live swap and the full page load are one rendering, not two that agree.
+pub fn results_fragments(
+    spec: &PollSpec,
+    results: &[QuestionResults],
+) -> Vec<(String, String)> {
+    spec.questions
+        .iter()
+        .zip(results)
+        .map(|(question, result)| (question.id.clone(), results_html(question, result)))
+        .collect()
+}
+
+fn results_html(question: &PollQuestion, results: &QuestionResults) -> String {
+    let mut fragment = String::new();
+    let body = &mut fragment;
     body.push_str("<div class=\"results\">\n");
     match &results.display {
         QuestionDisplay::Suppressed { n } => {
@@ -487,6 +534,7 @@ fn render_results(body: &mut String, question: &PollQuestion, results: &Question
         body.push_str("</ul></details>\n");
     }
     body.push_str("</div>\n");
+    fragment
 }
 
 /// A count as a native `<meter>` beside its words — no script, no styling
@@ -572,6 +620,109 @@ pub fn ballot_from_form(
     raw
 }
 
+/// The survey page's enhancement: autosave every commit, and results that
+/// move while you watch. The mechanism is the booking page's `slots.json`
+/// pattern — poll a small JSON truth, reconcile the DOM — with one twist:
+/// the truth arrives as server-rendered fragments, so the live swap and a
+/// full page load are the same rendering. The `after_vote` reveal is a
+/// page-state change the server decides: the first allowed fetch is the
+/// first one that carries fragments, and the slots the page always had
+/// fill in.
+pub(crate) const SURVEY_JS: &str = r#"// Generated by mecha-manifest. Enhancement only:
+// the survey answers identically with this file blocked.
+(function () {
+  "use strict";
+  var form = document.querySelector("form.survey");
+  if (!form || !window.fetch) return;
+  // A closed survey is read-only and stays exactly as rendered.
+  if (!form.querySelector("button[type=submit]")) return;
+  var live = form.getAttribute("data-live") === "1";
+
+  var status = document.getElementById("savestate");
+  var say = function (text) {
+    if (status) { status.hidden = false; status.textContent = text; }
+  };
+
+  // Live results: swap each question's fragment only when it changed, so
+  // an open <details> in an unchanged block is not slammed shut.
+  var refreshResults = function () {
+    if (!live) return;
+    fetch(window.location.pathname + "/results.json", {
+      headers: { Accept: "application/json" }
+    })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data) return;
+        var intro = document.querySelector(".intro");
+        if (intro && data.intro) intro.textContent = data.intro;
+        if (!data.results) return;
+        var when = document.getElementById("results-when");
+        if (when) when.hidden = true;
+        Object.keys(data.results).forEach(function (qid) {
+          var slot = document.getElementById("results-q-" + qid);
+          if (slot && slot.innerHTML !== data.results[qid]) {
+            slot.innerHTML = data.results[qid];
+          }
+        });
+      })
+      .catch(function () { /* offline is not an error the page can fix */ });
+  };
+
+  // Autosave: every commit POSTs, debounced; a failed save says so and
+  // hands back the button — the JS-off path is also the degraded path. A
+  // 204 refreshes results immediately: the voter who just voted sees
+  // their bar tick up now, not at the next interval.
+  var autosave = true;
+  var timer = null, inflight = false, again = false;
+  var fallback = function () {
+    say("Couldn’t save — use the button below.");
+    autosave = false;
+  };
+  var save = function () {
+    if (!autosave) return;
+    if (inflight) { again = true; return; }
+    inflight = true;
+    var body = new URLSearchParams(new FormData(form));
+    fetch(window.location.pathname, {
+      method: "POST", body: body, headers: { Accept: "application/json" }
+    })
+      .then(function (res) {
+        if (res.status === 204) {
+          say("Saved — you can change your answers until the poll closes.");
+          refreshResults();
+        } else if (res.status === 409) {
+          say("This poll just closed; answers can no longer change.");
+          autosave = false;
+        } else fallback();
+      })
+      .catch(fallback)
+      .then(function () {
+        inflight = false;
+        if (again) { again = false; save(); }
+      });
+  };
+  var queueSave = function () {
+    if (!autosave) return;
+    if (timer) window.clearTimeout(timer);
+    say("Saving…");
+    timer = window.setTimeout(save, 700);
+  };
+  form.addEventListener("change", queueSave);
+  form.addEventListener("input", function (event) {
+    var target = event.target;
+    if (!target) return;
+    if (target.tagName === "TEXTAREA" || target.type === "number") queueSave();
+  });
+
+  if (live) {
+    window.setInterval(refreshResults, 10000);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") refreshResults();
+    });
+  }
+})();
+"#;
+
 /// The survey page's own structure, appended to the booking stylesheet.
 pub(crate) const SURVEY_STRUCTURE: &str = r#"
 /* --- the survey ---------------------------------------------------------- */
@@ -632,6 +783,7 @@ mod tests {
             notice: None,
             show: Show::AfterVote,
             identity: Identity::Anonymous,
+            live: false,
         }
     }
 

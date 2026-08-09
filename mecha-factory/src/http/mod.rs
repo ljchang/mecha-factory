@@ -205,12 +205,18 @@ pub fn router(app: Shared) -> Router {
             "/s/{handle}/{type_id}/m/{token}",
             get(booking::manage_page).post(booking::manage_cancel),
         )
-        // The group poll: a capability URL per participant, three enum
-        // values per candidate, and no free text anywhere on the page.
+        // The group poll: a capability URL per participant, answers only in
+        // the vocabulary the poll itself declared. The results route is
+        // token-scoped like the page, because what results a viewer may see
+        // depends on who is asking — `after_vote` is a personal reveal.
         .route("/p/a/{name}", get(poll::asset))
         .route(
             "/p/{handle}/{poll_id}/{token}",
             get(poll::page).post(poll::answer),
+        )
+        .route(
+            "/p/{handle}/{poll_id}/{token}/results.json",
+            get(poll::results),
         )
         // GET is a page with a button and POST is the verification, because
         // mail scanners follow GETs — see `intake::confirm_page`.
