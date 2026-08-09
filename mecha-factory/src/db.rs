@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 11;
+const SCHEMA: i64 = 12;
 
 #[derive(Clone)]
 pub struct Db {
@@ -374,11 +374,31 @@ pub struct PollRow {
     pub timezone: String,
     pub duration_minutes: i64,
     pub deadline: Option<String>,
-    /// JSON `[{start, end}]`, shape-validated at the endpoint.
+    /// JSON `[{start, end}]`, shape-validated at the endpoint. Times polls
+    /// only; a general poll stores `[]` here and its questions in `spec`.
     pub candidates: String,
+    /// A `PollSpec` as JSON, present on general polls. NULL is a poll from
+    /// before the column — a times poll, described by the columns beside it.
+    pub spec: Option<String>,
     pub state: String,
     pub created_at: String,
     pub closed_at: Option<String>,
+}
+
+impl PollRow {
+    /// The general question spec, when this poll carries one. `None` is the
+    /// seeded times poll (the legacy shape and still the pipeline's); `Err`
+    /// is a stored spec that no longer parses, which fails closed — a page
+    /// rendered from a guessed schema would collect answers to questions
+    /// nobody asked.
+    pub fn general_spec(&self) -> anyhow::Result<Option<mecha_manifest::PollSpec>> {
+        let Some(raw) = self.spec.as_deref() else {
+            return Ok(None);
+        };
+        let spec: mecha_manifest::PollSpec = serde_json::from_str(raw)
+            .map_err(|e| anyhow::anyhow!("poll `{}` has an unreadable spec: {e}", self.id))?;
+        Ok(Some(spec))
+    }
 }
 
 /// One participant's row: a name, a hashed capability, answers when given.
@@ -1984,7 +2004,9 @@ impl Db {
         self.with(|conn| {
             let tx = conn.unchecked_transaction()?;
             let inserted = tx.execute(
-                "INSERT OR IGNORE INTO polls (user_id, id, title, timezone,                  duration_minutes, deadline, candidates, state, created_at)                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'open', ?8)",
+                "INSERT OR IGNORE INTO polls (user_id, id, title, timezone, \
+                 duration_minutes, deadline, candidates, spec, state, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9)",
                 params![
                     row.user_id,
                     row.id,
@@ -1993,6 +2015,7 @@ impl Db {
                     row.duration_minutes,
                     row.deadline,
                     row.candidates,
+                    row.spec,
                     row.created_at
                 ],
             )?;
@@ -2014,7 +2037,9 @@ impl Db {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT user_id, id, title, timezone, duration_minutes, deadline,                      candidates, state, created_at, closed_at FROM polls                      WHERE user_id = ?1 AND id = ?2",
+                    "SELECT user_id, id, title, timezone, duration_minutes, deadline, \
+                     candidates, spec, state, created_at, closed_at FROM polls \
+                     WHERE user_id = ?1 AND id = ?2",
                     params![user_id, id],
                     poll_row,
                 )
@@ -2028,9 +2053,14 @@ impl Db {
         self.with(|conn| {
             Ok(conn
                 .query_row(
-                    "SELECT p.user_id, p.id, p.title, p.timezone, p.duration_minutes,                      p.deadline, p.candidates, p.state, p.created_at, p.closed_at, pp.name                      FROM poll_participants pp                      JOIN polls p ON p.user_id = pp.user_id AND p.id = pp.poll_id                      WHERE pp.token_hash = ?1",
+                    "SELECT p.user_id, p.id, p.title, p.timezone, p.duration_minutes, \
+                     p.deadline, p.candidates, p.spec, p.state, p.created_at, p.closed_at, \
+                     pp.name \
+                     FROM poll_participants pp \
+                     JOIN polls p ON p.user_id = pp.user_id AND p.id = pp.poll_id \
+                     WHERE pp.token_hash = ?1",
                     params![token_hash],
-                    |r| Ok((poll_row(r)?, r.get::<_, String>(10)?)),
+                    |r| Ok((poll_row(r)?, r.get::<_, String>(11)?)),
                 )
                 .optional()?)
         })
@@ -2692,9 +2722,10 @@ fn poll_row(r: &rusqlite::Row) -> rusqlite::Result<PollRow> {
         duration_minutes: r.get(4)?,
         deadline: r.get(5)?,
         candidates: r.get(6)?,
-        state: r.get(7)?,
-        created_at: r.get(8)?,
-        closed_at: r.get(9)?,
+        spec: r.get(7)?,
+        state: r.get(8)?,
+        created_at: r.get(9)?,
+        closed_at: r.get(10)?,
     })
 }
 
@@ -2823,6 +2854,20 @@ fn migrate(conn: &Connection) -> Result<()> {
                 if !e.to_string().contains("duplicate column") {
                     return Err(e.into());
                 }
+            }
+        }
+    }
+    // Schema 12: the general poll. A row carries its question spec as JSON;
+    // NULL means a poll from before the column, which is exactly the times
+    // poll the columns beside it already describe (`PollRow::general_spec`).
+    // "No such table" is tolerated beside "duplicate column" because a
+    // ledger old enough to predate polls entirely gets the column from the
+    // CREATE TABLE in the batch below instead.
+    if (3..12).contains(&version) {
+        if let Err(e) = conn.execute_batch("ALTER TABLE polls ADD COLUMN spec TEXT;") {
+            let text = e.to_string();
+            if !text.contains("duplicate column") && !text.contains("no such table") {
+                return Err(e.into());
             }
         }
     }
@@ -3151,6 +3196,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             duration_minutes INTEGER NOT NULL,
             deadline         TEXT,
             candidates       TEXT NOT NULL,
+            spec             TEXT,
             state            TEXT NOT NULL DEFAULT 'open',
             created_at       TEXT NOT NULL,
             closed_at        TEXT,

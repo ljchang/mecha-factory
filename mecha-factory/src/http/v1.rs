@@ -677,17 +677,27 @@ pub async fn put_slots(
         .into_response()
 }
 
-/// The poll push body: candidates and names, nothing else. Addresses stay
-/// home — the box holds who is asked, never how to reach them.
+/// The poll push body: names plus either seeded candidates (the times
+/// poll) or a question `spec` (the general poll) — never both. Addresses
+/// stay home — the box holds who is asked, never how to reach them.
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PollPush {
+    #[serde(default)]
     title: String,
+    #[serde(default)]
     timezone: String,
+    #[serde(default)]
     duration_minutes: u32,
     #[serde(default)]
     deadline: Option<String>,
+    #[serde(default)]
     candidates: Vec<PushedSlot>,
+    /// A `PollSpec` as JSON. Validated with the manifest crate's own
+    /// `check` — the same function home ran before pushing, run again
+    /// because the box trusts nobody's parsing but its own.
+    #[serde(default)]
+    spec: Option<serde_json::Value>,
     participants: Vec<String>,
 }
 
@@ -731,29 +741,71 @@ pub async fn put_poll(
         Ok(push) => push,
         Err(e) => return bad(format!("poll push: {e}")),
     };
-    if push.title.trim().is_empty() || push.title.len() > 200 {
-        return bad("title must be 1–200 characters".into());
-    }
-    if push.participants.is_empty() || push.participants.len() > 50 {
-        return bad("participants must be 1–50 names".into());
-    }
-    if push.candidates.is_empty() || push.candidates.len() > 100 {
-        return bad("candidates must be 1–100 slots — the seeding is the point".into());
-    }
-    let stamp = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw);
-    for (i, slot) in push.candidates.iter().enumerate() {
-        let (Ok(start), Ok(end)) = (stamp(&slot.start), stamp(&slot.end)) else {
-            return bad(format!("candidate {i}: unparseable start or end"));
-        };
-        if end <= start
-            || end - start != chrono::Duration::minutes(i64::from(slot.duration_minutes))
-        {
-            return bad(format!("candidate {i}: times disagree with the duration"));
+    // The general branch: a question spec instead of seeded candidates.
+    // Checked by the manifest crate's own rules — the same `check` home ran,
+    // run again, because validation is one function run at both ends.
+    let general = match &push.spec {
+        None => None,
+        Some(raw) => {
+            let spec: mecha_manifest::PollSpec = match serde_json::from_value(raw.clone()) {
+                Ok(spec) => spec,
+                Err(e) => return bad(format!("spec: {e}")),
+            };
+            if let Err(e) = spec.check() {
+                return bad(format!("spec: {e}"));
+            }
+            if spec
+                .questions
+                .iter()
+                .any(|q| matches!(q.kind, mecha_manifest::QuestionKind::Times { .. }))
+            {
+                return bad("a seeded times poll is pushed as candidates, not a spec".into());
+            }
+            if spec.audience.kind == mecha_manifest::AudienceKind::Link {
+                return bad(
+                    "link audiences are not served yet — this push takes a roster".into(),
+                );
+            }
+            if !push.candidates.is_empty() {
+                return bad("a poll is candidates or a spec, never both".into());
+            }
+            if spec.title.len() > 200 {
+                return bad("title must be 1–200 characters".into());
+            }
+            Some(spec)
         }
+    };
+    let stamp = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw);
+    // A class section is a roster too; the tighter times cap stands where a
+    // seeded grid page has to stay readable.
+    let max_participants = if general.is_some() { 400 } else { 50 };
+    if push.participants.is_empty() || push.participants.len() > max_participants {
+        return bad(format!("participants must be 1–{max_participants} names"));
     }
-    if let Some(deadline) = &push.deadline {
-        if stamp(deadline).is_err() {
-            return bad(format!("deadline `{deadline}` is not RFC 3339"));
+    if general.is_none() {
+        if push.title.trim().is_empty() || push.title.len() > 200 {
+            return bad("title must be 1–200 characters".into());
+        }
+        if push.timezone.trim().is_empty() {
+            return bad("a times poll names its timezone".into());
+        }
+        if push.candidates.is_empty() || push.candidates.len() > 100 {
+            return bad("candidates must be 1–100 slots — the seeding is the point".into());
+        }
+        for (i, slot) in push.candidates.iter().enumerate() {
+            let (Ok(start), Ok(end)) = (stamp(&slot.start), stamp(&slot.end)) else {
+                return bad(format!("candidate {i}: unparseable start or end"));
+            };
+            if end <= start
+                || end - start != chrono::Duration::minutes(i64::from(slot.duration_minutes))
+            {
+                return bad(format!("candidate {i}: times disagree with the duration"));
+            }
+        }
+        if let Some(deadline) = &push.deadline {
+            if stamp(deadline).is_err() {
+                return bad(format!("deadline `{deadline}` is not RFC 3339"));
+            }
         }
     }
     let mut names = std::collections::BTreeSet::new();
@@ -772,17 +824,35 @@ pub async fn put_poll(
         participants.push((name.trim().to_string(), crate::intake::hash_token(&token)));
         tokens.push((name.trim().to_string(), token));
     }
-    let row = crate::db::PollRow {
-        user_id: user.id.clone(),
-        id: poll_id.clone(),
-        title: push.title.clone(),
-        timezone: push.timezone.clone(),
-        duration_minutes: i64::from(push.duration_minutes),
-        deadline: push.deadline.clone(),
-        candidates: serde_json::to_string(&push.candidates).unwrap_or_else(|_| "[]".into()),
-        state: "open".into(),
-        created_at: crate::db::now(),
-        closed_at: None,
+    let row = match &general {
+        // A general poll's truth is its spec; the times columns hold
+        // explicit nothings rather than values anyone might read.
+        Some(spec) => crate::db::PollRow {
+            user_id: user.id.clone(),
+            id: poll_id.clone(),
+            title: spec.title.clone(),
+            timezone: "UTC".into(),
+            duration_minutes: 0,
+            deadline: spec.deadline.clone(),
+            candidates: "[]".into(),
+            spec: Some(serde_json::to_string(spec).unwrap_or_else(|_| "{}".into())),
+            state: "open".into(),
+            created_at: crate::db::now(),
+            closed_at: None,
+        },
+        None => crate::db::PollRow {
+            user_id: user.id.clone(),
+            id: poll_id.clone(),
+            title: push.title.clone(),
+            timezone: push.timezone.clone(),
+            duration_minutes: i64::from(push.duration_minutes),
+            deadline: push.deadline.clone(),
+            candidates: serde_json::to_string(&push.candidates).unwrap_or_else(|_| "[]".into()),
+            spec: None,
+            state: "open".into(),
+            created_at: crate::db::now(),
+            closed_at: None,
+        },
     };
     match app.db.poll_create(&row, &participants) {
         Ok(true) => {}
@@ -862,6 +932,8 @@ pub async fn get_poll(
             "state": poll.state,
             "candidates": serde_json::from_str::<serde_json::Value>(&poll.candidates)
                 .unwrap_or_default(),
+            "spec": poll.spec.as_deref()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
             "participants": answers,
         })),
     )

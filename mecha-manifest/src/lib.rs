@@ -65,6 +65,7 @@ mod digest;
 mod form;
 mod media;
 mod poll;
+mod poll_render;
 mod request;
 mod schema;
 pub mod theme;
@@ -86,6 +87,10 @@ pub use poll::{
     AudienceKind, Ballot, ChoiceTally, Identity, LikertTally, PollOption, PollQuestion, PollSpec,
     QuestionKind, RankingRound, RankingTally, ResultsPolicy, Show, VasTally,
     DEFAULT_SUPPRESSION_FLOOR, MAX_TEXT_ANSWER,
+};
+pub use poll_render::{
+    ballot_from_form, promise_line, survey_page, QuestionDisplay, QuestionResults,
+    SurveyPageOptions,
 };
 pub use request::{
     reminder_minutes, valid_id, Acknowledgment, BookingPolicy, Field, FieldKind, RequestKind,
