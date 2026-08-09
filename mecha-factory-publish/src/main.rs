@@ -1756,7 +1756,10 @@ fn polls_command(action: PollsAction) -> Result<()> {
                     println!("  (a class section — the links live in the CSV)");
                 }
                 println!("\nrecord: {}", path.display());
-                println!("links:  {}  ← one row per person, for the mail-merge", links_path.display());
+                println!(
+                    "links:  {}  ← one row per person, for the mail-merge",
+                    links_path.display()
+                );
                 if let Some(screen) = reply["screen_url"].as_str() {
                     println!("projector: {screen}  ← aggregates only; prose stays off the wall");
                 }
@@ -2004,15 +2007,12 @@ fn polls_command(action: PollsAction) -> Result<()> {
             out,
         } => {
             let tally = remote()?.poll_status(&instrument, &poll_id)?;
-            let spec_value = tally
-                .get("spec")
-                .filter(|s| !s.is_null())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "`{poll_id}` is a seeded times poll — export covers general polls; \
+            let spec_value = tally.get("spec").filter(|s| !s.is_null()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "`{poll_id}` is a seeded times poll — export covers general polls; \
                          `polls status` prints the ranking"
-                    )
-                })?;
+                )
+            })?;
             let spec: mecha_manifest::PollSpec = serde_json::from_value(spec_value.clone())
                 .context("the box returned an unreadable spec")?;
             let rows: Vec<mecha_factory_publish::poll_export::ExportRow> = tally["participants"]
@@ -2048,9 +2048,7 @@ fn polls_command(action: PollsAction) -> Result<()> {
             println!("manifest → {}\n", path.display());
             println!(
                 "{}",
-                mecha_factory_publish::slides::sideload_instructions(
-                    &path.display().to_string()
-                )
+                mecha_factory_publish::slides::sideload_instructions(&path.display().to_string())
             );
         }
     }
@@ -2071,9 +2069,12 @@ fn general_status(
         tally_choice, tally_likert, tally_ranking, tally_vas, Answer, Ballot, PollSpec,
         QuestionKind,
     };
-    let spec: PollSpec =
-        serde_json::from_value(spec_value.clone()).context("the box returned an unreadable spec")?;
-    let rows = tally["participants"].as_array().cloned().unwrap_or_default();
+    let spec: PollSpec = serde_json::from_value(spec_value.clone())
+        .context("the box returned an unreadable spec")?;
+    let rows = tally["participants"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     let ballots: Vec<Ballot> = rows
         .iter()
         .filter_map(|p| serde_json::from_value::<Ballot>(p["answers"].clone()).ok())

@@ -1197,7 +1197,14 @@ mod tests {
         let names: Vec<&str> = page.assets().iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
-            ["booking.css", "form.js", "booking.js", "poll.js", "survey.js", "screen.js"]
+            [
+                "booking.css",
+                "form.js",
+                "booking.js",
+                "poll.js",
+                "survey.js",
+                "screen.js"
+            ]
         );
     }
 

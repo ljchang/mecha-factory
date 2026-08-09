@@ -85,14 +85,12 @@ pub use media::{content_type, sniff, FileType};
 pub use poll::{
     tally_choice, tally_likert, tally_ranking, tally_vas, validate_ballot, word_cloud, Answer,
     Audience, AudienceKind, Ballot, ChoiceTally, Identity, LikertTally, PollOption, PollQuestion,
-    PollSpec,
-    QuestionKind, RankingRound, RankingTally, ResultsPolicy, Show, VasTally,
+    PollSpec, QuestionKind, RankingRound, RankingTally, ResultsPolicy, Show, VasTally,
     DEFAULT_SUPPRESSION_FLOOR, MAX_TEXT_ANSWER,
 };
 pub use poll_render::{
-    ballot_from_form, intro_line, promise_line, results_fragments, screen_count_line,
-    screen_page, survey_page, QuestionDisplay, QuestionResults, ScreenPageOptions,
-    SurveyPageOptions,
+    ballot_from_form, intro_line, promise_line, results_fragments, screen_count_line, screen_page,
+    survey_page, QuestionDisplay, QuestionResults, ScreenPageOptions, SurveyPageOptions,
 };
 pub use request::{
     reminder_minutes, valid_id, Acknowledgment, BookingPolicy, Field, FieldKind, RequestKind,

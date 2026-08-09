@@ -197,7 +197,10 @@ mod tests {
         let csv = ballots_csv(&spec(), &rows);
         assert!(csv.starts_with("name,pick,note\r\n"), "{csv}");
         // The prefix lands inside the quotes, ahead of the formula.
-        assert!(csv.contains("\"'=HYPERLINK(\"\"http://evil\"\")\""), "{csv}");
+        assert!(
+            csv.contains("\"'=HYPERLINK(\"\"http://evil\"\")\""),
+            "{csv}"
+        );
         assert!(csv.contains("a; b"), "{csv}");
     }
 
@@ -227,10 +230,7 @@ mod tests {
 
     #[test]
     fn a_leading_minus_is_defused_even_unquoted() {
-        let rows = vec![(
-            None,
-            ballot(&[("note", Answer::Text("-2+3".into()))]),
-        )];
+        let rows = vec![(None, ballot(&[("note", Answer::Text("-2+3".into()))]))];
         let csv = ballots_csv(&spec(), &rows);
         assert!(csv.contains("'-2+3"), "{csv}");
     }

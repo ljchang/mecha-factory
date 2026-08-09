@@ -662,7 +662,10 @@ fn integer(raw: &Value) -> std::result::Result<i64, String> {
     match raw {
         Value::Number(n) => n.as_i64().ok_or_else(|| "not a whole number".into()),
         // Form posts arrive stringly; "3" is 3.
-        Value::String(s) => s.trim().parse().map_err(|_| format!("`{s}` is not a number")),
+        Value::String(s) => s
+            .trim()
+            .parse()
+            .map_err(|_| format!("`{s}` is not a number")),
         _ => Err("expected a number".into()),
     }
 }
@@ -722,7 +725,12 @@ pub fn tally_choice(options: &[PollOption], answers: &[Answer]) -> ChoiceTally {
         n,
         counts: options
             .iter()
-            .map(|o| (o.id.clone(), counts.get(o.id.as_str()).copied().unwrap_or(0)))
+            .map(|o| {
+                (
+                    o.id.clone(),
+                    counts.get(o.id.as_str()).copied().unwrap_or(0),
+                )
+            })
             .collect(),
     }
 }
@@ -849,11 +857,11 @@ pub fn word_cloud(texts: &[&str], min_count: usize) -> Vec<(String, usize)> {
 /// Function words that carry no signal at any size.
 const STOPWORDS: &[&str] = &[
     "about", "after", "all", "also", "and", "any", "are", "because", "been", "before", "but",
-    "can", "could", "did", "does", "for", "from", "had", "has", "have", "her", "him", "his",
-    "how", "into", "its", "just", "like", "more", "most", "much", "not", "now", "one", "only",
-    "our", "out", "over", "she", "should", "some", "than", "that", "the", "their", "them",
-    "then", "there", "they", "this", "too", "very", "was", "were", "what", "when", "which",
-    "who", "why", "will", "with", "would", "you", "your",
+    "can", "could", "did", "does", "for", "from", "had", "has", "have", "her", "him", "his", "how",
+    "into", "its", "just", "like", "more", "most", "much", "not", "now", "one", "only", "our",
+    "out", "over", "she", "should", "some", "than", "that", "the", "their", "them", "then",
+    "there", "they", "this", "too", "very", "was", "were", "what", "when", "which", "who", "why",
+    "will", "with", "would", "you", "your",
 ];
 
 /// One IRV counting round: who held how many first preferences among the
@@ -898,10 +906,8 @@ pub fn tally_ranking(options: &[PollOption], answers: &[Answer]) -> RankingTally
     let n = ballots.len();
 
     let count_firsts = |remaining: &BTreeSet<&str>| -> (BTreeMap<String, usize>, usize) {
-        let mut counts: BTreeMap<String, usize> = remaining
-            .iter()
-            .map(|id| ((*id).to_string(), 0))
-            .collect();
+        let mut counts: BTreeMap<String, usize> =
+            remaining.iter().map(|id| ((*id).to_string(), 0)).collect();
         let mut exhausted = 0;
         for ballot in &ballots {
             match ballot.iter().find(|id| remaining.contains(id.as_str())) {
@@ -1031,9 +1037,7 @@ mod tests {
 
     #[test]
     fn a_link_audience_defaults_anonymous_and_refuses_named() {
-        let linked = format!(
-            "{PAPER_VOTE}\n[audience]\nkind = \"link\"\nmax_ballots = 100\n"
-        );
+        let linked = format!("{PAPER_VOTE}\n[audience]\nkind = \"link\"\nmax_ballots = 100\n");
         let poll = spec(&linked);
         assert_eq!(
             poll.results.identity(poll.audience.kind),
@@ -1168,7 +1172,9 @@ mod tests {
             max_choices: 2,
             options: opts(&["a", "b", "c"]),
         });
-        let ok = q.validate_answer(&serde_json::json!(["b", "b", "a"])).unwrap();
+        let ok = q
+            .validate_answer(&serde_json::json!(["b", "b", "a"]))
+            .unwrap();
         assert_eq!(ok, Some(Answer::Choice(vec!["b".into(), "a".into()])));
         assert!(q.validate_answer(&serde_json::json!(["z"])).is_err());
         assert!(q
@@ -1372,10 +1378,7 @@ mod tests {
         // which would be no majority at all if exhausted ballots stayed in
         // the base.
         let options = opts(&["a", "b", "c"]);
-        let tally = tally_ranking(
-            &options,
-            &ranked(&[&["b"], &["b"], &["a", "c"], &["c"]]),
-        );
+        let tally = tally_ranking(&options, &ranked(&[&["b"], &["b"], &["a", "c"], &["c"]]));
         assert_eq!(tally.winner.as_deref(), Some("c"));
         assert_eq!(tally.rounds.len(), 3);
         let last = tally.rounds.last().unwrap();
