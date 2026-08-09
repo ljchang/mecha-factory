@@ -91,10 +91,11 @@ pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 4] {
         (
             "booking.css",
             format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 theme.css(),
                 crate::form::FORM_STRUCTURE,
-                BOOKING_STRUCTURE
+                BOOKING_STRUCTURE,
+                crate::poll_render::SURVEY_STRUCTURE
             ),
         ),
         ("form.js", FORM_JS.to_string()),
@@ -728,7 +729,7 @@ fn local_day(slot: &Slot, tz: Tz) -> NaiveDate {
 /// discloses it. Browsers without `:has` (and readers with CSS off) get the
 /// whole page at once, which is exactly the JS-off contract — the reveal is
 /// an enhancement with no script behind it at all.
-const BOOKING_STRUCTURE: &str = r#"
+pub(crate) const BOOKING_STRUCTURE: &str = r#"
 /* --- the week frame ----------------------------------------------------- */
 
 .booking .weeknav { display:grid; grid-template-columns:1fr auto 1fr; align-items:center;

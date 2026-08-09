@@ -1,17 +1,25 @@
 //! The poll page: `/p/{handle}/{poll_id}/{token}` on the gate.
 //!
 //! The capability is the identity — no account, no name typing, no way to
-//! typo yourself into a duplicate respondent. What a participant sees is
-//! only what the organizer can actually do (the seeding already happened at
-//! home), and what they send back is three enum values per candidate:
-//! nothing here is free text, which is why this page never feeds the
+//! typo yourself into a duplicate respondent. Two shapes share the route:
+//! the seeded times grid (rows without a spec — the legacy shape and still
+//! the pipeline's), and the general poll, whose questions live in the
+//! stored spec. Either way what comes back is vocabulary the poll itself
+//! declared — with the one deliberate exception of a `text` question's
+//! prose, which is capped by the spec, escaped at render, and quarantined
+//! at the drain. Everything else on these pages never feeds the
 //! quarantine at all.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
-use mecha_manifest::{poll_page, PollAnswer, PollCandidate, PollPageOptions};
+use mecha_manifest::{
+    ballot_from_form, poll_page, survey_page, tally_choice, tally_likert, tally_ranking,
+    tally_vas, validate_ballot, Answer, Ballot, Identity, PollAnswer, PollCandidate,
+    PollPageOptions, PollSpec, QuestionDisplay, QuestionKind, QuestionResults, Show,
+    SurveyPageOptions, DEFAULT_SUPPRESSION_FLOOR,
+};
 
 use super::{v1, Failure, Shared};
 use crate::config::Origin;
@@ -152,6 +160,180 @@ fn render(app: &Shared, poll: &PollRow, participant: &str, notice: Option<String
         .into_response()
 }
 
+/// Render whichever shape this poll is. The dispatch is the row's `spec`
+/// column: present is a general poll, absent is the seeded times grid, and
+/// unreadable fails closed — a page rendered from a guessed schema would
+/// collect answers to questions nobody asked.
+fn render_any(app: &Shared, poll: &PollRow, participant: &str, notice: Option<String>) -> Response {
+    match poll.general_spec() {
+        Ok(None) => render(app, poll, participant, notice),
+        Ok(Some(spec)) => render_general(app, poll, &spec, participant, notice),
+        Err(e) => {
+            tracing::error!(poll = %poll.id, error = %e, "unreadable poll spec");
+            Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+/// The general poll's page: the stored spec's questions, this participant's
+/// saved ballot, and results exactly as the policy allows this viewer —
+/// decided here, where the bytes are emitted, never in the client.
+fn render_general(
+    app: &Shared,
+    poll: &PollRow,
+    spec: &PollSpec,
+    participant: &str,
+    notice: Option<String>,
+) -> Response {
+    let others = app
+        .db
+        .poll_participants(&poll.user_id, &poll.id)
+        .unwrap_or_default();
+    let ballots: Vec<(String, Ballot)> = others
+        .iter()
+        .filter_map(|p| {
+            let ballot = serde_json::from_str::<Ballot>(p.answers.as_deref()?).ok()?;
+            Some((p.name.clone(), ballot))
+        })
+        .collect();
+    let mine = ballots
+        .iter()
+        .find(|(name, _)| name == participant)
+        .map(|(_, ballot)| ballot.clone())
+        .unwrap_or_default();
+    let open = still_open(poll, chrono::Utc::now());
+    let identity = spec.results.identity(spec.audience.kind);
+    let visible = match spec.results.show {
+        Show::Live => true,
+        Show::AfterVote => !mine.is_empty(),
+        Show::AfterClose => !open,
+        Show::Creator => false,
+    };
+    let results = visible.then(|| build_results(spec, &ballots, identity, open));
+    let options = SurveyPageOptions {
+        participant: Some(participant.to_string()),
+        action: String::new(), // POST back to this same URL
+        assets: "/p/a/".into(),
+        theme: mecha_manifest::Theme::by_name(&app.config.theme),
+        // The deadline renders in its own written offset: a general poll
+        // has no host timezone, and the offset the organizer wrote is the
+        // clock they meant.
+        deadline_local: poll.deadline.as_deref().map(|d| {
+            chrono::DateTime::parse_from_rfc3339(d)
+                .map(|t| t.format("%a %b %-d, %-I:%M %p %Z").to_string())
+                .unwrap_or_else(|_| d.to_string())
+        }),
+        responded: others.iter().filter(|p| p.responded_at.is_some()).count(),
+        total: Some(others.len()),
+        open,
+        notice,
+        show: spec.results.show,
+        identity,
+    };
+    let page = survey_page(spec, &mine, results.as_deref(), &options);
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        page.html,
+    )
+        .into_response()
+}
+
+/// Per-question results under the identity policy: tallies always, the
+/// small-n suppression on anonymous polls, names only under `named`.
+fn build_results(
+    spec: &PollSpec,
+    ballots: &[(String, Ballot)],
+    identity: Identity,
+    open: bool,
+) -> Vec<QuestionResults> {
+    spec.questions
+        .iter()
+        .map(|question| {
+            let named: Vec<(&str, &Answer)> = ballots
+                .iter()
+                .filter_map(|(name, ballot)| {
+                    ballot.get(&question.id).map(|a| (name.as_str(), a))
+                })
+                .collect();
+            let answers: Vec<Answer> = named.iter().map(|(_, a)| (*a).clone()).collect();
+            let n = answers.len();
+            let display = if identity == Identity::Anonymous
+                && n > 0
+                && n < DEFAULT_SUPPRESSION_FLOOR
+            {
+                QuestionDisplay::Suppressed { n }
+            } else {
+                match &question.kind {
+                    QuestionKind::Choice { options, .. } => QuestionDisplay::Choice {
+                        tally: tally_choice(options, &answers),
+                    },
+                    QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
+                        tally: tally_ranking(options, &answers),
+                        complete: !open,
+                    },
+                    QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
+                        tally: tally_likert(*points, &answers),
+                    },
+                    QuestionKind::Vas { .. } => QuestionDisplay::Vas {
+                        tally: tally_vas(&answers),
+                    },
+                    QuestionKind::Text { .. } => QuestionDisplay::Text {
+                        entries: named
+                            .iter()
+                            .filter_map(|(name, answer)| match answer {
+                                Answer::Text(text) => Some((
+                                    (identity == Identity::Named)
+                                        .then(|| (*name).to_string()),
+                                    text.clone(),
+                                )),
+                                _ => None,
+                            })
+                            .collect(),
+                    },
+                    // A times question never reaches the general path:
+                    // `put_poll` refuses it in a spec, and legacy rows have
+                    // no spec at all. Nothing to draw is the honest render
+                    // if one ever does.
+                    QuestionKind::Times { .. } => QuestionDisplay::Text {
+                        entries: Vec::new(),
+                    },
+                }
+            };
+            let voters = (identity == Identity::Named
+                && !matches!(question.kind, QuestionKind::Text { .. })
+                && !matches!(display, QuestionDisplay::Suppressed { .. }))
+            .then(|| {
+                named
+                    .iter()
+                    .map(|(name, answer)| {
+                        ((*name).to_string(), answer_words(question, answer))
+                    })
+                    .collect()
+            });
+            QuestionResults { display, voters }
+        })
+        .collect()
+}
+
+/// One stored answer, in the option's own words where it has any.
+fn answer_words(question: &mecha_manifest::PollQuestion, answer: &Answer) -> String {
+    let label = |id: &String| {
+        question
+            .options()
+            .iter()
+            .find(|o| &o.id == id)
+            .map(|o| o.label.clone())
+            .unwrap_or_else(|| id.clone())
+    };
+    match answer {
+        Answer::Choice(ids) => ids.iter().map(label).collect::<Vec<_>>().join(", "),
+        Answer::Ranking(ids) => ids.iter().map(label).collect::<Vec<_>>().join(" › "),
+        Answer::Likert(v) | Answer::Vas(v) => v.to_string(),
+        Answer::Text(_) => String::new(), // rendered inline, never here
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct SavedQuery {
     #[serde(default)]
@@ -175,7 +357,7 @@ pub async fn page(
     let notice = query
         .saved
         .map(|_| "Saved. You can change your answers any time until the poll closes.".to_string());
-    render(&app, &poll, &name, notice)
+    render_any(&app, &poll, &name, notice)
 }
 
 /// `POST /p/{handle}/{poll_id}/{token}` — this participant's answers,
@@ -206,10 +388,65 @@ pub async fn answer(
         if wants_json {
             return StatusCode::CONFLICT.into_response();
         }
-        return render(&app, &poll, &name, None);
+        return render_any(&app, &poll, &name, None);
     }
 
     let raw = super::intake::form_values(&body);
+    match poll.general_spec() {
+        Ok(None) => {}
+        Ok(Some(spec)) => {
+            // The general ballot: decoded by the same crate that rendered
+            // the field names, validated against the spec's own vocabulary,
+            // refused wholesale on anything illegal — our own form never
+            // produces an illegal value, so an error is a hand-built POST
+            // and gets no partial store to probe with.
+            let (ballot, errors) = validate_ballot(&spec, &ballot_from_form(&spec, &raw));
+            if !errors.is_empty() {
+                if wants_json {
+                    return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+                }
+                let what: Vec<String> = errors
+                    .iter()
+                    .map(|(question, why)| format!("{question}: {why}"))
+                    .collect();
+                return render_general(
+                    &app,
+                    &poll,
+                    &spec,
+                    &name,
+                    Some(format!("Nothing was saved — {}.", what.join("; "))),
+                );
+            }
+            let payload = serde_json::to_string(&ballot).unwrap_or_else(|_| "{}".into());
+            return match app.db.poll_answer(
+                &crate::intake::hash_token(&token),
+                &payload,
+                &crate::db::now(),
+            ) {
+                Ok(true) if wants_json => StatusCode::NO_CONTENT.into_response(),
+                Ok(true) => (
+                    StatusCode::SEE_OTHER,
+                    [(
+                        header::LOCATION,
+                        format!("/p/{handle}/{poll_id}/{token}?saved=1"),
+                    )],
+                )
+                    .into_response(),
+                Ok(false) if wants_json => StatusCode::CONFLICT.into_response(),
+                Ok(false) => render_general(&app, &poll, &spec, &name, None),
+                Err(e) => {
+                    tracing::error!(poll = %poll_id, error = %e, "storing answers");
+                    Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                        .into_response()
+                }
+            };
+        }
+        Err(e) => {
+            tracing::error!(poll = %poll.id, error = %e, "unreadable poll spec");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
     let stored: Vec<StoredCandidate> = serde_json::from_str(&poll.candidates).unwrap_or_default();
     let mut answers = serde_json::Map::new();
     for candidate in &stored {
