@@ -30,12 +30,12 @@
 
 use chrono::{DateTime, Duration, Utc};
 use mecha_manifest::availability::{availability, Interval, Slot};
+use mecha_manifest::{
+    build_results, screen_page, survey_page, Answer, Ballot, Identity, PageMode, PollSpec,
+    QuestionKind, QuestionResults, ScreenPageOptions, Show, SurveyPageOptions,
+};
 use mecha_manifest::{escape_text, FieldKind, FormOptions, Phase, RequestType, Theme};
 use mecha_manifest::{poll_page, BookingOptions, PollAnswer, PollCandidate, PollPageOptions};
-use mecha_manifest::{
-    screen_page, survey_page, Answer, Ballot, Identity, PollSpec, QuestionDisplay, QuestionKind,
-    QuestionResults, ScreenPageOptions, Show, SurveyPageOptions,
-};
 use mecha_manifest::{RequestKind, BUILT_IN_THEMES, MAX_FILE_BYTES_PER_TYPE};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -1054,18 +1054,19 @@ fn survey_pages(
             notice: None,
             show: Show::AfterVote,
             identity: Identity::Anonymous,
-            live: false,
-            // The open form is the one worth touching: `demo` loads the
+            // The open form is the one worth touching: `Specimen` loads the
             // enhancement so the ranking has its grip and the VAS its
             // slider, while every path to the network stays off. Rendering
-            // this page without it was a gallery that quietly showed the
+            // this page `Inert` was a gallery that quietly showed the
             // JS-off baseline and called it the form.
-            demo: true,
+            mode: PageMode::Specimen,
             resolution: None,
         },
     );
 
-    let results = specimen_results(closed_spec, false);
+    // Closed and not projected: the electorate is final, so the ranking
+    // renders its full runoff rather than first preferences alone.
+    let results = specimen_results(closed_spec, false, false);
     let closed = survey_page(
         closed_spec,
         &mine,
@@ -1082,12 +1083,11 @@ fn survey_pages(
             notice: None,
             show: Show::AfterClose,
             identity: Identity::Named,
-            live: false,
             // Not the closed page: a closed survey is read-only and stays
             // exactly as rendered, which is what the script itself does
             // (it returns early when there is no submit button). Shipping
             // an inert script here would only imply otherwise.
-            demo: false,
+            mode: PageMode::Inert,
             resolution: Some("Replication it is — projects due the last week of classes.".into()),
         },
     );
@@ -1097,7 +1097,7 @@ fn survey_pages(
     // worth looking at is while the room is still answering.
     let screen = screen_page(
         open_spec,
-        &specimen_results(open_spec, true),
+        &specimen_results(open_spec, true, true),
         &ScreenPageOptions {
             join_url: Some("nocturne.example.edu/p/lc/pace".into()),
             responded: 5,
@@ -1119,17 +1119,17 @@ fn survey_pages(
     ]
 }
 
-/// Five specimen ballots, tallied by the same pure functions the box and
-/// home run — invented numbers would document tallies nobody computes.
+/// Five specimen ballots. The numbers under them are computed, never
+/// invented — and since this file stopped keeping its own copy of the
+/// display logic, they are computed by the *same function the box serves
+/// from*: [`build_results`]. A gallery whose figures are assembled a second
+/// way documents a page nobody is served.
 ///
-/// `projected` is the box's own `results_for` distinction, kept here so the
-/// projector specimen is built the way the wall is built rather than by
-/// editing the participant's view. Three things move together under it,
-/// because they are one decision — *a projector is an audience, mid-poll*:
-/// prose becomes the word cloud and never the sentences, nobody's name
-/// rides a tally, and the ranking shows first preferences alone (IRV rounds
-/// on a partial electorate imply a winner one more ballot can flip).
-fn specimen_results(spec: &PollSpec, projected: bool) -> Vec<QuestionResults> {
+/// `open` and `projected` pass straight through. They are separate axes:
+/// `projected` is the wall's stricter cut (prose becomes a word cloud, no
+/// name rides a tally), while `open` decides whether a ranking shows IRV
+/// rounds or first preferences alone.
+fn specimen_results(spec: &PollSpec, open: bool, projected: bool) -> Vec<QuestionResults> {
     let ballots: Vec<(&str, Ballot)> = [
         (
             "Priya",
@@ -1210,76 +1210,18 @@ fn specimen_results(spec: &PollSpec, projected: bool) -> Vec<QuestionResults> {
     })
     .collect();
 
-    spec.questions
-        .iter()
-        .map(|question| {
-            let named: Vec<(&str, &Answer)> = ballots
-                .iter()
-                .filter_map(|(name, ballot)| ballot.get(&question.id).map(|a| (*name, a)))
-                .collect();
-            let answers: Vec<Answer> = named.iter().map(|(_, a)| (*a).clone()).collect();
-            let display = match &question.kind {
-                QuestionKind::Choice { options, .. } => QuestionDisplay::Choice {
-                    tally: mecha_manifest::tally_choice(options, &answers),
-                },
-                QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
-                    tally: mecha_manifest::tally_ranking(options, &answers),
-                    complete: !projected,
-                },
-                QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
-                    tally: mecha_manifest::tally_likert(*points, &answers),
-                },
-                QuestionKind::Vas { .. } => QuestionDisplay::Vas {
-                    tally: mecha_manifest::tally_vas(&answers),
-                },
-                QuestionKind::Text { .. } => {
-                    let texts: Vec<&str> = named
-                        .iter()
-                        .filter_map(|(_, answer)| match answer {
-                            Answer::Text(text) => Some(text.as_str()),
-                            _ => None,
-                        })
-                        .collect();
-                    let cloud = mecha_manifest::word_cloud(&texts, 2);
-                    if projected {
-                        QuestionDisplay::TextCloud {
-                            n: texts.len(),
-                            cloud,
-                        }
-                    } else {
-                        QuestionDisplay::Text {
-                            cloud,
-                            entries: named
-                                .iter()
-                                .filter_map(|(name, answer)| match answer {
-                                    Answer::Text(text) => {
-                                        Some((Some((*name).to_string()), text.clone()))
-                                    }
-                                    _ => None,
-                                })
-                                .collect(),
-                        }
-                    }
-                }
-                QuestionKind::Times { .. } => unreachable!("the specimen has no times"),
-            };
-            let voters =
-                (!projected && !matches!(question.kind, QuestionKind::Text { .. })).then(|| {
-                    named
-                        .iter()
-                        .map(|(name, answer)| {
-                            let words = match answer {
-                                Answer::Choice(ids) | Answer::Ranking(ids) => ids.join(", "),
-                                Answer::Likert(v) | Answer::Vas(v) => v.to_string(),
-                                Answer::Text(_) => String::new(),
-                            };
-                            ((*name).to_string(), words)
-                        })
-                        .collect()
-                });
-            QuestionResults { display, voters }
-        })
-        .collect()
+    let ballots: Vec<(String, Ballot)> = ballots
+        .into_iter()
+        .map(|(name, ballot)| (name.to_string(), ballot))
+        .collect();
+
+    build_results(spec, &ballots, identity_of(spec), open, projected)
+}
+
+/// The specimen's identity policy, resolved the way the box resolves it —
+/// from the spec, not by hand, so a change to the default lands here too.
+fn identity_of(spec: &PollSpec) -> Identity {
+    spec.results.identity(spec.audience.kind)
 }
 
 fn landing(entries: &[Entry]) -> String {

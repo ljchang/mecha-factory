@@ -13,8 +13,9 @@
 //! never happens here: results hidden by markup. Absent is absent.
 
 use crate::poll::{
-    Answer, Ballot, ChoiceTally, Identity, LikertTally, PollOption, PollQuestion, PollSpec,
-    QuestionKind, RankingTally, Show, VasTally,
+    tally_choice, tally_likert, tally_ranking, tally_vas, Answer, Ballot, ChoiceTally, Identity,
+    LikertTally, PollOption, PollQuestion, PollSpec, QuestionKind, RankingTally, Show, VasTally,
+    DEFAULT_SUPPRESSION_FLOOR,
 };
 use crate::{booking::BookingPage, escape_text};
 
@@ -37,25 +38,45 @@ pub struct SurveyPageOptions {
     /// the vote, in plain words, by [`promise_line`].
     pub show: Show,
     pub identity: Identity,
-    /// Whether the page may fetch `results.json` and autosave — a server
-    /// renders true, a gallery's golden file renders false and fetches
-    /// nothing.
-    pub live: bool,
-    /// A page with deliberately no server behind it: the gallery's golden
-    /// files. The widgets still upgrade — the ranking gets its grip, the
-    /// VAS its slider — but nothing fetches and nothing autosaves.
-    ///
-    /// This exists because one flag could not say both things. `live` gates
-    /// the script *and* the network, so a specimen rendered without it lost
-    /// the two controls the gallery most needs to show, and a specimen
-    /// rendered with it answers "Couldn't save — use the button below" the
-    /// moment anyone touches a widget. `live` and `demo` are never both
-    /// true: one says there is a server, the other that there is none.
-    pub demo: bool,
+    /// What is behind this page — which decides both whether the
+    /// enhancement script loads and whether it may reach the network.
+    pub mode: PageMode,
     /// What happened — written at close, rendered above everything, so the
     /// link people hold answers "so what happened?" instead of dead-ending
     /// at a frozen tally.
     pub resolution: Option<String>,
+}
+
+/// What sits behind a rendered survey page.
+///
+/// This was two booleans — `live` and `demo` — with a doc comment promising
+/// they were never both true. Nothing enforced it, and the state they could
+/// jointly express (a page that polls a results endpoint while refusing to
+/// save) is incoherent. Three named states make that fourth one
+/// unrepresentable rather than merely discouraged, which is the difference
+/// between an invariant and a note.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageMode {
+    /// A real page with a server behind it: the script loads, autosaves as
+    /// the voter answers, and polls `results.json` for the reveal.
+    Served,
+    /// A specimen with deliberately no server: the gallery's golden files.
+    /// The widgets still upgrade — the ranking gets its grip, the VAS its
+    /// slider — but nothing fetches and nothing autosaves. Rendering these
+    /// as `Served` answers "Couldn't save" the moment anyone drags a row;
+    /// rendering them `Inert` loses the two controls worth showing.
+    Specimen,
+    /// Rendered exactly as it stands, with no script at all — a closed
+    /// poll, which is read-only anyway.
+    Inert,
+}
+
+impl PageMode {
+    /// Whether the enhancement script is emitted. Both live pages and
+    /// specimens want the widgets; only the network differs.
+    fn scripted(self) -> bool {
+        !matches!(self, PageMode::Inert)
+    }
 }
 
 /// One question's results, as the server decided this viewer may see them.
@@ -103,6 +124,136 @@ pub enum QuestionDisplay {
         n: usize,
         cloud: Vec<(String, usize)>,
     },
+}
+
+/// Per-question results under the identity policy: tallies always, the
+/// small-n suppression on anonymous polls, names only under `named`.
+/// `projected` is the projector's stricter cut: prose becomes a
+/// two-ballot-minimum word cloud plus a count, and nobody's sentence
+/// reaches the wall.
+///
+/// **This lives here, beside the renderer, because two callers must not
+/// disagree about it.** The box serves it; the gallery renders golden files
+/// from it. While the gallery kept its own copy the two drifted in four
+/// ways at once — the copy skipped the suppression floor entirely, tied a
+/// ranking's `complete` to *projected* rather than *closed*, attached
+/// voters' names without checking `identity`, and listed answers as raw
+/// option ids where the server writes labels. A gallery that renders what
+/// the server never would is worse than no gallery, which is the same rule
+/// the exhaustive `FieldKind` match already enforces one file over.
+///
+/// `open` and `projected` are independent on purpose: a projector showing a
+/// *closed* poll is a real state (the reveal after the vote), and collapsing
+/// them makes it unrepresentable.
+pub fn build_results(
+    spec: &PollSpec,
+    ballots: &[(String, Ballot)],
+    identity: Identity,
+    open: bool,
+    projected: bool,
+) -> Vec<QuestionResults> {
+    spec.questions
+        .iter()
+        .map(|question| {
+            let named: Vec<(&str, &Answer)> = ballots
+                .iter()
+                .filter_map(|(name, ballot)| ballot.get(&question.id).map(|a| (name.as_str(), a)))
+                .collect();
+            let answers: Vec<Answer> = named.iter().map(|(_, a)| (*a).clone()).collect();
+            let n = answers.len();
+            let display =
+                if identity == Identity::Anonymous && n > 0 && n < DEFAULT_SUPPRESSION_FLOOR {
+                    QuestionDisplay::Suppressed { n }
+                } else {
+                    match &question.kind {
+                        QuestionKind::Choice { options, .. } => QuestionDisplay::Choice {
+                            tally: tally_choice(options, &answers),
+                        },
+                        QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
+                            tally: tally_ranking(options, &answers),
+                            complete: !open,
+                        },
+                        QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
+                            tally: tally_likert(*points, &answers),
+                        },
+                        QuestionKind::Vas { .. } => QuestionDisplay::Vas {
+                            tally: tally_vas(&answers),
+                        },
+                        QuestionKind::Text { .. } => {
+                            let texts: Vec<&str> = named
+                                .iter()
+                                .filter_map(|(_, answer)| match answer {
+                                    Answer::Text(text) => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect();
+                            // Two ballots make a word: one voice can never
+                            // set the cloud's largest type, projected or not.
+                            let cloud = crate::poll::word_cloud(&texts, 2);
+                            if projected {
+                                QuestionDisplay::TextCloud {
+                                    n: texts.len(),
+                                    cloud,
+                                }
+                            } else {
+                                QuestionDisplay::Text {
+                                    entries: named
+                                        .iter()
+                                        .filter_map(|(name, answer)| match answer {
+                                            Answer::Text(text) => Some((
+                                                (identity == Identity::Named)
+                                                    .then(|| (*name).to_string()),
+                                                text.clone(),
+                                            )),
+                                            _ => None,
+                                        })
+                                        .collect(),
+                                    cloud,
+                                }
+                            }
+                        }
+                        // A times question never reaches the general path:
+                        // `put_poll` refuses it in a spec, and legacy rows have
+                        // no spec at all. Nothing to draw is the honest render
+                        // if one ever does.
+                        QuestionKind::Times { .. } => QuestionDisplay::Text {
+                            entries: Vec::new(),
+                            cloud: Vec::new(),
+                        },
+                    }
+                };
+            let voters = (identity == Identity::Named
+                && !matches!(question.kind, QuestionKind::Text { .. })
+                && !matches!(display, QuestionDisplay::Suppressed { .. }))
+            .then(|| {
+                named
+                    .iter()
+                    .map(|(name, answer)| ((*name).to_string(), answer_words(question, answer)))
+                    .collect()
+            });
+            QuestionResults { display, voters }
+        })
+        .collect()
+}
+
+/// One voter's answer in the organizer's own words — option **labels**, not
+/// the ids the ballot stores. A ranking reads as a preference order, which
+/// is why it joins with `›` rather than a comma.
+pub fn answer_words(question: &PollQuestion, answer: &Answer) -> String {
+    let label = |id: &String| {
+        question
+            .options()
+            .iter()
+            .find(|o| &o.id == id)
+            .map(|o| o.label.clone())
+            .unwrap_or_else(|| id.clone())
+    };
+    match answer {
+        Answer::Choice(ids) => ids.iter().map(label).collect::<Vec<_>>().join(", "),
+        Answer::Ranking(ids) => ids.iter().map(label).collect::<Vec<_>>().join(" › "),
+        Answer::Likert(v) | Answer::Vas(v) => v.to_string(),
+        Answer::Text(_) => String::new(), // rendered inline, never here
+    }
 }
 
 /// The greeting-and-count line. One wording for the rendered page and the
@@ -194,10 +345,13 @@ pub fn survey_page(
     }
 
     body.push_str(&format!(
-        "<form method=\"post\" action=\"{}\" class=\"survey\"{}{}>\n",
+        "<form method=\"post\" action=\"{}\" class=\"survey\"{}>\n",
         escape_text(&options.action),
-        if options.live { " data-live=\"1\"" } else { "" },
-        if options.demo { " data-demo=\"1\"" } else { "" }
+        match options.mode {
+            PageMode::Served => " data-live=\"1\"",
+            PageMode::Specimen => " data-demo=\"1\"",
+            PageMode::Inert => "",
+        }
     ));
     for (index, question) in spec.questions.iter().enumerate() {
         body.push_str("<section class=\"question\">\n");
@@ -249,9 +403,9 @@ pub fn survey_page(
         );
     }
     body.push_str("</form>\n");
-    // The enhancement rides on either: a real page wants the widgets *and*
-    // the network, a specimen wants the widgets alone.
-    if options.live || options.demo {
+    // The enhancement rides on either live state: a real page wants the
+    // widgets *and* the network, a specimen wants the widgets alone.
+    if options.mode.scripted() {
         body.push_str(&format!(
             "<script src=\"{}survey.js\" defer></script>\n",
             escape_text(&options.assets)
@@ -1213,19 +1367,20 @@ mod tests {
             notice: None,
             show: Show::AfterVote,
             identity: Identity::Anonymous,
-            live: false,
-            demo: false,
+            mode: PageMode::Inert,
             resolution: None,
         }
     }
 
-    /// The three states of the enhancement, which one flag could not
-    /// express. The gallery lived in the first row for as long as the
-    /// survey existed, so its frames showed a `<select>` per ranked option
-    /// and a bare number field — the JS-off baseline — while the drag grip
-    /// and the slider sat unreferenced in the same directory.
+    /// The three states of the enhancement. The gallery lived in the first
+    /// row for as long as the survey existed, so its frames showed a
+    /// `<select>` per ranked option and a bare number field — the JS-off
+    /// baseline — while the drag grip and the slider sat unreferenced in
+    /// the same directory. A fourth state (script, network on, autosave
+    /// off) used to be constructible from two booleans; `PageMode` is why
+    /// this test needs only three arms.
     #[test]
-    fn the_enhancement_rides_on_live_or_demo_and_only_demo_silences_the_network() {
+    fn each_page_mode_emits_its_own_script_and_network_pairing() {
         let spec = two_question_spec();
         let mine = Ballot::new();
 
@@ -1240,7 +1395,7 @@ mod tests {
             &mine,
             None,
             &SurveyPageOptions {
-                live: true,
+                mode: PageMode::Served,
                 ..options()
             },
         )
@@ -1258,7 +1413,7 @@ mod tests {
             &mine,
             None,
             &SurveyPageOptions {
-                demo: true,
+                mode: PageMode::Specimen,
                 ..options()
             },
         )
