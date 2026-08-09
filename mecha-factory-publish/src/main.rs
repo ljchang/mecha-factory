@@ -330,6 +330,15 @@ enum PollsAction {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// The PowerPoint content add-in's manifest: write it, sideload it
+    /// once per machine, and any deck can carry a live poll object that
+    /// asks for a projector URL. The GUID derives from the gate, so
+    /// regenerating upgrades rather than multiplying add-ins.
+    Addin {
+        /// Where to write the manifest (default: mecha-polls.xml here).
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2026,6 +2035,23 @@ fn polls_command(action: PollsAction) -> Result<()> {
                 }
                 None => print!("{csv}"),
             }
+        }
+        PollsAction::Addin { out } => {
+            let gate = remote()?.gate().to_string();
+            anyhow::ensure!(
+                gate.starts_with("https://"),
+                "Office loads add-ins over HTTPS only — the gate is `{gate}`"
+            );
+            let path = out.unwrap_or_else(|| PathBuf::from("mecha-polls.xml"));
+            std::fs::write(&path, mecha_factory_publish::slides::addin_manifest(&gate))
+                .with_context(|| format!("writing {}", path.display()))?;
+            println!("manifest → {}\n", path.display());
+            println!(
+                "{}",
+                mecha_factory_publish::slides::sideload_instructions(
+                    &path.display().to_string()
+                )
+            );
         }
     }
     Ok(())
