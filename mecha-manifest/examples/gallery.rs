@@ -32,6 +32,10 @@ use chrono::{DateTime, Duration, Utc};
 use mecha_manifest::availability::{availability, Interval, Slot};
 use mecha_manifest::{escape_text, FieldKind, FormOptions, Phase, RequestType, Theme};
 use mecha_manifest::{poll_page, BookingOptions, PollAnswer, PollCandidate, PollPageOptions};
+use mecha_manifest::{
+    survey_page, Answer, Ballot, Identity, PollSpec, QuestionDisplay, QuestionKind,
+    QuestionResults, Show, SurveyPageOptions,
+};
 use mecha_manifest::{RequestKind, BUILT_IN_THEMES, MAX_FILE_BYTES_PER_TYPE};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
@@ -64,6 +68,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let entries = entries()?;
     every_kind_is_shown(&entries);
+    let survey_open = survey_spec(SURVEY_OPEN_RESULTS)?;
+    let survey_closed = survey_spec(SURVEY_CLOSED_RESULTS)?;
+    every_question_kind_is_shown(&survey_open);
 
     fs::create_dir_all(out.join("source"))?;
     fs::create_dir_all(out.join("schema"))?;
@@ -126,6 +133,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assets_written = true;
                 }
             }
+        }
+        for (name, html) in survey_pages(&survey_open, &survey_closed, theme) {
+            fs::write(dir.join(name), html)?;
+            pages += 1;
         }
     }
 
@@ -903,6 +914,277 @@ fn contents_json(entries: &[Entry]) -> Result<String, serde_json::Error> {
 /// documentation site builds its own frame around these pages, so this one is
 /// deliberately plain: it exists so `cargo run --example gallery` is a thing
 /// you can look at without a static server or a docs build.
+/// The specimen survey's questions: one of every general kind, which
+/// [`every_question_kind_is_shown`] insists on. `times` is deliberately not
+/// here — its specimen is `book.poll.html`, the seeded grid.
+const SURVEY_QUESTIONS: &str = r#"
+title = "Mid-semester feedback"
+deadline = "2026-03-06T22:00:00-05:00"
+
+[[questions]]
+id = "paper"
+prompt = "Which paper should the discussion section take on?"
+kind = "choice"
+
+[[questions.options]]
+id = "world-models"
+label = "World models are enough"
+detail = "Chen et al., 2026"
+link = "https://example.org/world-models"
+
+[[questions.options]]
+id = "affect-probes"
+label = "Affective probes in fMRI decoding"
+
+[[questions]]
+id = "order"
+prompt = "Rank the project formats you'd prefer."
+kind = "ranking"
+
+[[questions.options]]
+id = "replication"
+label = "Replication study"
+
+[[questions.options]]
+id = "reanalysis"
+label = "Reanalysis of an open dataset"
+
+[[questions.options]]
+id = "proposal"
+label = "Novel study proposal"
+
+[[questions]]
+id = "pace"
+prompt = "The pace of the course so far is right."
+kind = "likert"
+points = 5
+labels = ["Strongly disagree", "Disagree", "Neutral", "Agree", "Strongly agree"]
+
+[[questions]]
+id = "confidence"
+prompt = "How confident do you feel about the material right now?"
+kind = "vas"
+anchor_min = "Not at all confident"
+anchor_max = "Completely confident"
+
+[[questions]]
+id = "keep"
+prompt = "What is working that we should keep doing?"
+kind = "text"
+max_length = 300
+"#;
+
+/// The open page's policy: the default reveal, anonymous — the promise
+/// line and the owed-results note are part of what the page demonstrates.
+const SURVEY_OPEN_RESULTS: &str = "
+[results]
+show = \"after_vote\"
+identity = \"anonymous\"
+";
+
+/// The closed page's policy: named, so the voters disclosure renders too.
+const SURVEY_CLOSED_RESULTS: &str = "
+[results]
+show = \"after_close\"
+identity = \"named\"
+";
+
+fn survey_spec(results: &str) -> Result<PollSpec, Box<dyn std::error::Error>> {
+    Ok(PollSpec::from_toml(&format!(
+        "{SURVEY_QUESTIONS}{results}"
+    ))?)
+}
+
+/// The arms of the survey's own exhaustiveness guard: a sixth general kind
+/// added to `QuestionKind` stops this example compiling here, and the check
+/// below fails until the specimen shows it.
+fn question_kind_tag(kind: &QuestionKind) -> &'static str {
+    match kind {
+        QuestionKind::Choice { .. } => "choice",
+        QuestionKind::Ranking { .. } => "ranking",
+        QuestionKind::Likert { .. } => "likert",
+        QuestionKind::Vas { .. } => "vas",
+        QuestionKind::Text { .. } => "text",
+        QuestionKind::Times { .. } => "times",
+    }
+}
+
+fn every_question_kind_is_shown(spec: &PollSpec) {
+    let shown: BTreeSet<&str> = spec
+        .questions
+        .iter()
+        .map(|q| question_kind_tag(&q.kind))
+        .collect();
+    let missing: Vec<&str> = ["choice", "ranking", "likert", "vas", "text"]
+        .into_iter()
+        .filter(|kind| !shown.contains(kind))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the survey specimen is missing kinds {missing:?} — a gallery \
+         missing a kind reads as a complete list"
+    );
+}
+
+/// Two states the served pages actually reach: the open form before your
+/// vote (results owed, not shown), and the closed poll with everything —
+/// tallies, the IRV rounds, prose answers, the named-voters disclosure.
+fn survey_pages(
+    open_spec: &PollSpec,
+    closed_spec: &PollSpec,
+    theme: Theme,
+) -> Vec<(&'static str, String)> {
+    let mut mine = Ballot::new();
+    mine.insert("pace".into(), Answer::Likert(4));
+    mine.insert("order".into(), Answer::Ranking(vec!["reanalysis".into()]));
+
+    let form = survey_page(
+        open_spec,
+        &mine,
+        None,
+        &SurveyPageOptions {
+            participant: Some("Priya".into()),
+            action: "#".into(),
+            assets: String::new(),
+            theme,
+            deadline_local: Some("Fri Mar 6, 10:00 PM EST".into()),
+            responded: 2,
+            total: Some(6),
+            open: true,
+            notice: None,
+            show: Show::AfterVote,
+            identity: Identity::Anonymous,
+            live: false,
+        },
+    );
+
+    let results = specimen_results(closed_spec);
+    let closed = survey_page(
+        closed_spec,
+        &mine,
+        Some(&results),
+        &SurveyPageOptions {
+            participant: Some("Priya".into()),
+            action: "#".into(),
+            assets: String::new(),
+            theme,
+            deadline_local: Some("Fri Mar 6, 10:00 PM EST".into()),
+            responded: 5,
+            total: Some(5),
+            open: false,
+            notice: None,
+            show: Show::AfterClose,
+            identity: Identity::Named,
+            live: false,
+        },
+    );
+
+    vec![("survey.html", form.html), ("survey.closed.html", closed.html)]
+}
+
+/// Five specimen ballots, tallied by the same pure functions the box and
+/// home run — invented numbers would document tallies nobody computes.
+fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
+    let ballots: Vec<(&str, Ballot)> = [
+        ("Priya", vec![
+            ("paper", Answer::Choice(vec!["world-models".into()])),
+            ("order", Answer::Ranking(vec!["reanalysis".into(), "replication".into()])),
+            ("pace", Answer::Likert(4)),
+            ("confidence", Answer::Vas(72)),
+            ("keep", Answer::Text("The live coding walkthroughs.".into())),
+        ]),
+        ("Tal", vec![
+            ("paper", Answer::Choice(vec!["affect-probes".into()])),
+            ("order", Answer::Ranking(vec!["replication".into(), "proposal".into()])),
+            ("pace", Answer::Likert(2)),
+            ("confidence", Answer::Vas(41)),
+            ("keep", Answer::Text("Problem sets that mirror the lectures.".into())),
+        ]),
+        ("Noor", vec![
+            ("paper", Answer::Choice(vec!["world-models".into()])),
+            ("order", Answer::Ranking(vec!["reanalysis".into(), "proposal".into()])),
+            ("pace", Answer::Likert(4)),
+            ("confidence", Answer::Vas(88)),
+        ]),
+        ("Sam", vec![
+            ("paper", Answer::Choice(vec!["affect-probes".into()])),
+            ("order", Answer::Ranking(vec!["proposal".into()])),
+            ("pace", Answer::Likert(5)),
+            ("confidence", Answer::Vas(64)),
+        ]),
+        ("Ida", vec![
+            ("paper", Answer::Choice(vec!["world-models".into()])),
+            ("order", Answer::Ranking(vec!["replication".into(), "reanalysis".into()])),
+            ("pace", Answer::Likert(3)),
+            ("confidence", Answer::Vas(55)),
+            ("keep", Answer::Text("Office hours right after section.".into())),
+        ]),
+    ]
+    .into_iter()
+    .map(|(name, answers)| {
+        (
+            name,
+            answers
+                .into_iter()
+                .map(|(q, a)| (q.to_string(), a))
+                .collect::<Ballot>(),
+        )
+    })
+    .collect();
+
+    spec.questions
+        .iter()
+        .map(|question| {
+            let named: Vec<(&str, &Answer)> = ballots
+                .iter()
+                .filter_map(|(name, ballot)| ballot.get(&question.id).map(|a| (*name, a)))
+                .collect();
+            let answers: Vec<Answer> = named.iter().map(|(_, a)| (*a).clone()).collect();
+            let display = match &question.kind {
+                QuestionKind::Choice { options, .. } => QuestionDisplay::Choice {
+                    tally: mecha_manifest::tally_choice(options, &answers),
+                },
+                QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
+                    tally: mecha_manifest::tally_ranking(options, &answers),
+                    complete: true,
+                },
+                QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
+                    tally: mecha_manifest::tally_likert(*points, &answers),
+                },
+                QuestionKind::Vas { .. } => QuestionDisplay::Vas {
+                    tally: mecha_manifest::tally_vas(&answers),
+                },
+                QuestionKind::Text { .. } => QuestionDisplay::Text {
+                    entries: named
+                        .iter()
+                        .filter_map(|(name, answer)| match answer {
+                            Answer::Text(text) => {
+                                Some((Some((*name).to_string()), text.clone()))
+                            }
+                            _ => None,
+                        })
+                        .collect(),
+                },
+                QuestionKind::Times { .. } => unreachable!("the specimen has no times"),
+            };
+            let voters = (!matches!(question.kind, QuestionKind::Text { .. })).then(|| {
+                named
+                    .iter()
+                    .map(|(name, answer)| {
+                        let words = match answer {
+                            Answer::Choice(ids) | Answer::Ranking(ids) => ids.join(", "),
+                            Answer::Likert(v) | Answer::Vas(v) => v.to_string(),
+                            Answer::Text(_) => String::new(),
+                        };
+                        ((*name).to_string(), words)
+                    })
+                    .collect()
+            });
+            QuestionResults { display, voters }
+        })
+        .collect()
+}
+
 fn landing(entries: &[Entry]) -> String {
     let mut body = String::new();
     body.push_str(
@@ -944,6 +1226,22 @@ fn landing(entries: &[Entry]) -> String {
         }
         body.push_str("</section>\n");
     }
+
+    body.push_str(
+        "<section>\n<h2>The survey</h2>\n<p class=\"blurb\">The general poll: \
+         every question kind on one page, rendered by the renderer the gate \
+         serves — the open form before your vote, and the closed poll with \
+         tallies, the runoff rounds, and the named-voters disclosure.</p>\n",
+    );
+    for theme in BUILT_IN_THEMES {
+        body.push_str(&format!(
+            "<p class=\"theme\"><span class=\"name\">{name}</span> \
+             <a href=\"{name}/survey.html\">open form</a> · \
+             <a href=\"{name}/survey.closed.html\">closed, with results</a></p>\n",
+            name = escape_text(theme.name)
+        ));
+    }
+    body.push_str("</section>\n");
 
     body.push_str(&format!(
         "<p class=\"foot\">{} field kinds · {} themes · file fields cap at \
