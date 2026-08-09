@@ -163,10 +163,24 @@
         });
         queueSave();
       };
+      var announce = function (row) {
+        live.textContent =
+          row.name + " is now " + (rows.indexOf(row) + 1) + " of " + rows.length + ".";
+      };
       var render = function (focus) {
         list.textContent = "";
         rows.forEach(function (row, index) {
           var item = document.createElement("li");
+          item.rowRef = row;
+          // The grip is the drag surface — pointer capture makes the
+          // stroke survive leaving the row (the paint grid's mechanic),
+          // and `touch-action:none` lives on the grip alone so the rest
+          // of the page still scrolls under a thumb. Buttons remain the
+          // keyboard's path; the grip is decoration to a screen reader.
+          var grip = document.createElement("span");
+          grip.className = "grip";
+          grip.textContent = "⠿";
+          grip.setAttribute("aria-hidden", "true");
           var name = document.createElement("span");
           name.className = "optlabel";
           name.textContent = row.name;
@@ -183,13 +197,47 @@
           var move = function (delta) {
             var to = index + delta;
             rows.splice(to, 0, rows.splice(index, 1)[0]);
-            live.textContent =
-              row.name + " is now " + (to + 1) + " of " + rows.length + ".";
+            announce(row);
             sync();
             render({ row: row, dir: delta });
           };
           up.addEventListener("click", function () { move(-1); });
           down.addEventListener("click", function () { move(1); });
+
+          grip.addEventListener("pointerdown", function (event) {
+            event.preventDefault();
+            try { grip.setPointerCapture(event.pointerId); } catch (e) {}
+            item.classList.add("dragging");
+          });
+          grip.addEventListener("pointermove", function (event) {
+            if (!item.classList.contains("dragging")) return;
+            var el = document.elementFromPoint(event.clientX, event.clientY);
+            var over = el && el.closest ? el.closest(".rank-list li") : null;
+            if (!over || over === item || over.parentNode !== list) return;
+            var kids = Array.prototype.slice.call(list.children);
+            if (kids.indexOf(over) < kids.indexOf(item)) {
+              list.insertBefore(item, over);
+            } else {
+              list.insertBefore(item, over.nextSibling);
+            }
+          });
+          var drop = function () {
+            if (!item.classList.contains("dragging")) return;
+            item.classList.remove("dragging");
+            // The DOM is where the drag happened; make it the order.
+            var order = Array.prototype.map.call(list.children, function (li) {
+              return li.rowRef;
+            });
+            rows.length = 0;
+            Array.prototype.push.apply(rows, order);
+            announce(row);
+            sync();
+            render(null);
+          };
+          grip.addEventListener("pointerup", drop);
+          grip.addEventListener("pointercancel", drop);
+
+          item.appendChild(grip);
           item.appendChild(up);
           item.appendChild(down);
           item.appendChild(name);
