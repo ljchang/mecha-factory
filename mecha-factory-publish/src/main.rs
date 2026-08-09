@@ -1651,6 +1651,26 @@ fn polls_command(action: PollsAction) -> Result<()> {
                 let reply = remote()?.poll_create(&instrument, &poll_id, &payload)?;
                 if link {
                     let url = reply["url"].as_str().unwrap_or("(no url?)");
+                    // The record is what the TUI monitor lists — a poll
+                    // with no roster still has to exist somewhere at home.
+                    let dir = remote::Remote::dir()?.join("polls");
+                    std::fs::create_dir_all(&dir)?;
+                    let record = serde_json::json!({
+                        "instrument": instrument,
+                        "poll_id": poll_id,
+                        "title": poll_spec.title,
+                        "deadline": poll_spec.deadline,
+                        "created_at": chrono::Utc::now()
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        "audience": "link",
+                        "max_ballots": poll_spec.audience.max_ballots,
+                        "url": url,
+                        "screen_url": reply["screen_url"],
+                    });
+                    std::fs::write(
+                        dir.join(format!("{poll_id}.json")),
+                        serde_json::to_string_pretty(&record)?,
+                    )?;
                     println!(
                         "poll `{poll_id}`: {} question(s), open link, capped at {} ballot(s)",
                         poll_spec.questions.len(),
@@ -1676,6 +1696,8 @@ fn polls_command(action: PollsAction) -> Result<()> {
                     "deadline": poll_spec.deadline,
                     "created_at": chrono::Utc::now()
                         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "audience": "roster",
+                    "screen_url": reply["screen_url"],
                     "participants": named
                         .iter()
                         .map(|(name, email)| {
