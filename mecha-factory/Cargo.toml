@@ -30,7 +30,7 @@ path = "src/main.rs"
 # stating in its stronger form: **the box holds no credential that reaches
 # home.** An SES key can send mail as the domain and can do nothing else.
 [dependencies]
-mecha-manifest = { path = "../mecha-manifest", version = "0.1.0" }
+mecha-manifest = { path = "../mecha-manifest", version = "0.2.0" }
 anyhow.workspace = true
 # `multipart` for the one route that takes a file — the post-verification
 # upload page. A hand-rolled multipart parser on an unauthenticated endpoint
