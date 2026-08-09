@@ -65,8 +65,22 @@ pub enum QuestionDisplay {
     /// then, because rounds on a partial electorate imply a winner one
     /// more ballot can flip. Open polls show first preferences alone.
     Ranking { tally: RankingTally, complete: bool },
-    /// (name when named, the prose). Escaped at render like everything.
-    Text { entries: Vec<(Option<String>, String)> },
+    /// (name when named, the prose), plus the recurring-words cloud drawn
+    /// above the listing. Escaped at render like everything.
+    Text {
+        entries: Vec<(Option<String>, String)>,
+        cloud: Vec<(String, usize)>,
+    },
+    /// A text question on a projector: the cloud and the count, never the
+    /// prose. Anonymous sentences on a lecture screen are an incident
+    /// with a countdown; recurring *words* that at least two ballots
+    /// chose are the room's own signal — `word_cloud`'s `min_count`
+    /// guard, not a profanity list, is what keeps a lone troll off the
+    /// wall.
+    TextCloud {
+        n: usize,
+        cloud: Vec<(String, usize)>,
+    },
 }
 
 /// The greeting-and-count line. One wording for the rendered page and the
@@ -520,7 +534,8 @@ fn results_html(question: &PollQuestion, results: &QuestionResults) -> String {
                 }
             }
         }
-        QuestionDisplay::Text { entries } => {
+        QuestionDisplay::Text { entries, cloud } => {
+            cloud_html(body, cloud);
             body.push_str("<ul class=\"prose-answers\">\n");
             for (author, text) in entries {
                 let byline = author
@@ -530,6 +545,14 @@ fn results_html(question: &PollQuestion, results: &QuestionResults) -> String {
                 body.push_str(&format!("<li>{}{byline}</li>\n", escape_text(text)));
             }
             body.push_str("</ul>\n");
+        }
+        QuestionDisplay::TextCloud { n, cloud } => {
+            cloud_html(body, cloud);
+            body.push_str(&format!(
+                "<p class=\"cap\">{n} written answer{} — the full text stays \
+                 on the presenter's screen, not the wall.</p>\n",
+                if *n == 1 { "" } else { "s" }
+            ));
         }
     }
     if let Some(voters) = &results.voters {
@@ -545,6 +568,31 @@ fn results_html(question: &PollQuestion, results: &QuestionResults) -> String {
     }
     body.push_str("</div>\n");
     fragment
+}
+
+/// The recurring words as a weighted list — the accessible skeleton of a
+/// word cloud. Size arrives as one of five discrete classes (the heat-
+/// bucket rule: a CSP that forbids inline style is also what keeps sizes
+/// tellable-apart), and every word carries its count in text, so the
+/// information survives a screen reader that reads no font sizes at all.
+fn cloud_html(body: &mut String, cloud: &[(String, usize)]) {
+    if cloud.is_empty() {
+        return;
+    }
+    let max = cloud.iter().map(|(_, c)| *c).max().unwrap_or(1);
+    body.push_str("<p class=\"cloud\">");
+    for (word, count) in cloud {
+        let bucket = if max <= 1 {
+            1
+        } else {
+            1 + (count - 1) * 4 / (max - 1)
+        };
+        body.push_str(&format!(
+            "<span class=\"cloud-w cw{bucket}\">{}<span class=\"count\">{count}</span></span> ",
+            escape_text(word)
+        ));
+    }
+    body.push_str("</p>\n");
 }
 
 /// A count as a native `<meter>` beside its words — no script, no styling
@@ -628,6 +676,106 @@ pub fn ballot_from_form(
         }
     }
     raw
+}
+
+/// What the projector page needs from the server.
+pub struct ScreenPageOptions {
+    /// The shared join URL, printed large — a `link` poll's. A roster
+    /// poll's screen shows counts without one: its doors are personal.
+    pub join_url: Option<String>,
+    pub responded: usize,
+    pub open: bool,
+    pub resolution: Option<String>,
+    pub theme: crate::Theme,
+    pub assets: String,
+    /// False renders a static specimen (the gallery); true wires the 2s
+    /// refresh in.
+    pub live: bool,
+}
+
+/// The projector view: results only, big type, no form — the reveal is
+/// whether this page is on the wall, which is what lets `show = "creator"`
+/// polls run a lecture without a new visibility enum. The caller decides
+/// what the room may see (aggregates; prose withheld; the anonymity floor
+/// still applied, because a projector is an audience).
+pub fn screen_page(
+    spec: &PollSpec,
+    results: &[QuestionResults],
+    options: &ScreenPageOptions,
+) -> BookingPage {
+    let mut body = String::new();
+    body.push_str(&format!("<h1>{}</h1>\n", escape_text(&spec.title)));
+    if let Some(join) = &options.join_url {
+        body.push_str(&format!(
+            "<p class=\"join\">answer at <strong>{}</strong></p>\n",
+            escape_text(join)
+        ));
+    }
+    body.push_str(&format!(
+        "<p class=\"count\" id=\"screen-count\">{}</p>\n",
+        escape_text(&screen_count_line(options.responded, options.open))
+    ));
+    if let Some(resolution) = &options.resolution {
+        body.push_str(&format!(
+            "<p class=\"resolution\" role=\"note\"><strong>Outcome:</strong> {}</p>\n",
+            escape_text(resolution)
+        ));
+    }
+    for (question, result) in spec.questions.iter().zip(results) {
+        body.push_str("<section class=\"question\">\n");
+        if let Some(prompt) = &question.prompt {
+            body.push_str(&format!("<h2>{}</h2>\n", escape_text(prompt)));
+        }
+        body.push_str(&format!(
+            "<div class=\"results-slot\" id=\"results-q-{}\">{}</div>\n",
+            escape_text(&question.id),
+            results_html(question, result)
+        ));
+        body.push_str("</section>\n");
+    }
+    if options.live {
+        body.push_str(&format!(
+            "<script src=\"{}screen.js\" defer></script>\n",
+            escape_text(&options.assets)
+        ));
+    }
+    let html = format!(
+        "<!doctype html>\n<html lang=\"en\">\n<head>\n\
+         <meta charset=\"utf-8\">\n\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n\
+         <title>{}</title>\n\
+         {}\n\
+         <link rel=\"stylesheet\" href=\"{}booking.css\">\n\
+         </head>\n<body>\n<main class=\"booking survey screen\">\n{}</main>\n</body>\n</html>\n",
+        escape_text(&spec.title),
+        crate::brand::FAVICON_LINK,
+        escape_text(&options.assets),
+        body
+    );
+    BookingPage {
+        html,
+        style: format!(
+            "{}{}{}{}",
+            options.theme.css(),
+            crate::form::FORM_STRUCTURE,
+            crate::booking::BOOKING_STRUCTURE,
+            SURVEY_STRUCTURE
+        ),
+    }
+}
+
+/// The screen's one moving sentence — worded here so the page load and
+/// the 2s refresh can never disagree.
+pub fn screen_count_line(responded: usize, open: bool) -> String {
+    let count = match responded {
+        1 => "1 answer so far".to_string(),
+        n => format!("{n} answers so far"),
+    };
+    if open {
+        count
+    } else {
+        format!("{count} — closed")
+    }
 }
 
 /// The survey page's enhancement: autosave every commit, and results that
@@ -733,6 +881,39 @@ pub(crate) const SURVEY_JS: &str = r#"// Generated by mecha-manifest. Enhancemen
 })();
 "#;
 
+/// The projector's refresh: fetch `data.json` beside the page every 2s —
+/// one projector is one client, and lecture cadence is the point. The
+/// fragments are the same server rendering the page loaded with, swapped
+/// only on change so the room never sees a flicker of nothing.
+pub(crate) const SCREEN_JS: &str = r#"// Generated by mecha-manifest. Enhancement only:
+// the screen answers identically with this file blocked, one reload behind.
+(function () {
+  "use strict";
+  if (!window.fetch) return;
+  var refresh = function () {
+    fetch(window.location.pathname + "/data.json", {
+      headers: { Accept: "application/json" }
+    })
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (!data) return;
+        var count = document.getElementById("screen-count");
+        if (count && data.count) count.textContent = data.count;
+        var slots = data.results || {};
+        Object.keys(slots).forEach(function (qid) {
+          var slot = document.getElementById("results-q-" + qid);
+          if (slot && slot.innerHTML !== slots[qid]) slot.innerHTML = slots[qid];
+        });
+      })
+      .catch(function () { /* offline is not an error the wall can fix */ });
+  };
+  window.setInterval(refresh, 2000);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") refresh();
+  });
+})();
+"#;
+
 /// The survey page's own structure, appended to the booking stylesheet.
 pub(crate) const SURVEY_STRUCTURE: &str = r#"
 /* --- the survey ---------------------------------------------------------- */
@@ -755,6 +936,25 @@ pub(crate) const SURVEY_STRUCTURE: &str = r#"
 .survey .voters { margin:.5rem 0; font-size:.9rem; }
 .survey .promise { font-style:italic; }
 .booking .resolution { border-left:3px solid var(--accent, currentColor); padding:.5rem .75rem; }
+.survey .cloud { line-height:2.2; margin:.5rem 0; }
+.survey .cloud-w { margin-right:.9rem; white-space:nowrap; }
+.survey .cloud-w .count { font-size:.65em; opacity:.6; vertical-align:super; margin-left:.15rem; }
+.survey .cw1 { font-size:.95rem; opacity:.75; }
+.survey .cw2 { font-size:1.15rem; opacity:.85; }
+.survey .cw3 { font-size:1.45rem; }
+.survey .cw4 { font-size:1.8rem; }
+.survey .cw5 { font-size:2.25rem; font-weight:600; }
+
+/* --- the projector -------------------------------------------------------
+   Sized for the back row: the join line and the bars are the page. */
+.screen h1 { font-size:2.4rem; }
+.screen .join { font-size:1.9rem; margin:.25rem 0; }
+.screen .count { font-size:1.3rem; opacity:.8; }
+.screen .question h2 { font-size:1.6rem; }
+.screen .tallybar { font-size:1.4rem; }
+.screen .tallybar .optlabel { min-width:14rem; }
+.screen .tallybar meter { max-width:none; height:1.4rem; }
+.screen .cap { font-size:1.15rem; }
 "#;
 
 #[cfg(test)]
@@ -890,6 +1090,7 @@ mod tests {
             QuestionResults {
                 display: QuestionDisplay::Text {
                     entries: vec![(None, "More coffee <3".into())],
+                    cloud: vec![("coffee".into(), 3), ("slides".into(), 1)],
                 },
                 voters: None,
             },
@@ -899,6 +1100,9 @@ mod tests {
         assert!(page.html.contains("median 4"));
         // The prose is escaped, not interpolated.
         assert!(page.html.contains("More coffee &lt;3"));
+        // The cloud buckets by count and keeps the number in text.
+        assert!(page.html.contains("cw5\">coffee<span class=\"count\">3</span>"));
+        assert!(page.html.contains("cw1\">slides"));
     }
 
     #[test]

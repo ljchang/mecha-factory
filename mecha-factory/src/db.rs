@@ -384,6 +384,12 @@ pub struct PollRow {
     /// so the link people hold answers "so what happened?" instead of
     /// dead-ending at a frozen tally.
     pub resolution: Option<String>,
+    /// The projector capability, hashed like every credential here. Minted
+    /// at create for general polls; the screen view it opens shows
+    /// aggregates whatever the `show` policy says, because the capability
+    /// *is* the creator's authority — and the reveal is whether the screen
+    /// is on the wall.
+    pub screen_token_hash: Option<String>,
     pub state: String,
     pub created_at: String,
     pub closed_at: Option<String>,
@@ -2009,8 +2015,9 @@ impl Db {
             let tx = conn.unchecked_transaction()?;
             let inserted = tx.execute(
                 "INSERT OR IGNORE INTO polls (user_id, id, title, timezone, \
-                 duration_minutes, deadline, candidates, spec, state, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'open', ?9)",
+                 duration_minutes, deadline, candidates, spec, screen_token_hash, \
+                 state, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'open', ?10)",
                 params![
                     row.user_id,
                     row.id,
@@ -2020,6 +2027,7 @@ impl Db {
                     row.deadline,
                     row.candidates,
                     row.spec,
+                    row.screen_token_hash,
                     row.created_at
                 ],
             )?;
@@ -2075,7 +2083,8 @@ impl Db {
             Ok(conn
                 .query_row(
                     "SELECT user_id, id, title, timezone, duration_minutes, deadline, \
-                     candidates, spec, resolution, state, created_at, closed_at FROM polls \
+                     candidates, spec, resolution, screen_token_hash, state, created_at, \
+                     closed_at FROM polls \
                      WHERE user_id = ?1 AND id = ?2",
                     params![user_id, id],
                     poll_row,
@@ -2091,13 +2100,13 @@ impl Db {
             Ok(conn
                 .query_row(
                     "SELECT p.user_id, p.id, p.title, p.timezone, p.duration_minutes, \
-                     p.deadline, p.candidates, p.spec, p.resolution, p.state, p.created_at, \
-                     p.closed_at, pp.name \
+                     p.deadline, p.candidates, p.spec, p.resolution, p.screen_token_hash, \
+                     p.state, p.created_at, p.closed_at, pp.name \
                      FROM poll_participants pp \
                      JOIN polls p ON p.user_id = pp.user_id AND p.id = pp.poll_id \
                      WHERE pp.token_hash = ?1",
                     params![token_hash],
-                    |r| Ok((poll_row(r)?, r.get::<_, String>(12)?)),
+                    |r| Ok((poll_row(r)?, r.get::<_, String>(13)?)),
                 )
                 .optional()?)
         })
@@ -2772,9 +2781,10 @@ fn poll_row(r: &rusqlite::Row) -> rusqlite::Result<PollRow> {
         candidates: r.get(6)?,
         spec: r.get(7)?,
         resolution: r.get(8)?,
-        state: r.get(9)?,
-        created_at: r.get(10)?,
-        closed_at: r.get(11)?,
+        screen_token_hash: r.get(9)?,
+        state: r.get(10)?,
+        created_at: r.get(11)?,
+        closed_at: r.get(12)?,
     })
 }
 
@@ -2916,6 +2926,7 @@ fn migrate(conn: &Connection) -> Result<()> {
         for alter in [
             "ALTER TABLE polls ADD COLUMN spec TEXT;",
             "ALTER TABLE polls ADD COLUMN resolution TEXT;",
+            "ALTER TABLE polls ADD COLUMN screen_token_hash TEXT;",
         ] {
             if let Err(e) = conn.execute_batch(alter) {
                 let text = e.to_string();
@@ -3252,6 +3263,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             candidates       TEXT NOT NULL,
             spec             TEXT,
             resolution       TEXT,
+            screen_token_hash TEXT,
             state            TEXT NOT NULL DEFAULT 'open',
             created_at       TEXT NOT NULL,
             closed_at        TEXT,

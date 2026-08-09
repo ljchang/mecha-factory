@@ -254,7 +254,7 @@ fn render_general(
     let view = survey_view(app, poll, spec, viewer);
     let results = view
         .visible
-        .then(|| build_results(spec, &view.ballots, view.identity, view.open));
+        .then(|| build_results(spec, &view.ballots, view.identity, view.open, false));
     let options = SurveyPageOptions {
         participant: greeting,
         action: String::new(), // POST back to this same URL
@@ -329,7 +329,7 @@ fn results_payload(
     let link = spec.audience.kind == mecha_manifest::AudienceKind::Link;
     let view = survey_view(app, poll, spec, viewer);
     let fragments = view.visible.then(|| {
-        let results = build_results(spec, &view.ballots, view.identity, view.open);
+        let results = build_results(spec, &view.ballots, view.identity, view.open, false);
         let map: serde_json::Map<String, serde_json::Value> =
             mecha_manifest::results_fragments(spec, &results)
                 .into_iter()
@@ -575,6 +575,115 @@ fn see_saved(handle: &str, poll_id: &str, cookie: Option<String>) -> Response {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The projector. The screen capability is the creator's authority, so the
+// page shows aggregates whatever `show` says — the reveal is whether this
+// page is on the wall. What the wall gets is the stricter cut: typed
+// tallies and the word cloud, never anyone's sentence, and the anonymous
+// suppression floor still applies, because a projector is an audience.
+// ---------------------------------------------------------------------------
+
+fn resolve_screen(
+    app: &Shared,
+    handle: &str,
+    poll_id: &str,
+    token: &str,
+) -> Option<(PollRow, PollSpec)> {
+    let user = app
+        .db
+        .user_by_handle(handle)
+        .ok()
+        .flatten()
+        .filter(|u| u.active())?;
+    let poll = app.db.poll_get(&user.id, poll_id).ok().flatten()?;
+    let stored = poll.screen_token_hash.clone()?;
+    if stored != crate::intake::hash_token(token) {
+        return None;
+    }
+    let spec = poll.general_spec().ok().flatten()?;
+    Some((poll, spec))
+}
+
+fn screen_state(
+    app: &Shared,
+    poll: &PollRow,
+    spec: &PollSpec,
+) -> (Vec<QuestionResults>, usize, bool) {
+    let view = survey_view(app, poll, spec, None);
+    let results = build_results(spec, &view.ballots, view.identity, view.open, true);
+    (results, view.responded, view.open)
+}
+
+/// `GET /p/{handle}/{poll_id}/screen/{token}` — the wall.
+pub async fn screen_page(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, poll_id, token)): Path<(String, String, String)>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((poll, spec)) = resolve_screen(&app, &handle, &poll_id, &token) else {
+        return nothing_here();
+    };
+    let (results, responded, open) = screen_state(&app, &poll, &spec);
+    let join_url = (spec.audience.kind == mecha_manifest::AudienceKind::Link)
+        .then(|| format!("{}/p/{handle}/{poll_id}", app.config.base_url(crate::config::Role::Gate)));
+    let page = mecha_manifest::screen_page(
+        &spec,
+        &results,
+        &mecha_manifest::ScreenPageOptions {
+            join_url,
+            responded,
+            open,
+            resolution: poll.resolution.clone(),
+            theme: mecha_manifest::Theme::by_name(&app.config.theme),
+            assets: "/p/a/".into(),
+            live: true,
+        },
+    );
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        page.html,
+    )
+        .into_response()
+}
+
+/// `GET /p/{handle}/{poll_id}/screen/{token}/data.json` — the 2s truth.
+pub async fn screen_data(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, poll_id, token)): Path<(String, String, String)>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((poll, spec)) = resolve_screen(&app, &handle, &poll_id, &token) else {
+        return nothing_here();
+    };
+    let (results, responded, open) = screen_state(&app, &poll, &spec);
+    let map: serde_json::Map<String, serde_json::Value> =
+        mecha_manifest::results_fragments(&spec, &results)
+            .into_iter()
+            .map(|(qid, html)| (qid, html.into()))
+            .collect();
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        serde_json::json!({
+            "open": open,
+            "count": mecha_manifest::screen_count_line(responded, open),
+            "results": map,
+        })
+        .to_string(),
+    )
+        .into_response()
+}
+
 /// `GET /p/{handle}/{poll_id}/results.json` — the link page's live truth,
 /// the browser's cookie standing in for the path token.
 pub async fn link_results(
@@ -595,11 +704,15 @@ pub async fn link_results(
 
 /// Per-question results under the identity policy: tallies always, the
 /// small-n suppression on anonymous polls, names only under `named`.
+/// `projected` is the projector's stricter cut: prose becomes a
+/// two-ballot-minimum word cloud plus a count, and nobody's sentence
+/// reaches the wall.
 fn build_results(
     spec: &PollSpec,
     ballots: &[(String, Ballot)],
     identity: Identity,
     open: bool,
+    projected: bool,
 ) -> Vec<QuestionResults> {
     spec.questions
         .iter()
@@ -632,25 +745,46 @@ fn build_results(
                     QuestionKind::Vas { .. } => QuestionDisplay::Vas {
                         tally: tally_vas(&answers),
                     },
-                    QuestionKind::Text { .. } => QuestionDisplay::Text {
-                        entries: named
+                    QuestionKind::Text { .. } => {
+                        let texts: Vec<&str> = named
                             .iter()
-                            .filter_map(|(name, answer)| match answer {
-                                Answer::Text(text) => Some((
-                                    (identity == Identity::Named)
-                                        .then(|| (*name).to_string()),
-                                    text.clone(),
-                                )),
+                            .filter_map(|(_, answer)| match answer {
+                                Answer::Text(text) => Some(text.as_str()),
                                 _ => None,
                             })
-                            .collect(),
-                    },
+                            .collect();
+                        // Two ballots make a word: one voice can never
+                        // set the cloud's largest type, projected or not.
+                        let cloud = mecha_manifest::word_cloud(&texts, 2);
+                        if projected {
+                            QuestionDisplay::TextCloud {
+                                n: texts.len(),
+                                cloud,
+                            }
+                        } else {
+                            QuestionDisplay::Text {
+                                entries: named
+                                    .iter()
+                                    .filter_map(|(name, answer)| match answer {
+                                        Answer::Text(text) => Some((
+                                            (identity == Identity::Named)
+                                                .then(|| (*name).to_string()),
+                                            text.clone(),
+                                        )),
+                                        _ => None,
+                                    })
+                                    .collect(),
+                                cloud,
+                            }
+                        }
+                    }
                     // A times question never reaches the general path:
                     // `put_poll` refuses it in a spec, and legacy rows have
                     // no spec at all. Nothing to draw is the honest render
                     // if one ever does.
                     QuestionKind::Times { .. } => QuestionDisplay::Text {
                         entries: Vec::new(),
+                        cloud: Vec::new(),
                     },
                 }
             };

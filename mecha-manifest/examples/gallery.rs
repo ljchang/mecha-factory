@@ -1102,7 +1102,7 @@ fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
             ("order", Answer::Ranking(vec!["replication".into(), "proposal".into()])),
             ("pace", Answer::Likert(2)),
             ("confidence", Answer::Vas(41)),
-            ("keep", Answer::Text("Problem sets that mirror the lectures.".into())),
+            ("keep", Answer::Text("Problem sets that mirror the coding walkthroughs.".into())),
         ]),
         ("Noor", vec![
             ("paper", Answer::Choice(vec!["world-models".into()])),
@@ -1121,7 +1121,7 @@ fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
             ("order", Answer::Ranking(vec!["replication".into(), "reanalysis".into()])),
             ("pace", Answer::Likert(3)),
             ("confidence", Answer::Vas(55)),
-            ("keep", Answer::Text("Office hours right after section.".into())),
+            ("keep", Answer::Text("Office hours right after the coding section.".into())),
         ]),
     ]
     .into_iter()
@@ -1158,17 +1158,27 @@ fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
                 QuestionKind::Vas { .. } => QuestionDisplay::Vas {
                     tally: mecha_manifest::tally_vas(&answers),
                 },
-                QuestionKind::Text { .. } => QuestionDisplay::Text {
-                    entries: named
+                QuestionKind::Text { .. } => {
+                    let texts: Vec<&str> = named
                         .iter()
-                        .filter_map(|(name, answer)| match answer {
-                            Answer::Text(text) => {
-                                Some((Some((*name).to_string()), text.clone()))
-                            }
+                        .filter_map(|(_, answer)| match answer {
+                            Answer::Text(text) => Some(text.as_str()),
                             _ => None,
                         })
-                        .collect(),
-                },
+                        .collect();
+                    QuestionDisplay::Text {
+                        cloud: mecha_manifest::word_cloud(&texts, 2),
+                        entries: named
+                            .iter()
+                            .filter_map(|(name, answer)| match answer {
+                                Answer::Text(text) => {
+                                    Some((Some((*name).to_string()), text.clone()))
+                                }
+                                _ => None,
+                            })
+                            .collect(),
+                    }
+                }
                 QuestionKind::Times { .. } => unreachable!("the specimen has no times"),
             };
             let voters = (!matches!(question.kind, QuestionKind::Text { .. })).then(|| {

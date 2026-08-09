@@ -388,6 +388,84 @@ fn a_link_poll_mints_cookie_ballots_up_to_the_cap_and_no_further() {
 }
 
 #[test]
+fn the_projector_shows_aggregates_and_never_a_sentence() {
+    let server = start();
+    let gate = server.gate.to_string();
+
+    let push = serde_json::json!({
+        "spec": {
+            "title": "Week 3 check",
+            "questions": [
+                {
+                    "id": "region",
+                    "kind": "choice",
+                    "options": [
+                        {"id": "amygdala", "label": "Amygdala"},
+                        {"id": "hippocampus", "label": "Hippocampus"},
+                    ],
+                },
+                {"id": "why", "prompt": "Say why.", "kind": "text", "max_length": 120},
+            ],
+            "results": {"show": "creator"},
+            "audience": {"kind": "link", "max_ballots": 10},
+        },
+        "participants": [],
+    });
+    let reply = Request::new("PUT", "/v1/instruments/book/polls/lecture", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push.to_string())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let vote_url = reply.json()["url"].as_str().unwrap().to_string();
+    let vote_path = &vote_url[vote_url.find("/p/").unwrap()..];
+    let screen_url = reply.json()["screen_url"].as_str().unwrap().to_string();
+    let screen_path = &screen_url[screen_url.find("/p/").unwrap()..];
+
+    // The capability is the authority: a wrong token is nothing.
+    let wrong = screen_path.rsplit_once('/').unwrap().0.to_string() + "/not-the-token";
+    assert_eq!(server.get(server.gate, &wrong).status, 404);
+
+    // Before any vote: the join line and an honest zero.
+    let page = server.get(server.gate, screen_path);
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("answer at"), "{}", page.body);
+    assert!(page.body.contains("0 answers so far"), "{}", page.body);
+    assert!(page.body.contains("screen.js"), "{}", page.body);
+
+    // Three phones: two share a word, one troll says something once.
+    for body in [
+        "q_region=amygdala&q_why=more+amygdala+worked+examples",
+        "q_region=hippocampus&q_why=the+amygdala+examples+helped",
+        "q_region=amygdala&q_why=xyzzy",
+    ] {
+        let reply = Request::new("POST", vote_path, &gate)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(body.to_string())
+            .send(server.gate);
+        assert_eq!(reply.status, 303, "{}", reply.body);
+    }
+
+    // The phones see nothing: `show = "creator"` holds for voters even
+    // while the wall is live.
+    let live = server.get(server.gate, &format!("{vote_path}/results.json"));
+    assert!(live.json()["results"].is_null(), "{}", live.body);
+
+    // The wall sees the tallies and the recurring words — never the
+    // sentence, never the one-ballot word.
+    let data = server.get(server.gate, &format!("{screen_path}/data.json"));
+    assert_eq!(data.status, 200, "{}", data.body);
+    let json = data.json();
+    assert_eq!(json["count"], "3 answers so far");
+    let region = json["results"]["region"].as_str().unwrap();
+    assert!(region.contains("<meter max=\"3\" value=\"2\">"), "{region}");
+    let why = json["results"]["why"].as_str().unwrap();
+    assert!(why.contains("amygdala") && why.contains("examples"), "{why}");
+    assert!(!why.contains("xyzzy"), "one voice is not a cloud: {why}");
+    assert!(!why.contains("prose-answers"), "no sentences on the wall: {why}");
+    assert!(why.contains("3 written answers"), "{why}");
+}
+
+#[test]
 fn a_spec_push_refuses_the_shapes_the_design_names() {
     let server = start();
     let gate = server.gate.to_string();

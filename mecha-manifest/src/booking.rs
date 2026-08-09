@@ -73,13 +73,14 @@ pub struct BookingPage {
 }
 
 impl BookingPage {
-    pub fn assets(&self) -> [(&'static str, &str); 5] {
+    pub fn assets(&self) -> [(&'static str, &str); 6] {
         [
             ("booking.css", &self.style),
             ("form.js", FORM_JS),
             ("booking.js", BOOKING_JS),
             ("poll.js", POLL_JS),
             ("survey.js", crate::poll_render::SURVEY_JS),
+            ("screen.js", crate::poll_render::SCREEN_JS),
         ]
     }
 }
@@ -87,7 +88,7 @@ impl BookingPage {
 /// The page's assets for a theme, independent of any render — what a server
 /// answers asset requests from, where [`BookingPage::assets`] serves whoever
 /// is writing a rendered bundle to disk.
-pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 5] {
+pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 6] {
     [
         (
             "booking.css",
@@ -103,6 +104,7 @@ pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 5] {
         ("booking.js", BOOKING_JS.to_string()),
         ("poll.js", POLL_JS.to_string()),
         ("survey.js", crate::poll_render::SURVEY_JS.to_string()),
+        ("screen.js", crate::poll_render::SCREEN_JS.to_string()),
     ]
 }
 
@@ -1195,7 +1197,7 @@ mod tests {
         let names: Vec<&str> = page.assets().iter().map(|(n, _)| *n).collect();
         assert_eq!(
             names,
-            ["booking.css", "form.js", "booking.js", "poll.js", "survey.js"]
+            ["booking.css", "form.js", "booking.js", "poll.js", "survey.js", "screen.js"]
         );
     }
 
