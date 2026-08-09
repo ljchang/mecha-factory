@@ -15,10 +15,9 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use mecha_manifest::{
-    ballot_from_form, poll_page, survey_page, tally_choice, tally_likert, tally_ranking, tally_vas,
-    validate_ballot, Answer, Ballot, Identity, PollAnswer, PollCandidate, PollPageOptions,
-    PollSpec, QuestionDisplay, QuestionKind, QuestionResults, Show, SurveyPageOptions,
-    DEFAULT_SUPPRESSION_FLOOR,
+    ballot_from_form, build_results, poll_page, survey_page, validate_ballot, Ballot, Identity,
+    PageMode, PollAnswer, PollCandidate, PollPageOptions, PollSpec, QuestionResults, Show,
+    SurveyPageOptions,
 };
 
 use super::{v1, Failure, Shared};
@@ -270,8 +269,7 @@ fn render_general(
         notice,
         show: spec.results.show,
         identity: view.identity,
-        live: true,
-        demo: false,
+        mode: PageMode::Served,
         resolution: poll.resolution.clone(),
     };
     let page = survey_page(spec, &view.mine, results.as_deref(), &options);
@@ -691,120 +689,6 @@ pub async fn link_results(
     };
     let viewer = link_viewer(&app, &headers, &handle, &poll);
     results_payload(&app, &poll, &spec, viewer.as_deref(), None)
-}
-
-/// Per-question results under the identity policy: tallies always, the
-/// small-n suppression on anonymous polls, names only under `named`.
-/// `projected` is the projector's stricter cut: prose becomes a
-/// two-ballot-minimum word cloud plus a count, and nobody's sentence
-/// reaches the wall.
-fn build_results(
-    spec: &PollSpec,
-    ballots: &[(String, Ballot)],
-    identity: Identity,
-    open: bool,
-    projected: bool,
-) -> Vec<QuestionResults> {
-    spec.questions
-        .iter()
-        .map(|question| {
-            let named: Vec<(&str, &Answer)> = ballots
-                .iter()
-                .filter_map(|(name, ballot)| ballot.get(&question.id).map(|a| (name.as_str(), a)))
-                .collect();
-            let answers: Vec<Answer> = named.iter().map(|(_, a)| (*a).clone()).collect();
-            let n = answers.len();
-            let display =
-                if identity == Identity::Anonymous && n > 0 && n < DEFAULT_SUPPRESSION_FLOOR {
-                    QuestionDisplay::Suppressed { n }
-                } else {
-                    match &question.kind {
-                        QuestionKind::Choice { options, .. } => QuestionDisplay::Choice {
-                            tally: tally_choice(options, &answers),
-                        },
-                        QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
-                            tally: tally_ranking(options, &answers),
-                            complete: !open,
-                        },
-                        QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
-                            tally: tally_likert(*points, &answers),
-                        },
-                        QuestionKind::Vas { .. } => QuestionDisplay::Vas {
-                            tally: tally_vas(&answers),
-                        },
-                        QuestionKind::Text { .. } => {
-                            let texts: Vec<&str> = named
-                                .iter()
-                                .filter_map(|(_, answer)| match answer {
-                                    Answer::Text(text) => Some(text.as_str()),
-                                    _ => None,
-                                })
-                                .collect();
-                            // Two ballots make a word: one voice can never
-                            // set the cloud's largest type, projected or not.
-                            let cloud = mecha_manifest::word_cloud(&texts, 2);
-                            if projected {
-                                QuestionDisplay::TextCloud {
-                                    n: texts.len(),
-                                    cloud,
-                                }
-                            } else {
-                                QuestionDisplay::Text {
-                                    entries: named
-                                        .iter()
-                                        .filter_map(|(name, answer)| match answer {
-                                            Answer::Text(text) => Some((
-                                                (identity == Identity::Named)
-                                                    .then(|| (*name).to_string()),
-                                                text.clone(),
-                                            )),
-                                            _ => None,
-                                        })
-                                        .collect(),
-                                    cloud,
-                                }
-                            }
-                        }
-                        // A times question never reaches the general path:
-                        // `put_poll` refuses it in a spec, and legacy rows have
-                        // no spec at all. Nothing to draw is the honest render
-                        // if one ever does.
-                        QuestionKind::Times { .. } => QuestionDisplay::Text {
-                            entries: Vec::new(),
-                            cloud: Vec::new(),
-                        },
-                    }
-                };
-            let voters = (identity == Identity::Named
-                && !matches!(question.kind, QuestionKind::Text { .. })
-                && !matches!(display, QuestionDisplay::Suppressed { .. }))
-            .then(|| {
-                named
-                    .iter()
-                    .map(|(name, answer)| ((*name).to_string(), answer_words(question, answer)))
-                    .collect()
-            });
-            QuestionResults { display, voters }
-        })
-        .collect()
-}
-
-/// One stored answer, in the option's own words where it has any.
-fn answer_words(question: &mecha_manifest::PollQuestion, answer: &Answer) -> String {
-    let label = |id: &String| {
-        question
-            .options()
-            .iter()
-            .find(|o| &o.id == id)
-            .map(|o| o.label.clone())
-            .unwrap_or_else(|| id.clone())
-    };
-    match answer {
-        Answer::Choice(ids) => ids.iter().map(label).collect::<Vec<_>>().join(", "),
-        Answer::Ranking(ids) => ids.iter().map(label).collect::<Vec<_>>().join(" › "),
-        Answer::Likert(v) | Answer::Vas(v) => v.to_string(),
-        Answer::Text(_) => String::new(), // rendered inline, never here
-    }
 }
 
 #[derive(serde::Deserialize)]

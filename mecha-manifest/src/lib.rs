@@ -89,8 +89,9 @@ pub use poll::{
     DEFAULT_SUPPRESSION_FLOOR, MAX_TEXT_ANSWER,
 };
 pub use poll_render::{
-    ballot_from_form, intro_line, promise_line, results_fragments, screen_count_line, screen_page,
-    survey_page, QuestionDisplay, QuestionResults, ScreenPageOptions, SurveyPageOptions,
+    answer_words, ballot_from_form, build_results, intro_line, promise_line, results_fragments,
+    screen_count_line, screen_page, survey_page, PageMode, QuestionDisplay, QuestionResults,
+    ScreenPageOptions, SurveyPageOptions,
 };
 pub use request::{
     reminder_minutes, valid_id, Acknowledgment, BookingPolicy, Field, FieldKind, RequestKind,
