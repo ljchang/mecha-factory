@@ -286,8 +286,13 @@ enum PollsAction {
         #[arg(long, required_unless_present = "spec")]
         duration: Option<u32>,
         /// `Name=email`, repeatable.
-        #[arg(long = "participant", required = true)]
+        #[arg(long = "participant")]
         participants: Vec<String>,
+        /// A `name,email` CSV — the class-section shape. Rows join any
+        /// `--participant` flags; `links.csv` lands beside the record for
+        /// the LMS mail-merge. A `link`-audience spec takes neither.
+        #[arg(long)]
+        roster: Option<PathBuf>,
         /// RFC 3339. After this, answers freeze on their own.
         #[arg(long)]
         deadline: Option<String>,
@@ -1592,6 +1597,7 @@ fn polls_command(action: PollsAction) -> Result<()> {
             title,
             duration,
             participants,
+            roster,
             deadline,
             max_candidates,
         } => {
@@ -1606,6 +1612,17 @@ fn polls_command(action: PollsAction) -> Result<()> {
                 );
                 named.push((name.trim().to_string(), email.trim().to_string()));
             }
+            if let Some(roster_path) = &roster {
+                let text = std::fs::read_to_string(roster_path)
+                    .with_context(|| format!("reading {}", roster_path.display()))?;
+                named.extend(mecha_factory_publish::poll_export::parse_roster(&text)?);
+            }
+            {
+                let mut seen = std::collections::BTreeSet::new();
+                for (name, _) in &named {
+                    anyhow::ensure!(seen.insert(name.as_str()), "`{name}` appears twice");
+                }
+            }
 
             // The general poll: the spec is the whole question, validated
             // here with the same `check` the box will run again.
@@ -1614,11 +1631,38 @@ fn polls_command(action: PollsAction) -> Result<()> {
                     .with_context(|| format!("reading {}", spec_path.display()))?;
                 let poll_spec = mecha_manifest::PollSpec::from_toml(&text)
                     .with_context(|| format!("{}", spec_path.display()))?;
+                let link = poll_spec.audience.kind == mecha_manifest::AudienceKind::Link;
+                if link {
+                    anyhow::ensure!(
+                        named.is_empty(),
+                        "a link poll has no roster — the shared URL is the door; \
+                         drop --participant/--roster"
+                    );
+                } else {
+                    anyhow::ensure!(
+                        !named.is_empty(),
+                        "a roster poll needs --participant Name=email (or --roster file.csv)"
+                    );
+                }
                 let payload = serde_json::json!({
                     "spec": serde_json::to_value(&poll_spec)?,
                     "participants": named.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
                 });
                 let reply = remote()?.poll_create(&instrument, &poll_id, &payload)?;
+                if link {
+                    let url = reply["url"].as_str().unwrap_or("(no url?)");
+                    println!(
+                        "poll `{poll_id}`: {} question(s), open link, capped at {} ballot(s)",
+                        poll_spec.questions.len(),
+                        poll_spec.audience.max_ballots.unwrap_or(0)
+                    );
+                    println!("  {url}");
+                    println!(
+                        "\nOne vote per person is a cookie and an honor system — the page \
+                         says so. Post the link where the audience already is."
+                    );
+                    return Ok(());
+                }
                 let urls = reply["urls"].as_object().cloned().unwrap_or_default();
                 let dir = remote::Remote::dir()?.join("polls");
                 std::fs::create_dir_all(&dir)?;
@@ -1642,22 +1686,50 @@ fn polls_command(action: PollsAction) -> Result<()> {
                 });
                 let path = dir.join(format!("{poll_id}.json"));
                 std::fs::write(&path, serde_json::to_string_pretty(&record)?)?;
+                // The class-section artifact: what an LMS mail-merge eats.
+                let links_path = dir.join(format!("{poll_id}.links.csv"));
+                let mut links = mecha_factory_publish::poll_export::csv_line(&[
+                    "name".into(),
+                    "email".into(),
+                    "url".into(),
+                ]);
+                for (name, email) in &named {
+                    let url = urls
+                        .get(name.as_str())
+                        .and_then(|u| u.as_str())
+                        .unwrap_or_default();
+                    links.push_str(&mecha_factory_publish::poll_export::csv_line(&[
+                        name.clone(),
+                        email.clone(),
+                        url.to_string(),
+                    ]));
+                }
+                std::fs::write(&links_path, links)?;
                 println!(
                     "poll `{poll_id}`: {} question(s), {} participant(s)",
                     poll_spec.questions.len(),
                     named.len()
                 );
-                for (name, email) in &named {
-                    let url = urls
-                        .get(name.as_str())
-                        .and_then(|u| u.as_str())
-                        .unwrap_or("(no url?)");
-                    println!("  {name} <{email}>\n    {url}");
+                if named.len() <= 12 {
+                    for (name, email) in &named {
+                        let url = urls
+                            .get(name.as_str())
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("(no url?)");
+                        println!("  {name} <{email}>\n    {url}");
+                    }
+                } else {
+                    println!("  (a class section — the links live in the CSV)");
                 }
                 println!("\nrecord: {}", path.display());
+                println!("links:  {}  ← one row per person, for the mail-merge", links_path.display());
                 println!("Send each person their own link — it is their identity on the poll.");
                 return Ok(());
             }
+            anyhow::ensure!(
+                !named.is_empty(),
+                "a times poll needs --participant Name=email (or --roster file.csv)"
+            );
 
             let (Some(policy), Some(title), Some(duration)) = (policy, title, duration) else {
                 bail!("clap enforces --policy/--title/--duration unless --spec is given");

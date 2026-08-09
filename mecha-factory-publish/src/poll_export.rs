@@ -81,9 +81,79 @@ fn encode_cell(cell: &str) -> String {
     }
 }
 
+/// One CSV line, hardened and quoted like the export's own rows — shared
+/// so `links.csv` (name,email,url out) speaks the same dialect ballots do.
+pub fn csv_line(cells: &[String]) -> String {
+    let mut out = String::new();
+    push_row(&mut out, cells);
+    out
+}
+
+/// `--roster students.csv`: `name,email` per line, a header line tolerated
+/// (recognised by its email column not holding an `@`), blanks skipped.
+/// Quoted names with commas are supported; nothing fancier — this is the
+/// instructor's own file, and a shape it doesn't have is an error worth
+/// hearing about, not guessing around.
+pub fn parse_roster(text: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let mut rows = Vec::new();
+    for (number, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let (name, email) = split_roster_line(line)
+            .ok_or_else(|| anyhow::anyhow!("roster line {}: not name,email", number + 1))?;
+        if !email.contains('@') {
+            if number == 0 {
+                continue; // the header
+            }
+            anyhow::bail!("roster line {}: `{email}` is not an address", number + 1);
+        }
+        if name.is_empty() {
+            anyhow::bail!("roster line {}: an empty name", number + 1);
+        }
+        rows.push((name, email));
+    }
+    anyhow::ensure!(!rows.is_empty(), "the roster holds no name,email rows");
+    Ok(rows)
+}
+
+fn split_roster_line(line: &str) -> Option<(String, String)> {
+    if let Some(rest) = line.strip_prefix('"') {
+        let (name, rest) = rest.split_once('"')?;
+        let email = rest.trim().strip_prefix(',')?.trim();
+        return Some((name.trim().to_string(), email.to_string()));
+    }
+    let (name, email) = line.split_once(',')?;
+    Some((name.trim().to_string(), email.trim().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_roster_tolerates_a_header_quotes_and_blank_lines() {
+        let rows = parse_roster(
+            "name,email\n\n\"Chang, Luke\",luke@example.edu\nPriya,priya@example.edu\n",
+        )
+        .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                ("Chang, Luke".to_string(), "luke@example.edu".to_string()),
+                ("Priya".to_string(), "priya@example.edu".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_bad_address_names_its_line() {
+        let err = parse_roster("name,email\nPriya,not-an-address\n")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("line 2"), "{err}");
+    }
 
     fn spec() -> PollSpec {
         PollSpec::from_toml(

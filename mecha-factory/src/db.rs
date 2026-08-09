@@ -2037,6 +2037,39 @@ impl Db {
         })
     }
 
+    /// Mint one more participant — the link audience's first save. The cap
+    /// is checked in the same transaction that inserts, so two racing
+    /// first saves cannot both be ballot number `max`; refusal is an
+    /// answer (`false`), not an error, because a full poll is a state the
+    /// page explains.
+    pub fn poll_mint_ballot(
+        &self,
+        user_id: &str,
+        poll_id: &str,
+        name: &str,
+        token_hash: &str,
+        max: u32,
+    ) -> Result<bool> {
+        self.with(|conn| {
+            let tx = conn.unchecked_transaction()?;
+            let count: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM poll_participants WHERE user_id = ?1 AND poll_id = ?2",
+                params![user_id, poll_id],
+                |r| r.get(0),
+            )?;
+            if count >= i64::from(max) {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO poll_participants (user_id, poll_id, name, token_hash) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![user_id, poll_id, name, token_hash],
+            )?;
+            tx.commit()?;
+            Ok(true)
+        })
+    }
+
     pub fn poll_get(&self, user_id: &str, id: &str) -> Result<Option<PollRow>> {
         self.with(|conn| {
             Ok(conn
