@@ -891,10 +891,9 @@ pub async fn put_poll(
         .collect();
     // A link poll's one URL is the door itself — no tokens minted here;
     // ballots mint their own capability at first save.
-    let link_url = link_audience
-        .then(|| format!("{base}/p/{}/{poll_id}", user.handle));
-    let screen_url = screen_token
-        .map(|token| format!("{base}/p/{}/{poll_id}/screen/{token}", user.handle));
+    let link_url = link_audience.then(|| format!("{base}/p/{}/{poll_id}", user.handle));
+    let screen_url =
+        screen_token.map(|token| format!("{base}/p/{}/{poll_id}/screen/{token}", user.handle));
     tracing::info!(%poll_id, participants = urls.len(), link = link_audience, "poll created");
     (
         StatusCode::OK,
@@ -938,8 +937,7 @@ pub async fn get_poll(
         }),
         Err(e) => {
             tracing::error!(%poll_id, error = %e, "unreadable poll spec");
-            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     };
     let mut participants = app
@@ -1019,14 +1017,17 @@ pub async fn close_poll(
         #[serde(default)]
         resolution: Option<String>,
     }
-    let close: CloseBody = match serde_json::from_str(if body.is_empty() { "{}" } else { &body })
-    {
+    let close: CloseBody = match serde_json::from_str(if body.is_empty() { "{}" } else { &body }) {
         Ok(close) => close,
         Err(e) => {
             return Failure::json(StatusCode::BAD_REQUEST, format!("close: {e}")).into_response()
         }
     };
-    let resolution = close.resolution.as_deref().map(str::trim).filter(|r| !r.is_empty());
+    let resolution = close
+        .resolution
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty());
     if resolution.is_some_and(|r| r.len() > 2000) {
         return Failure::json(StatusCode::BAD_REQUEST, "resolution over 2000 characters")
             .into_response();

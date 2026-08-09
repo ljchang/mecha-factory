@@ -1077,52 +1077,86 @@ fn survey_pages(
             show: Show::AfterClose,
             identity: Identity::Named,
             live: false,
-            resolution: Some(
-                "Replication it is — projects due the last week of classes.".into(),
-            ),
+            resolution: Some("Replication it is — projects due the last week of classes.".into()),
         },
     );
 
-    vec![("survey.html", form.html), ("survey.closed.html", closed.html)]
+    vec![
+        ("survey.html", form.html),
+        ("survey.closed.html", closed.html),
+    ]
 }
 
 /// Five specimen ballots, tallied by the same pure functions the box and
 /// home run — invented numbers would document tallies nobody computes.
 fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
     let ballots: Vec<(&str, Ballot)> = [
-        ("Priya", vec![
-            ("paper", Answer::Choice(vec!["world-models".into()])),
-            ("order", Answer::Ranking(vec!["reanalysis".into(), "replication".into()])),
-            ("pace", Answer::Likert(4)),
-            ("confidence", Answer::Vas(72)),
-            ("keep", Answer::Text("The live coding walkthroughs.".into())),
-        ]),
-        ("Tal", vec![
-            ("paper", Answer::Choice(vec!["affect-probes".into()])),
-            ("order", Answer::Ranking(vec!["replication".into(), "proposal".into()])),
-            ("pace", Answer::Likert(2)),
-            ("confidence", Answer::Vas(41)),
-            ("keep", Answer::Text("Problem sets that mirror the coding walkthroughs.".into())),
-        ]),
-        ("Noor", vec![
-            ("paper", Answer::Choice(vec!["world-models".into()])),
-            ("order", Answer::Ranking(vec!["reanalysis".into(), "proposal".into()])),
-            ("pace", Answer::Likert(4)),
-            ("confidence", Answer::Vas(88)),
-        ]),
-        ("Sam", vec![
-            ("paper", Answer::Choice(vec!["affect-probes".into()])),
-            ("order", Answer::Ranking(vec!["proposal".into()])),
-            ("pace", Answer::Likert(5)),
-            ("confidence", Answer::Vas(64)),
-        ]),
-        ("Ida", vec![
-            ("paper", Answer::Choice(vec!["world-models".into()])),
-            ("order", Answer::Ranking(vec!["replication".into(), "reanalysis".into()])),
-            ("pace", Answer::Likert(3)),
-            ("confidence", Answer::Vas(55)),
-            ("keep", Answer::Text("Office hours right after the coding section.".into())),
-        ]),
+        (
+            "Priya",
+            vec![
+                ("paper", Answer::Choice(vec!["world-models".into()])),
+                (
+                    "order",
+                    Answer::Ranking(vec!["reanalysis".into(), "replication".into()]),
+                ),
+                ("pace", Answer::Likert(4)),
+                ("confidence", Answer::Vas(72)),
+                ("keep", Answer::Text("The live coding walkthroughs.".into())),
+            ],
+        ),
+        (
+            "Tal",
+            vec![
+                ("paper", Answer::Choice(vec!["affect-probes".into()])),
+                (
+                    "order",
+                    Answer::Ranking(vec!["replication".into(), "proposal".into()]),
+                ),
+                ("pace", Answer::Likert(2)),
+                ("confidence", Answer::Vas(41)),
+                (
+                    "keep",
+                    Answer::Text("Problem sets that mirror the coding walkthroughs.".into()),
+                ),
+            ],
+        ),
+        (
+            "Noor",
+            vec![
+                ("paper", Answer::Choice(vec!["world-models".into()])),
+                (
+                    "order",
+                    Answer::Ranking(vec!["reanalysis".into(), "proposal".into()]),
+                ),
+                ("pace", Answer::Likert(4)),
+                ("confidence", Answer::Vas(88)),
+            ],
+        ),
+        (
+            "Sam",
+            vec![
+                ("paper", Answer::Choice(vec!["affect-probes".into()])),
+                ("order", Answer::Ranking(vec!["proposal".into()])),
+                ("pace", Answer::Likert(5)),
+                ("confidence", Answer::Vas(64)),
+            ],
+        ),
+        (
+            "Ida",
+            vec![
+                ("paper", Answer::Choice(vec!["world-models".into()])),
+                (
+                    "order",
+                    Answer::Ranking(vec!["replication".into(), "reanalysis".into()]),
+                ),
+                ("pace", Answer::Likert(3)),
+                ("confidence", Answer::Vas(55)),
+                (
+                    "keep",
+                    Answer::Text("Office hours right after the coding section.".into()),
+                ),
+            ],
+        ),
     ]
     .into_iter()
     .map(|(name, answers)| {

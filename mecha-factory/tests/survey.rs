@@ -91,7 +91,11 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
     let page = server.get(server.gate, &format!("{priya_path}?saved=1"));
     assert!(page.body.contains("Saved."), "{}", page.body);
     assert!(page.body.contains("tallybar"), "{}", page.body);
-    assert!(page.body.contains("<meter max=\"1\" value=\"1\">"), "{}", page.body);
+    assert!(
+        page.body.contains("<meter max=\"1\" value=\"1\">"),
+        "{}",
+        page.body
+    );
     assert!(page.body.contains("better ablations"), "{}", page.body);
     assert!(page.body.contains("— Priya"), "{}", page.body);
 
@@ -99,7 +103,10 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
     let page = server.get(server.gate, tal_path);
     assert!(page.body.contains("1 of 2 have answered"), "{}", page.body);
     assert!(!page.body.contains("tallybar"), "{}", page.body);
-    assert!(!page.body.contains("better ablations"), "hidden means absent");
+    assert!(
+        !page.body.contains("better ablations"),
+        "hidden means absent"
+    );
 
     // The live endpoint answers each viewer by the same policy: Priya's
     // carries the fragments, Tal's carries null — and both say no-store,
@@ -113,7 +120,10 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
     let fragment = data["results"]["paper"].as_str().unwrap();
     assert!(fragment.contains("<meter"), "{fragment}");
     assert!(
-        data["results"]["why"].as_str().unwrap().contains("better ablations"),
+        data["results"]["why"]
+            .as_str()
+            .unwrap()
+            .contains("better ablations"),
         "{}",
         data["results"]
     );
@@ -125,7 +135,11 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
     let page = server.get(server.gate, priya_path);
     assert!(page.body.contains("data-live=\"1\""), "{}", page.body);
     assert!(page.body.contains("survey.js"), "{}", page.body);
-    assert!(page.body.contains("id=\"results-q-paper\""), "{}", page.body);
+    assert!(
+        page.body.contains("id=\"results-q-paper\""),
+        "{}",
+        page.body
+    );
     let asset = server.get(server.gate, "/p/a/survey.js");
     assert_eq!(asset.status, 200);
     assert!(asset.body.contains("results.json"), "{}", asset.body);
@@ -171,11 +185,18 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
         .auth(&server.key(Scope::Slots))
         .send(server.gate);
     assert!(
-        reply.json()["resolution"].as_str().unwrap().contains("Thursday"),
+        reply.json()["resolution"]
+            .as_str()
+            .unwrap()
+            .contains("Thursday"),
         "{}",
         reply.body
     );
-    assert!(!page.body.contains("<button type=\"submit\""), "{}", page.body);
+    assert!(
+        !page.body.contains("<button type=\"submit\""),
+        "{}",
+        page.body
+    );
     let reply = Request::new("POST", priya_path, &gate)
         .header("Content-Type", "application/x-www-form-urlencoded")
         .header("Accept", "application/json")
@@ -226,7 +247,11 @@ fn an_anonymous_poll_suppresses_small_cells_and_never_names_anyone() {
 
     let reply = Request::new("PUT", "/v1/instruments/book/polls/pulse", &gate)
         .auth(&server.key(Scope::Slots))
-        .body(spec_push("live", Some("anonymous"), &["Priya", "Tal", "Noor"]))
+        .body(spec_push(
+            "live",
+            Some("anonymous"),
+            &["Priya", "Tal", "Noor"],
+        ))
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
     let urls = reply.json()["urls"].clone();
@@ -244,11 +269,7 @@ fn an_anonymous_poll_suppresses_small_cells_and_never_names_anyone() {
     assert_eq!(reply.status, 303, "{}", reply.body);
     let page = server.get(server.gate, &path_of("Tal"));
     assert!(page.body.contains("not to the organizer"), "{}", page.body);
-    assert!(
-        page.body.contains("too few to break down"),
-        "{}",
-        page.body
-    );
+    assert!(page.body.contains("too few to break down"), "{}", page.body);
     assert!(
         !page.body.contains("another transformer"),
         "one anonymous voice is not an aggregate"
@@ -281,7 +302,10 @@ fn an_anonymous_poll_suppresses_small_cells_and_never_names_anyone() {
     let rows = reply.json()["participants"].as_array().unwrap().clone();
     assert_eq!(rows.len(), 3);
     for row in &rows {
-        assert!(row["name"].is_null(), "an anonymous ballot is nameless: {row}");
+        assert!(
+            row["name"].is_null(),
+            "an anonymous ballot is nameless: {row}"
+        );
         assert!(
             row["responded_at"].is_null(),
             "a timestamp is a correlator too: {row}"
@@ -466,9 +490,15 @@ fn the_projector_shows_aggregates_and_never_a_sentence() {
     let region = json["results"]["region"].as_str().unwrap();
     assert!(region.contains("<meter max=\"3\" value=\"2\">"), "{region}");
     let why = json["results"]["why"].as_str().unwrap();
-    assert!(why.contains("amygdala") && why.contains("examples"), "{why}");
+    assert!(
+        why.contains("amygdala") && why.contains("examples"),
+        "{why}"
+    );
     assert!(!why.contains("xyzzy"), "one voice is not a cloud: {why}");
-    assert!(!why.contains("prose-answers"), "no sentences on the wall: {why}");
+    assert!(
+        !why.contains("prose-answers"),
+        "no sentences on the wall: {why}"
+    );
     assert!(why.contains("3 written answers"), "{why}");
 }
 
@@ -487,10 +517,15 @@ fn the_addin_wrapper_declares_its_own_policy_and_fails_toward_the_chart() {
         page.body
     );
     let csp = page.header("content-security-policy").expect("a policy");
-    assert!(csp.contains("script-src 'self' https://appsforoffice.microsoft.com"), "{csp}");
+    assert!(
+        csp.contains("script-src 'self' https://appsforoffice.microsoft.com"),
+        "{csp}"
+    );
     assert!(csp.contains("frame-src 'self'"), "{csp}");
     let elsewhere = server.get(server.gate, "/p/a/booking.css");
-    let gate_csp = elsewhere.header("content-security-policy").expect("a policy");
+    let gate_csp = elsewhere
+        .header("content-security-policy")
+        .expect("a policy");
     assert!(!gate_csp.contains("appsforoffice"), "{gate_csp}");
     // And the gate's own pages may poll their own origin — the connect-src
     // bug that silently killed every live refresh stays fixed.

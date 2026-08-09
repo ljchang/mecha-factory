@@ -43,10 +43,7 @@ fn addin_csp() -> String {
 }
 
 /// `GET /slides/addin` — what the manifest's SourceLocation points at.
-pub async fn page(
-    State(app): State<Shared>,
-    Extension(origin): Extension<Origin>,
-) -> Response {
+pub async fn page(State(app): State<Shared>, Extension(origin): Extension<Origin>) -> Response {
     if let Some(refusal) = v1::not_on_gate(&origin) {
         return refusal;
     }

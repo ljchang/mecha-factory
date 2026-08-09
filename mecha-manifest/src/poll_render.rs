@@ -57,14 +57,25 @@ pub struct QuestionResults {
 
 pub enum QuestionDisplay {
     /// Too few respondents to break down anonymously.
-    Suppressed { n: usize },
-    Choice { tally: ChoiceTally },
-    Likert { tally: LikertTally },
-    Vas { tally: VasTally },
+    Suppressed {
+        n: usize,
+    },
+    Choice {
+        tally: ChoiceTally,
+    },
+    Likert {
+        tally: LikertTally,
+    },
+    Vas {
+        tally: VasTally,
+    },
     /// `complete` when the poll is closed: the IRV rounds render only
     /// then, because rounds on a partial electorate imply a winner one
     /// more ballot can flip. Open polls show first preferences alone.
-    Ranking { tally: RankingTally, complete: bool },
+    Ranking {
+        tally: RankingTally,
+        complete: bool,
+    },
     /// (name when named, the prose), plus the recurring-words cloud drawn
     /// above the listing. Escaped at render like everything.
     Text {
@@ -338,7 +349,9 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
                     } else {
                         ""
                     };
-                    body.push_str(&format!("<option value=\"{rank}\"{selected}>{rank}</option>"));
+                    body.push_str(&format!(
+                        "<option value=\"{rank}\"{selected}>{rank}</option>"
+                    ));
                 }
                 body.push_str(&format!(
                     "</select> <span class=\"optlabel\">{}</span></label>\n",
@@ -427,10 +440,7 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
 /// Every question's results as (question id, HTML fragment) — what
 /// `survey_page` embeds and what the results endpoint answers with, so the
 /// live swap and the full page load are one rendering, not two that agree.
-pub fn results_fragments(
-    spec: &PollSpec,
-    results: &[QuestionResults],
-) -> Vec<(String, String)> {
+pub fn results_fragments(spec: &PollSpec, results: &[QuestionResults]) -> Vec<(String, String)> {
     spec.questions
         .iter()
         .zip(results)
@@ -631,7 +641,10 @@ pub fn ballot_from_form(
                 ..
             } => {
                 let picked: Vec<serde_json::Value> = if *max_choices == 1 {
-                    text_of(&format!("q_{qid}")).into_iter().map(Into::into).collect()
+                    text_of(&format!("q_{qid}"))
+                        .into_iter()
+                        .map(Into::into)
+                        .collect()
                 } else {
                     options
                         .iter()
@@ -1244,7 +1257,9 @@ mod tests {
         let page = survey_page(&spec, &Ballot::new(), None, &options());
         assert!(page.html.contains("Results appear after you answer."));
         assert!(page.html.contains("not to the organizer"));
-        assert!(page.html.contains("Results will appear here after you answer."));
+        assert!(page
+            .html
+            .contains("Results will appear here after you answer."));
         assert!(!page.html.contains("tallybar"));
         // Both widgets render, JS-off complete.
         assert!(page.html.contains("name=\"q_pace\""));
@@ -1288,7 +1303,9 @@ mod tests {
         // The prose is escaped, not interpolated.
         assert!(page.html.contains("More coffee &lt;3"));
         // The cloud buckets by count and keeps the number in text.
-        assert!(page.html.contains("cw5\">coffee<span class=\"count\">3</span>"));
+        assert!(page
+            .html
+            .contains("cw5\">coffee<span class=\"count\">3</span>"));
         assert!(page.html.contains("cw1\">slides"));
     }
 

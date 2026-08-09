@@ -15,10 +15,10 @@ use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use mecha_manifest::{
-    ballot_from_form, poll_page, survey_page, tally_choice, tally_likert, tally_ranking,
-    tally_vas, validate_ballot, Answer, Ballot, Identity, PollAnswer, PollCandidate,
-    PollPageOptions, PollSpec, QuestionDisplay, QuestionKind, QuestionResults, Show,
-    SurveyPageOptions, DEFAULT_SUPPRESSION_FLOOR,
+    ballot_from_form, poll_page, survey_page, tally_choice, tally_likert, tally_ranking, tally_vas,
+    validate_ballot, Answer, Ballot, Identity, PollAnswer, PollCandidate, PollPageOptions,
+    PollSpec, QuestionDisplay, QuestionKind, QuestionResults, Show, SurveyPageOptions,
+    DEFAULT_SUPPRESSION_FLOOR,
 };
 
 use super::{v1, Failure, Shared};
@@ -199,12 +199,7 @@ struct SurveyView {
     total: usize,
 }
 
-fn survey_view(
-    app: &Shared,
-    poll: &PollRow,
-    spec: &PollSpec,
-    viewer: Option<&str>,
-) -> SurveyView {
+fn survey_view(app: &Shared, poll: &PollRow, spec: &PollSpec, viewer: Option<&str>) -> SurveyView {
     let others = app
         .db
         .poll_participants(&poll.user_id, &poll.id)
@@ -309,8 +304,7 @@ pub async fn results(
         Ok(None) => return nothing_here(),
         Err(e) => {
             tracing::error!(poll = %poll.id, error = %e, "unreadable poll spec");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     };
     results_payload(&app, &poll, &spec, Some(&name), Some(&name))
@@ -370,11 +364,7 @@ fn ballot_cookie_name(handle: &str, poll_id: &str) -> String {
     format!("factory-ballot-{handle}-{poll_id}")
 }
 
-fn ballot_cookie(
-    headers: &axum::http::HeaderMap,
-    handle: &str,
-    poll_id: &str,
-) -> Option<String> {
+fn ballot_cookie(headers: &axum::http::HeaderMap, handle: &str, poll_id: &str) -> Option<String> {
     let wanted = ballot_cookie_name(handle, poll_id);
     headers
         .get(header::COOKIE)?
@@ -498,13 +488,10 @@ pub async fn link_answer(
                 Ok(true) if wants_json => StatusCode::NO_CONTENT.into_response(),
                 Ok(true) => see_saved(&handle, &poll_id, None),
                 Ok(false) if wants_json => StatusCode::CONFLICT.into_response(),
-                Ok(false) => {
-                    render_general(&app, &poll, &spec, viewer.as_deref(), None, None)
-                }
+                Ok(false) => render_general(&app, &poll, &spec, viewer.as_deref(), None, None),
                 Err(e) => {
                     tracing::error!(poll = %poll_id, error = %e, "storing answers");
-                    Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                        .into_response()
+                    Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
                 }
             };
         }
@@ -517,7 +504,10 @@ pub async fn link_answer(
     let hash = crate::intake::hash_token(&token);
     let name = format!("b-{}", &hash[..12]);
     let max = spec.audience.max_ballots.unwrap_or(0);
-    match app.db.poll_mint_ballot(&poll.user_id, &poll.id, &name, &hash, max) {
+    match app
+        .db
+        .poll_mint_ballot(&poll.user_id, &poll.id, &name, &hash, max)
+    {
         Ok(true) => {}
         Ok(false) => {
             // Full is a state the page explains, and the cap was the
@@ -537,8 +527,7 @@ pub async fn link_answer(
         }
         Err(e) => {
             tracing::error!(poll = %poll_id, error = %e, "minting a ballot");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     }
     let cookie = super::session_cookie(
@@ -565,10 +554,7 @@ fn see_saved(handle: &str, poll_id: &str, cookie: Option<String>) -> Response {
     match cookie {
         Some(cookie) => (
             StatusCode::SEE_OTHER,
-            [
-                (header::LOCATION, location),
-                (header::SET_COOKIE, cookie),
-            ],
+            [(header::LOCATION, location), (header::SET_COOKIE, cookie)],
         )
             .into_response(),
         None => (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response(),
@@ -627,8 +613,12 @@ pub async fn screen_page(
         return nothing_here();
     };
     let (results, responded, open) = screen_state(&app, &poll, &spec);
-    let join_url = (spec.audience.kind == mecha_manifest::AudienceKind::Link)
-        .then(|| format!("{}/p/{handle}/{poll_id}", app.config.base_url(crate::config::Role::Gate)));
+    let join_url = (spec.audience.kind == mecha_manifest::AudienceKind::Link).then(|| {
+        format!(
+            "{}/p/{handle}/{poll_id}",
+            app.config.base_url(crate::config::Role::Gate)
+        )
+    });
     let page = mecha_manifest::screen_page(
         &spec,
         &results,
@@ -719,84 +709,78 @@ fn build_results(
         .map(|question| {
             let named: Vec<(&str, &Answer)> = ballots
                 .iter()
-                .filter_map(|(name, ballot)| {
-                    ballot.get(&question.id).map(|a| (name.as_str(), a))
-                })
+                .filter_map(|(name, ballot)| ballot.get(&question.id).map(|a| (name.as_str(), a)))
                 .collect();
             let answers: Vec<Answer> = named.iter().map(|(_, a)| (*a).clone()).collect();
             let n = answers.len();
-            let display = if identity == Identity::Anonymous
-                && n > 0
-                && n < DEFAULT_SUPPRESSION_FLOOR
-            {
-                QuestionDisplay::Suppressed { n }
-            } else {
-                match &question.kind {
-                    QuestionKind::Choice { options, .. } => QuestionDisplay::Choice {
-                        tally: tally_choice(options, &answers),
-                    },
-                    QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
-                        tally: tally_ranking(options, &answers),
-                        complete: !open,
-                    },
-                    QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
-                        tally: tally_likert(*points, &answers),
-                    },
-                    QuestionKind::Vas { .. } => QuestionDisplay::Vas {
-                        tally: tally_vas(&answers),
-                    },
-                    QuestionKind::Text { .. } => {
-                        let texts: Vec<&str> = named
-                            .iter()
-                            .filter_map(|(_, answer)| match answer {
-                                Answer::Text(text) => Some(text.as_str()),
-                                _ => None,
-                            })
-                            .collect();
-                        // Two ballots make a word: one voice can never
-                        // set the cloud's largest type, projected or not.
-                        let cloud = mecha_manifest::word_cloud(&texts, 2);
-                        if projected {
-                            QuestionDisplay::TextCloud {
-                                n: texts.len(),
-                                cloud,
-                            }
-                        } else {
-                            QuestionDisplay::Text {
-                                entries: named
-                                    .iter()
-                                    .filter_map(|(name, answer)| match answer {
-                                        Answer::Text(text) => Some((
-                                            (identity == Identity::Named)
-                                                .then(|| (*name).to_string()),
-                                            text.clone(),
-                                        )),
-                                        _ => None,
-                                    })
-                                    .collect(),
-                                cloud,
+            let display =
+                if identity == Identity::Anonymous && n > 0 && n < DEFAULT_SUPPRESSION_FLOOR {
+                    QuestionDisplay::Suppressed { n }
+                } else {
+                    match &question.kind {
+                        QuestionKind::Choice { options, .. } => QuestionDisplay::Choice {
+                            tally: tally_choice(options, &answers),
+                        },
+                        QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
+                            tally: tally_ranking(options, &answers),
+                            complete: !open,
+                        },
+                        QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
+                            tally: tally_likert(*points, &answers),
+                        },
+                        QuestionKind::Vas { .. } => QuestionDisplay::Vas {
+                            tally: tally_vas(&answers),
+                        },
+                        QuestionKind::Text { .. } => {
+                            let texts: Vec<&str> = named
+                                .iter()
+                                .filter_map(|(_, answer)| match answer {
+                                    Answer::Text(text) => Some(text.as_str()),
+                                    _ => None,
+                                })
+                                .collect();
+                            // Two ballots make a word: one voice can never
+                            // set the cloud's largest type, projected or not.
+                            let cloud = mecha_manifest::word_cloud(&texts, 2);
+                            if projected {
+                                QuestionDisplay::TextCloud {
+                                    n: texts.len(),
+                                    cloud,
+                                }
+                            } else {
+                                QuestionDisplay::Text {
+                                    entries: named
+                                        .iter()
+                                        .filter_map(|(name, answer)| match answer {
+                                            Answer::Text(text) => Some((
+                                                (identity == Identity::Named)
+                                                    .then(|| (*name).to_string()),
+                                                text.clone(),
+                                            )),
+                                            _ => None,
+                                        })
+                                        .collect(),
+                                    cloud,
+                                }
                             }
                         }
+                        // A times question never reaches the general path:
+                        // `put_poll` refuses it in a spec, and legacy rows have
+                        // no spec at all. Nothing to draw is the honest render
+                        // if one ever does.
+                        QuestionKind::Times { .. } => QuestionDisplay::Text {
+                            entries: Vec::new(),
+                            cloud: Vec::new(),
+                        },
                     }
-                    // A times question never reaches the general path:
-                    // `put_poll` refuses it in a spec, and legacy rows have
-                    // no spec at all. Nothing to draw is the honest render
-                    // if one ever does.
-                    QuestionKind::Times { .. } => QuestionDisplay::Text {
-                        entries: Vec::new(),
-                        cloud: Vec::new(),
-                    },
-                }
-            };
+                };
             let voters = (identity == Identity::Named
                 && !matches!(question.kind, QuestionKind::Text { .. })
                 && !matches!(display, QuestionDisplay::Suppressed { .. }))
             .then(|| {
                 named
                     .iter()
-                    .map(|(name, answer)| {
-                        ((*name).to_string(), answer_words(question, answer))
-                    })
+                    .map(|(name, answer)| ((*name).to_string(), answer_words(question, answer)))
                     .collect()
             });
             QuestionResults { display, voters }
@@ -927,15 +911,13 @@ pub async fn answer(
                 }
                 Err(e) => {
                     tracing::error!(poll = %poll_id, error = %e, "storing answers");
-                    Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                        .into_response()
+                    Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
                 }
             };
         }
         Err(e) => {
             tracing::error!(poll = %poll.id, error = %e, "unreadable poll spec");
-            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
         }
     }
     let stored: Vec<StoredCandidate> = serde_json::from_str(&poll.candidates).unwrap_or_default();
