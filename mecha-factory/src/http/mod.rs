@@ -25,6 +25,7 @@ pub mod booking;
 pub mod intake;
 pub mod poll;
 pub mod signup;
+pub mod slides;
 pub mod v1;
 pub mod viewer;
 
@@ -238,6 +239,11 @@ pub fn router(app: Shared) -> Router {
             "/p/{handle}/{poll_id}/screen/{token}/data.json",
             get(poll::screen_data),
         )
+        // The PowerPoint content add-in's wrapper: the page the sideloaded
+        // manifest points at. Holds no data — the pasted projector URL is
+        // the capability, and it lives in the deck.
+        .route("/slides/addin", get(slides::page))
+        .route("/slides/addin.js", get(slides::script))
         // GET is a page with a button and POST is the verification, because
         // mail scanners follow GETs — see `intake::confirm_page`.
         .route(

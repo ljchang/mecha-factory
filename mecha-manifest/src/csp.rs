@@ -165,8 +165,15 @@ impl ContentClass {
 ///   `show_when` is unmet. A convenience and never a control: the server
 ///   evaluates the same rules, and a submission that ignores the script is
 ///   refused there.
-/// - **`default-src 'none'` and `connect-src 'none'`** — the form fetches
-///   nothing at runtime and must not start.
+/// - **`default-src 'none'` and `connect-src 'self'`** — a page may ask its
+///   own origin how the world has moved (the booking page's `slots.json`,
+///   the poll pages' `results.json`, the projector's `data.json`) and may
+///   ask nobody else. `'self'` is not an exfiltration surface `'none'` was
+///   closing: `form-action 'self'` already lets bytes POST to this origin,
+///   and this origin is ours. It *was* `'none'` — written when the only
+///   gate pages were forms that fetch nothing — and every live refresh
+///   shipped since was silently dead under it, which no test caught
+///   because `curl` enforces no policy.
 pub fn gate_headers() -> Vec<Header> {
     let csp = [
         "default-src 'none'",
@@ -174,7 +181,7 @@ pub fn gate_headers() -> Vec<Header> {
         "script-src 'self'",
         "img-src 'self' data:",
         "font-src 'self'",
-        "connect-src 'none'",
+        "connect-src 'self'",
         "form-action 'self'",
         "frame-ancestors 'none'",
         "base-uri 'none'",
@@ -217,9 +224,12 @@ mod tests {
             gate.contains("script-src 'self'"),
             "the conditional-field script is ours and same-origin: {gate}"
         );
-        // Narrow everywhere else: a form fetches nothing at runtime.
+        // Narrow everywhere else — with the one live-page allowance: a gate
+        // page may poll its own origin (slots.json, results.json), never
+        // another. `connect-src 'none'` here was the bug that silently
+        // killed every live refresh in a real browser.
         assert!(gate.contains("default-src 'none'"), "{gate}");
-        assert!(gate.contains("connect-src 'none'"), "{gate}");
+        assert!(gate.contains("connect-src 'self'"), "{gate}");
         assert!(gate.contains("frame-ancestors 'none'"), "{gate}");
 
         // And the policy it used to be served under would have blocked both.

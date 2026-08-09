@@ -30,6 +30,7 @@ pub mod remote;
 pub mod render;
 pub mod requests;
 pub mod serve;
+pub mod slides;
 pub mod store;
 pub mod vendor;
 

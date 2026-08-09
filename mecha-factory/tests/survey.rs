@@ -473,6 +473,44 @@ fn the_projector_shows_aggregates_and_never_a_sentence() {
 }
 
 #[test]
+fn the_addin_wrapper_declares_its_own_policy_and_fails_toward_the_chart() {
+    let server = start();
+
+    // The wrapper's CSP is its own: office.js from Microsoft's CDN, frames
+    // from this origin — allowances the gate's form policy rightly refuses
+    // everywhere else, so they must not leak past this route.
+    let page = server.get(server.gate, "/slides/addin");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        page.body.contains("appsforoffice.microsoft.com"),
+        "{}",
+        page.body
+    );
+    let csp = page.header("content-security-policy").expect("a policy");
+    assert!(csp.contains("script-src 'self' https://appsforoffice.microsoft.com"), "{csp}");
+    assert!(csp.contains("frame-src 'self'"), "{csp}");
+    let elsewhere = server.get(server.gate, "/p/a/booking.css");
+    let gate_csp = elsewhere.header("content-security-policy").expect("a policy");
+    assert!(!gate_csp.contains("appsforoffice"), "{gate_csp}");
+    // And the gate's own pages may poll their own origin — the connect-src
+    // bug that silently killed every live refresh stays fixed.
+    assert!(gate_csp.contains("connect-src 'self'"), "{gate_csp}");
+
+    // The script carries the two promises the research names: the deck
+    // stores only a URL, and every failure lands on the live chart.
+    let js = server.get(server.gate, "/slides/addin.js");
+    assert_eq!(js.status, 200);
+    assert!(js.body.contains("getActiveViewAsync"), "{}", js.body);
+    assert!(js.body.contains("ActiveViewChanged"), "{}", js.body);
+    assert!(js.body.contains("saveAsync"), "{}", js.body);
+    assert!(
+        js.body.contains("live in both views"),
+        "the fail-soft is the point: {}",
+        js.body
+    );
+}
+
+#[test]
 fn a_spec_push_refuses_the_shapes_the_design_names() {
     let server = start();
     let gate = server.gate.to_string();
