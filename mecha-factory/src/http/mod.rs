@@ -218,6 +218,16 @@ pub fn router(app: Shared) -> Router {
             "/p/{handle}/{poll_id}/{token}/results.json",
             get(poll::results),
         )
+        // The link audience's shared door: no token in the path — the
+        // browser's cookie is the ballot capability, minted at first save.
+        .route(
+            "/p/{handle}/{poll_id}",
+            get(poll::link_page).post(poll::link_answer),
+        )
+        .route(
+            "/p/{handle}/{poll_id}/results.json",
+            get(poll::link_results),
+        )
         // GET is a page with a button and POST is the verification, because
         // mail scanners follow GETs — see `intake::confirm_page`.
         .route(

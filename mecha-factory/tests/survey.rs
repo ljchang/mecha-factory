@@ -284,6 +284,110 @@ fn an_anonymous_poll_suppresses_small_cells_and_never_names_anyone() {
 }
 
 #[test]
+fn a_link_poll_mints_cookie_ballots_up_to_the_cap_and_no_further() {
+    let server = start();
+    let gate = server.gate.to_string();
+
+    let push = serde_json::json!({
+        "spec": {
+            "title": "Week 3: which brain region?",
+            "questions": [
+                {
+                    "id": "region",
+                    "kind": "choice",
+                    "options": [
+                        {"id": "amygdala", "label": "Amygdala"},
+                        {"id": "hippocampus", "label": "Hippocampus"},
+                    ],
+                },
+            ],
+            "audience": {"kind": "link", "max_ballots": 3},
+        },
+        "participants": [],
+    });
+    let reply = Request::new("PUT", "/v1/instruments/book/polls/quick", &gate)
+        .auth(&server.key(Scope::Slots))
+        .body(push.to_string())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let url = reply.json()["url"].as_str().unwrap().to_string();
+    let path = &url[url.find("/p/").unwrap()..];
+
+    // The shared page: a form, the anonymous promise, nobody greeted.
+    let page = server.get(server.gate, path);
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(!page.body.contains("Hi "), "{}", page.body);
+    assert!(page.body.contains("not to the organizer"), "{}", page.body);
+    assert!(page.body.contains("name=\"q_region\""), "{}", page.body);
+
+    // First save mints the browser its ballot and sets the cookie.
+    let reply = Request::new("POST", path, &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("q_region=amygdala".to_string())
+        .send(server.gate);
+    assert_eq!(reply.status, 303, "{}", reply.body);
+    let set = reply.header("set-cookie").expect("a ballot cookie");
+    assert!(set.contains("factory-ballot-"), "{set}");
+    let cookie = set.split(';').next().unwrap().to_string();
+
+    // The same browser edits its own ballot rather than casting another.
+    let reply = Request::new("POST", path, &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Cookie", &cookie)
+        .header("Accept", "application/json")
+        .body("q_region=hippocampus".to_string())
+        .send(server.gate);
+    assert_eq!(reply.status, 204, "{}", reply.body);
+    let page = Request::new("GET", path, &gate)
+        .header("Cookie", &cookie)
+        .send(server.gate);
+    assert!(
+        page.body.contains("value=\"hippocampus\" checked"),
+        "{}",
+        page.body
+    );
+
+    // Results are the cookie-holder's reveal, not the URL's.
+    let live = Request::new("GET", &format!("{path}/results.json"), &gate)
+        .header("Cookie", &cookie)
+        .send(server.gate);
+    assert!(!live.json()["results"].is_null(), "{}", live.body);
+    let live = server.get(server.gate, &format!("{path}/results.json"));
+    assert!(live.json()["results"].is_null(), "{}", live.body);
+
+    // Two more browsers fill the cap; a fourth is told, not stored.
+    for _ in 0..2 {
+        let reply = Request::new("POST", path, &gate)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body("q_region=amygdala".to_string())
+            .send(server.gate);
+        assert_eq!(reply.status, 303, "{}", reply.body);
+    }
+    let reply = Request::new("POST", path, &gate)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("q_region=amygdala".to_string())
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "told, not redirected: {}", reply.body);
+    assert!(reply.body.contains("response limit"), "{}", reply.body);
+
+    // The store holds exactly the cap, every row nameless.
+    let reply = Request::new("GET", "/v1/instruments/book/polls/quick", &gate)
+        .auth(&server.key(Scope::Slots))
+        .send(server.gate);
+    let rows = reply.json()["participants"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 3);
+    assert!(rows.iter().all(|r| r["name"].is_null()), "{rows:?}");
+
+    // A roster token URL this poll never minted answers nothing.
+    assert_eq!(
+        server
+            .get(server.gate, &format!("{path}/not-a-token"))
+            .status,
+        404
+    );
+}
+
+#[test]
 fn a_spec_push_refuses_the_shapes_the_design_names() {
     let server = start();
     let gate = server.gate.to_string();

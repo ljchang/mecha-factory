@@ -761,11 +761,6 @@ pub async fn put_poll(
             {
                 return bad("a seeded times poll is pushed as candidates, not a spec".into());
             }
-            if spec.audience.kind == mecha_manifest::AudienceKind::Link {
-                return bad(
-                    "link audiences are not served yet — this push takes a roster".into(),
-                );
-            }
             if !push.candidates.is_empty() {
                 return bad("a poll is candidates or a spec, never both".into());
             }
@@ -776,11 +771,23 @@ pub async fn put_poll(
         }
     };
     let stamp = |raw: &str| chrono::DateTime::parse_from_rfc3339(raw);
-    // A class section is a roster too; the tighter times cap stands where a
-    // seeded grid page has to stay readable.
-    let max_participants = if general.is_some() { 400 } else { 50 };
-    if push.participants.is_empty() || push.participants.len() > max_participants {
-        return bad(format!("participants must be 1–{max_participants} names"));
+    let link_audience = general
+        .as_ref()
+        .is_some_and(|s| s.audience.kind == mecha_manifest::AudienceKind::Link);
+    if link_audience {
+        // A link poll's door is the URL; ballots mint themselves at first
+        // save. A roster alongside would be two integrity stories on one
+        // poll, each weakening the other's promise.
+        if !push.participants.is_empty() {
+            return bad("a link poll has no roster — the shared URL is the door".into());
+        }
+    } else {
+        // A class section is a roster too; the tighter times cap stands
+        // where a seeded grid page has to stay readable.
+        let max_participants = if general.is_some() { 400 } else { 50 };
+        if push.participants.is_empty() || push.participants.len() > max_participants {
+            return bad(format!("participants must be 1–{max_participants} names"));
+        }
     }
     if general.is_none() {
         if push.title.trim().is_empty() || push.title.len() > 200 {
@@ -877,13 +884,18 @@ pub async fn put_poll(
             )
         })
         .collect();
-    tracing::info!(%poll_id, participants = urls.len(), "poll created");
+    // A link poll's one URL is the door itself — no tokens minted here;
+    // ballots mint their own capability at first save.
+    let link_url = link_audience
+        .then(|| format!("{base}/p/{}/{poll_id}", user.handle));
+    tracing::info!(%poll_id, participants = urls.len(), link = link_audience, "poll created");
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "poll": poll_id,
             "participants": urls.len(),
             "urls": urls,
+            "url": link_url,
         })),
     )
         .into_response()

@@ -167,7 +167,14 @@ fn render(app: &Shared, poll: &PollRow, participant: &str, notice: Option<String
 fn render_any(app: &Shared, poll: &PollRow, participant: &str, notice: Option<String>) -> Response {
     match poll.general_spec() {
         Ok(None) => render(app, poll, participant, notice),
-        Ok(Some(spec)) => render_general(app, poll, &spec, participant, notice),
+        Ok(Some(spec)) => render_general(
+            app,
+            poll,
+            &spec,
+            Some(participant),
+            Some(participant.to_string()),
+            notice,
+        ),
         Err(e) => {
             tracing::error!(poll = %poll.id, error = %e, "unreadable poll spec");
             Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
@@ -192,7 +199,12 @@ struct SurveyView {
     total: usize,
 }
 
-fn survey_view(app: &Shared, poll: &PollRow, spec: &PollSpec, participant: &str) -> SurveyView {
+fn survey_view(
+    app: &Shared,
+    poll: &PollRow,
+    spec: &PollSpec,
+    viewer: Option<&str>,
+) -> SurveyView {
     let others = app
         .db
         .poll_participants(&poll.user_id, &poll.id)
@@ -204,10 +216,13 @@ fn survey_view(app: &Shared, poll: &PollRow, spec: &PollSpec, participant: &str)
             Some((p.name.clone(), ballot))
         })
         .collect();
-    let mine = ballots
-        .iter()
-        .find(|(name, _)| name == participant)
-        .map(|(_, ballot)| ballot.clone())
+    let mine = viewer
+        .and_then(|viewer| {
+            ballots
+                .iter()
+                .find(|(name, _)| name == viewer)
+                .map(|(_, ballot)| ballot.clone())
+        })
         .unwrap_or_default();
     let open = still_open(poll, chrono::Utc::now());
     let visible = match spec.results.show {
@@ -231,15 +246,17 @@ fn render_general(
     app: &Shared,
     poll: &PollRow,
     spec: &PollSpec,
-    participant: &str,
+    viewer: Option<&str>,
+    greeting: Option<String>,
     notice: Option<String>,
 ) -> Response {
-    let view = survey_view(app, poll, spec, participant);
+    let link = spec.audience.kind == mecha_manifest::AudienceKind::Link;
+    let view = survey_view(app, poll, spec, viewer);
     let results = view
         .visible
         .then(|| build_results(spec, &view.ballots, view.identity, view.open));
     let options = SurveyPageOptions {
-        participant: Some(participant.to_string()),
+        participant: greeting,
         action: String::new(), // POST back to this same URL
         assets: "/p/a/".into(),
         theme: mecha_manifest::Theme::by_name(&app.config.theme),
@@ -252,7 +269,8 @@ fn render_general(
                 .unwrap_or_else(|_| d.to_string())
         }),
         responded: view.responded,
-        total: Some(view.total),
+        // A link poll has no roster, so a denominator would be a guess.
+        total: (!link).then_some(view.total),
         open: view.open,
         notice,
         show: spec.results.show,
@@ -295,11 +313,25 @@ pub async fn results(
                 .into_response();
         }
     };
-    let view = survey_view(&app, &poll, &spec, &name);
+    results_payload(&app, &poll, &spec, Some(&name), Some(&name))
+}
+
+/// The results answer for one viewer — shared by the token route and the
+/// link route, because "what may this viewer see" must have one
+/// implementation however they arrived.
+fn results_payload(
+    app: &Shared,
+    poll: &PollRow,
+    spec: &PollSpec,
+    viewer: Option<&str>,
+    greeting: Option<&str>,
+) -> Response {
+    let link = spec.audience.kind == mecha_manifest::AudienceKind::Link;
+    let view = survey_view(app, poll, spec, viewer);
     let fragments = view.visible.then(|| {
-        let results = build_results(&spec, &view.ballots, view.identity, view.open);
+        let results = build_results(spec, &view.ballots, view.identity, view.open);
         let map: serde_json::Map<String, serde_json::Value> =
-            mecha_manifest::results_fragments(&spec, &results)
+            mecha_manifest::results_fragments(spec, &results)
                 .into_iter()
                 .map(|(qid, html)| (qid, html.into()))
                 .collect();
@@ -313,12 +345,252 @@ pub async fn results(
         ],
         serde_json::json!({
             "open": view.open,
-            "intro": mecha_manifest::intro_line(Some(&name), view.responded, Some(view.total)),
+            "intro": mecha_manifest::intro_line(
+                greeting,
+                view.responded,
+                (!link).then_some(view.total),
+            ),
             "results": fragments,
         })
         .to_string(),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// The link audience: one shared URL, a cookie ballot capability minted at
+// first save, dedup on the honor system and the page says so. Identity is
+// `anonymous` by construction (the spec checker refuses anything else), and
+// the cap was priced at creation: a full poll is a state, not an error.
+// ---------------------------------------------------------------------------
+
+fn ballot_cookie_name(handle: &str, poll_id: &str) -> String {
+    // Per-poll, because one browser may hold ballots on many polls; the
+    // parts are slug-validated, so the name is cookie-safe.
+    format!("factory-ballot-{handle}-{poll_id}")
+}
+
+fn ballot_cookie(
+    headers: &axum::http::HeaderMap,
+    handle: &str,
+    poll_id: &str,
+) -> Option<String> {
+    let wanted = ballot_cookie_name(handle, poll_id);
+    headers
+        .get(header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|pair| pair.trim().split_once('='))
+        .find(|(name, _)| *name == wanted)
+        .map(|(_, value)| value.to_string())
+}
+
+/// Resolve the shared URL: an active handle, a general poll, a link
+/// audience. Anything else — including a roster poll, whose only doors are
+/// its participants' own tokens — is nothing.
+fn resolve_link(app: &Shared, handle: &str, poll_id: &str) -> Option<(PollRow, PollSpec)> {
+    let user = app
+        .db
+        .user_by_handle(handle)
+        .ok()
+        .flatten()
+        .filter(|u| u.active())?;
+    let poll = app.db.poll_get(&user.id, poll_id).ok().flatten()?;
+    let spec = poll.general_spec().ok().flatten()?;
+    (spec.audience.kind == mecha_manifest::AudienceKind::Link).then_some((poll, spec))
+}
+
+/// The ballot this browser's cookie names, verified against the store — a
+/// forged cookie is a token that hashes to nothing.
+fn link_viewer(
+    app: &Shared,
+    headers: &axum::http::HeaderMap,
+    handle: &str,
+    poll: &PollRow,
+) -> Option<String> {
+    let token = ballot_cookie(headers, handle, &poll.id)?;
+    let (row, name) = app
+        .db
+        .poll_by_token(&crate::intake::hash_token(&token))
+        .ok()
+        .flatten()?;
+    (row.user_id == poll.user_id && row.id == poll.id).then_some(name)
+}
+
+/// `GET /p/{handle}/{poll_id}` — the shared page. No greeting: nobody
+/// typed a name, and asking for one is the typo'd-duplicate bug returning
+/// as a feature.
+pub async fn link_page(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, poll_id)): Path<(String, String)>,
+    Query(query): Query<SavedQuery>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((poll, spec)) = resolve_link(&app, &handle, &poll_id) else {
+        return nothing_here();
+    };
+    let viewer = link_viewer(&app, &headers, &handle, &poll);
+    let notice = query
+        .saved
+        .map(|_| "Saved. You can change your answers any time until the poll closes.".to_string());
+    render_general(&app, &poll, &spec, viewer.as_deref(), None, notice)
+}
+
+/// `POST /p/{handle}/{poll_id}` — a ballot. First save mints the browser
+/// its capability (inside the cap, atomically) and sets the cookie; later
+/// saves replace that ballot, exactly as a roster participant's do.
+pub async fn link_answer(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, poll_id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+    body: String,
+) -> Response {
+    let wants_json = headers
+        .get(header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("application/json"));
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((poll, spec)) = resolve_link(&app, &handle, &poll_id) else {
+        return nothing_here();
+    };
+    let viewer = link_viewer(&app, &headers, &handle, &poll);
+    if !still_open(&poll, chrono::Utc::now()) {
+        if wants_json {
+            return StatusCode::CONFLICT.into_response();
+        }
+        return render_general(&app, &poll, &spec, viewer.as_deref(), None, None);
+    }
+    let raw = super::intake::form_values(&body);
+    let (ballot, errors) = validate_ballot(&spec, &ballot_from_form(&spec, &raw));
+    if !errors.is_empty() {
+        if wants_json {
+            return StatusCode::UNPROCESSABLE_ENTITY.into_response();
+        }
+        let what: Vec<String> = errors
+            .iter()
+            .map(|(question, why)| format!("{question}: {why}"))
+            .collect();
+        return render_general(
+            &app,
+            &poll,
+            &spec,
+            viewer.as_deref(),
+            None,
+            Some(format!("Nothing was saved — {}.", what.join("; "))),
+        );
+    }
+    let payload = serde_json::to_string(&ballot).unwrap_or_else(|_| "{}".into());
+    let now = crate::db::now();
+
+    // A returning browser updates its own ballot through its cookie.
+    if let Some(token) = ballot_cookie(&headers, &handle, &poll.id) {
+        let hash = crate::intake::hash_token(&token);
+        if app.db.poll_by_token(&hash).ok().flatten().is_some() {
+            return match app.db.poll_answer(&hash, &payload, &now) {
+                Ok(true) if wants_json => StatusCode::NO_CONTENT.into_response(),
+                Ok(true) => see_saved(&handle, &poll_id, None),
+                Ok(false) if wants_json => StatusCode::CONFLICT.into_response(),
+                Ok(false) => {
+                    render_general(&app, &poll, &spec, viewer.as_deref(), None, None)
+                }
+                Err(e) => {
+                    tracing::error!(poll = %poll_id, error = %e, "storing answers");
+                    Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                        .into_response()
+                }
+            };
+        }
+        // A cookie that names nothing (a wiped store, a forgery) falls
+        // through to minting a fresh ballot rather than erroring: the
+        // browser is simply new here.
+    }
+
+    let token = crate::intake::mint_token();
+    let hash = crate::intake::hash_token(&token);
+    let name = format!("b-{}", &hash[..12]);
+    let max = spec.audience.max_ballots.unwrap_or(0);
+    match app.db.poll_mint_ballot(&poll.user_id, &poll.id, &name, &hash, max) {
+        Ok(true) => {}
+        Ok(false) => {
+            // Full is a state the page explains, and the cap was the
+            // point: a bot run costs the poll its capacity, never the box
+            // its disk.
+            if wants_json {
+                return StatusCode::CONFLICT.into_response();
+            }
+            return render_general(
+                &app,
+                &poll,
+                &spec,
+                None,
+                None,
+                Some("This poll has reached its response limit.".into()),
+            );
+        }
+        Err(e) => {
+            tracing::error!(poll = %poll_id, error = %e, "minting a ballot");
+            return Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    let cookie = super::session_cookie(
+        &ballot_cookie_name(&handle, &poll_id),
+        &token,
+        // A semester, roughly: long enough to edit next week, no tenure.
+        180 * 24 * 3600,
+    );
+    match app.db.poll_answer(&hash, &payload, &now) {
+        Ok(true) if wants_json => {
+            (StatusCode::NO_CONTENT, [(header::SET_COOKIE, cookie)]).into_response()
+        }
+        Ok(true) => see_saved(&handle, &poll_id, Some(cookie)),
+        Ok(_) => render_general(&app, &poll, &spec, Some(&name), None, None),
+        Err(e) => {
+            tracing::error!(poll = %poll_id, error = %e, "storing answers");
+            Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+fn see_saved(handle: &str, poll_id: &str, cookie: Option<String>) -> Response {
+    let location = format!("/p/{handle}/{poll_id}?saved=1");
+    match cookie {
+        Some(cookie) => (
+            StatusCode::SEE_OTHER,
+            [
+                (header::LOCATION, location),
+                (header::SET_COOKIE, cookie),
+            ],
+        )
+            .into_response(),
+        None => (StatusCode::SEE_OTHER, [(header::LOCATION, location)]).into_response(),
+    }
+}
+
+/// `GET /p/{handle}/{poll_id}/results.json` — the link page's live truth,
+/// the browser's cookie standing in for the path token.
+pub async fn link_results(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((handle, poll_id)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((poll, spec)) = resolve_link(&app, &handle, &poll_id) else {
+        return nothing_here();
+    };
+    let viewer = link_viewer(&app, &headers, &handle, &poll);
+    results_payload(&app, &poll, &spec, viewer.as_deref(), None)
 }
 
 /// Per-question results under the identity policy: tallies always, the
@@ -495,7 +767,8 @@ pub async fn answer(
                     &app,
                     &poll,
                     &spec,
-                    &name,
+                    Some(&name),
+                    Some(name.clone()),
                     Some(format!("Nothing was saved — {}.", what.join("; "))),
                 );
             }
@@ -515,7 +788,9 @@ pub async fn answer(
                 )
                     .into_response(),
                 Ok(false) if wants_json => StatusCode::CONFLICT.into_response(),
-                Ok(false) => render_general(&app, &poll, &spec, &name, None),
+                Ok(false) => {
+                    render_general(&app, &poll, &spec, Some(&name), Some(name.clone()), None)
+                }
                 Err(e) => {
                     tracing::error!(poll = %poll_id, error = %e, "storing answers");
                     Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
