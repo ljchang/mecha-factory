@@ -41,6 +41,10 @@ pub struct SurveyPageOptions {
     /// renders true, a gallery's golden file renders false and fetches
     /// nothing.
     pub live: bool,
+    /// What happened — written at close, rendered above everything, so the
+    /// link people hold answers "so what happened?" instead of dead-ending
+    /// at a frozen tally.
+    pub resolution: Option<String>,
 }
 
 /// One question's results, as the server decided this viewer may see them.
@@ -145,6 +149,12 @@ pub fn survey_page(
         body.push_str(
             "<p class=\"empty\">This poll is closed; answers can no longer change.</p>\n",
         );
+    }
+    if let Some(resolution) = &options.resolution {
+        body.push_str(&format!(
+            "<p class=\"resolution\" role=\"note\"><strong>Outcome:</strong> {}</p>\n",
+            escape_text(resolution)
+        ));
     }
 
     body.push_str(&format!(
@@ -744,6 +754,7 @@ pub(crate) const SURVEY_STRUCTURE: &str = r#"
 .survey .prose-answers li { margin:.4rem 0; }
 .survey .voters { margin:.5rem 0; font-size:.9rem; }
 .survey .promise { font-style:italic; }
+.booking .resolution { border-left:3px solid var(--accent, currentColor); padding:.5rem .75rem; }
 "#;
 
 #[cfg(test)]
@@ -784,6 +795,7 @@ mod tests {
             show: Show::AfterVote,
             identity: Identity::Anonymous,
             live: false,
+            resolution: None,
         }
     }
 

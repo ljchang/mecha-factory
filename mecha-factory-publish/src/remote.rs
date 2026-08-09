@@ -294,11 +294,17 @@ impl Remote {
         .with_context(|| format!("reading poll `{poll_id}`"))
     }
 
-    pub fn poll_close(&self, instrument_id: &str, poll_id: &str) -> Result<serde_json::Value> {
+    pub fn poll_close(
+        &self,
+        instrument_id: &str,
+        poll_id: &str,
+        resolution: Option<&str>,
+    ) -> Result<serde_json::Value> {
+        let body = serde_json::json!({ "resolution": resolution }).to_string();
         self.send(
             "POST",
             &format!("/v1/instruments/{instrument_id}/polls/{poll_id}/close"),
-            Some(b"{}"),
+            Some(body.as_bytes()),
             "application/json",
         )
         .with_context(|| format!("closing poll `{poll_id}`"))

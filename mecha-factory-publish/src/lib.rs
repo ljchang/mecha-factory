@@ -24,6 +24,7 @@
 pub use mecha_manifest::availability;
 pub mod mcp;
 pub mod notebook;
+pub mod poll_export;
 pub mod pyodide;
 pub mod remote;
 pub mod render;

@@ -146,13 +146,28 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
     assert_eq!(priya_row["answers"]["paper"]["kind"], "choice");
     assert_eq!(priya_row["answers"]["paper"]["value"][0], "world-models");
 
-    // Close: read-only page, frozen ballots, the late autosave refused.
+    // Close with an outcome: read-only page that answers "so what
+    // happened?", frozen ballots, the late autosave refused.
     let reply = Request::new("POST", "/v1/instruments/book/polls/paper-vote/close", &gate)
         .auth(&server.key(Scope::Slots))
+        .body(r#"{"resolution": "World models it is — Thursday, usual room."}"#.to_string())
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
     let page = server.get(server.gate, priya_path);
     assert!(page.body.contains("closed"), "{}", page.body);
+    assert!(
+        page.body.contains("Outcome:") && page.body.contains("usual room"),
+        "{}",
+        page.body
+    );
+    let reply = Request::new("GET", "/v1/instruments/book/polls/paper-vote", &gate)
+        .auth(&server.key(Scope::Slots))
+        .send(server.gate);
+    assert!(
+        reply.json()["resolution"].as_str().unwrap().contains("Thursday"),
+        "{}",
+        reply.body
+    );
     assert!(!page.body.contains("<button type=\"submit\""), "{}", page.body);
     let reply = Request::new("POST", priya_path, &gate)
         .header("Content-Type", "application/x-www-form-urlencoded")
@@ -248,6 +263,24 @@ fn an_anonymous_poll_suppresses_small_cells_and_never_names_anyone() {
         "anonymous results carry no names: {}",
         page.body
     );
+
+    // The drain obeys the same policy: ballots ride nameless and without
+    // timestamps, while who-has-answered stays readable from the roster —
+    // here everyone answered, so no row carries a name at all.
+    let reply = Request::new("GET", "/v1/instruments/book/polls/pulse", &gate)
+        .auth(&server.key(Scope::Slots))
+        .send(server.gate);
+    assert_eq!(reply.status, 200);
+    let rows = reply.json()["participants"].as_array().unwrap().clone();
+    assert_eq!(rows.len(), 3);
+    for row in &rows {
+        assert!(row["name"].is_null(), "an anonymous ballot is nameless: {row}");
+        assert!(
+            row["responded_at"].is_null(),
+            "a timestamp is a correlator too: {row}"
+        );
+        assert!(!row["answers"].is_null());
+    }
 }
 
 #[test]

@@ -272,13 +272,19 @@ enum PollsAction {
         instrument: String,
         /// A new poll id (lowercase, digits, -, _).
         poll_id: String,
-        #[arg(long)]
-        policy: PathBuf,
-        #[arg(long)]
-        title: String,
+        /// A general poll's questions, as a TOML spec (POLL-DESIGN.md's
+        /// shape: choice, ranking, likert, vas, text). Replaces the
+        /// availability pipeline entirely — no stdin, no policy, and the
+        /// title and deadline come from the spec.
+        #[arg(long, conflicts_with_all = ["policy", "title", "duration", "deadline", "max_candidates"])]
+        spec: Option<PathBuf>,
+        #[arg(long, required_unless_present = "spec")]
+        policy: Option<PathBuf>,
+        #[arg(long, required_unless_present = "spec")]
+        title: Option<String>,
         /// Meeting length in minutes; must be one the policy offers.
-        #[arg(long)]
-        duration: u32,
+        #[arg(long, required_unless_present = "spec")]
+        duration: Option<u32>,
         /// `Name=email`, repeatable.
         #[arg(long = "participant", required = true)]
         participants: Vec<String>,
@@ -289,17 +295,36 @@ enum PollsAction {
         #[arg(long, default_value_t = 10)]
         max_candidates: usize,
     },
-    /// The tally, ranked, with the auto-book guardrail's verdict.
+    /// The tally: ranked with the auto-book verdict for a times poll,
+    /// per-question tallies for a general one.
     Status {
         instrument: String,
         poll_id: String,
-        /// One JSON object for the agent: candidates, answers, ranked,
-        /// clean_winner.
+        /// One JSON object for the agent. Times polls: candidates, answers,
+        /// ranked, clean_winner. General polls: the spec, per-question
+        /// tallies, and text answers in their own clearly-marked prose
+        /// section — never mixed into the typed one.
         #[arg(long)]
         json: bool,
     },
     /// Freeze the answers.
-    Close { instrument: String, poll_id: String },
+    Close {
+        instrument: String,
+        poll_id: String,
+        /// What happened — rendered at the top of the closed page, so the
+        /// links people hold answer "so what happened?".
+        #[arg(long)]
+        resolution: Option<String>,
+    },
+    /// Ballots as CSV, one row per ballot, one column per question —
+    /// injection-hardened, and nameless when the poll is anonymous.
+    Export {
+        instrument: String,
+        poll_id: String,
+        /// Write here instead of stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1562,6 +1587,7 @@ fn polls_command(action: PollsAction) -> Result<()> {
         PollsAction::Create {
             instrument,
             poll_id,
+            spec,
             policy,
             title,
             duration,
@@ -1569,6 +1595,73 @@ fn polls_command(action: PollsAction) -> Result<()> {
             deadline,
             max_candidates,
         } => {
+            let mut named = Vec::new();
+            for entry in &participants {
+                let Some((name, email)) = entry.split_once('=') else {
+                    bail!("participant `{entry}` is not Name=email");
+                };
+                anyhow::ensure!(
+                    email.contains('@') && !name.trim().is_empty(),
+                    "participant `{entry}` is not Name=email"
+                );
+                named.push((name.trim().to_string(), email.trim().to_string()));
+            }
+
+            // The general poll: the spec is the whole question, validated
+            // here with the same `check` the box will run again.
+            if let Some(spec_path) = spec {
+                let text = std::fs::read_to_string(&spec_path)
+                    .with_context(|| format!("reading {}", spec_path.display()))?;
+                let poll_spec = mecha_manifest::PollSpec::from_toml(&text)
+                    .with_context(|| format!("{}", spec_path.display()))?;
+                let payload = serde_json::json!({
+                    "spec": serde_json::to_value(&poll_spec)?,
+                    "participants": named.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                });
+                let reply = remote()?.poll_create(&instrument, &poll_id, &payload)?;
+                let urls = reply["urls"].as_object().cloned().unwrap_or_default();
+                let dir = remote::Remote::dir()?.join("polls");
+                std::fs::create_dir_all(&dir)?;
+                let record = serde_json::json!({
+                    "instrument": instrument,
+                    "poll_id": poll_id,
+                    "title": poll_spec.title,
+                    "deadline": poll_spec.deadline,
+                    "created_at": chrono::Utc::now()
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                    "participants": named
+                        .iter()
+                        .map(|(name, email)| {
+                            serde_json::json!({
+                                "name": name,
+                                "email": email,
+                                "url": urls.get(name.as_str()),
+                            })
+                        })
+                        .collect::<Vec<_>>(),
+                });
+                let path = dir.join(format!("{poll_id}.json"));
+                std::fs::write(&path, serde_json::to_string_pretty(&record)?)?;
+                println!(
+                    "poll `{poll_id}`: {} question(s), {} participant(s)",
+                    poll_spec.questions.len(),
+                    named.len()
+                );
+                for (name, email) in &named {
+                    let url = urls
+                        .get(name.as_str())
+                        .and_then(|u| u.as_str())
+                        .unwrap_or("(no url?)");
+                    println!("  {name} <{email}>\n    {url}");
+                }
+                println!("\nrecord: {}", path.display());
+                println!("Send each person their own link — it is their identity on the poll.");
+                return Ok(());
+            }
+
+            let (Some(policy), Some(title), Some(duration)) = (policy, title, duration) else {
+                bail!("clap enforces --policy/--title/--duration unless --spec is given");
+            };
             let policy_text = std::fs::read_to_string(&policy)
                 .with_context(|| format!("reading {}", policy.display()))?;
             let policy = availability::Policy::from_toml(&policy_text)
@@ -1578,17 +1671,6 @@ fn polls_command(action: PollsAction) -> Result<()> {
                 "the policy offers {:?}-minute meetings, not {duration}",
                 policy.durations
             );
-            let mut named = Vec::new();
-            for spec in &participants {
-                let Some((name, email)) = spec.split_once('=') else {
-                    bail!("participant `{spec}` is not Name=email");
-                };
-                anyhow::ensure!(
-                    email.contains('@') && !name.trim().is_empty(),
-                    "participant `{spec}` is not Name=email"
-                );
-                named.push((name.trim().to_string(), email.trim().to_string()));
-            }
 
             // The same stdin contract as `slots push`, the same anchoring,
             // the same refusals — a poll seeded from stale or short busy
@@ -1688,6 +1770,9 @@ fn polls_command(action: PollsAction) -> Result<()> {
             json,
         } => {
             let tally = remote()?.poll_status(&instrument, &poll_id)?;
+            if let Some(spec_value) = tally.get("spec").filter(|s| !s.is_null()) {
+                return general_status(&poll_id, &tally, spec_value, json);
+            }
             let candidates: Vec<(chrono::DateTime<chrono::Utc>, u32)> = tally["candidates"]
                 .as_array()
                 .cloned()
@@ -1787,12 +1872,215 @@ fn polls_command(action: PollsAction) -> Result<()> {
         PollsAction::Close {
             instrument,
             poll_id,
+            resolution,
         } => {
-            let reply = remote()?.poll_close(&instrument, &poll_id)?;
+            let reply = remote()?.poll_close(&instrument, &poll_id, resolution.as_deref())?;
             match reply["closed"].as_bool() {
-                Some(true) => println!("poll `{poll_id}` closed; answers are frozen"),
-                _ => println!("poll `{poll_id}` was already closed"),
+                Some(true) => match resolution {
+                    Some(_) => println!(
+                        "poll `{poll_id}` closed; answers are frozen and the \
+                         outcome is on the page"
+                    ),
+                    None => println!("poll `{poll_id}` closed; answers are frozen"),
+                },
+                _ => println!(
+                    "poll `{poll_id}` was already closed — a resolution does \
+                     not overwrite one written at close"
+                ),
             }
+        }
+        PollsAction::Export {
+            instrument,
+            poll_id,
+            out,
+        } => {
+            let tally = remote()?.poll_status(&instrument, &poll_id)?;
+            let spec_value = tally
+                .get("spec")
+                .filter(|s| !s.is_null())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "`{poll_id}` is a seeded times poll — export covers general polls; \
+                         `polls status` prints the ranking"
+                    )
+                })?;
+            let spec: mecha_manifest::PollSpec = serde_json::from_value(spec_value.clone())
+                .context("the box returned an unreadable spec")?;
+            let rows: Vec<mecha_factory_publish::poll_export::ExportRow> = tally["participants"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .iter()
+                .filter_map(|p| {
+                    let ballot: mecha_manifest::Ballot =
+                        serde_json::from_value(p["answers"].clone()).ok()?;
+                    Some((p["name"].as_str().map(str::to_string), ballot))
+                })
+                .collect();
+            let csv = mecha_factory_publish::poll_export::ballots_csv(&spec, &rows);
+            match out {
+                Some(path) => {
+                    std::fs::write(&path, &csv)
+                        .with_context(|| format!("writing {}", path.display()))?;
+                    println!("{} ballot(s) → {}", rows.len(), path.display());
+                }
+                None => print!("{csv}"),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A general poll's status: per-question tallies from the same pure
+/// functions the box renders with, and text answers in their own
+/// clearly-marked prose section — never mixed into the typed one, which is
+/// what the agent-side tooling routes through the quarantine.
+fn general_status(
+    poll_id: &str,
+    tally: &serde_json::Value,
+    spec_value: &serde_json::Value,
+    json: bool,
+) -> Result<()> {
+    use mecha_manifest::{
+        tally_choice, tally_likert, tally_ranking, tally_vas, Answer, Ballot, PollSpec,
+        QuestionKind,
+    };
+    let spec: PollSpec =
+        serde_json::from_value(spec_value.clone()).context("the box returned an unreadable spec")?;
+    let rows = tally["participants"].as_array().cloned().unwrap_or_default();
+    let ballots: Vec<Ballot> = rows
+        .iter()
+        .filter_map(|p| serde_json::from_value::<Ballot>(p["answers"].clone()).ok())
+        .collect();
+    let responded = rows
+        .iter()
+        .filter(|p| !p["answers"].is_null() || !p["responded_at"].is_null())
+        .count();
+    let total = rows.len();
+    let state = tally["state"].as_str().unwrap_or("?");
+    let closed = state == "closed";
+
+    let mut tallies = serde_json::Map::new();
+    let mut prose = serde_json::Map::new();
+    for question in &spec.questions {
+        let answers: Vec<Answer> = ballots
+            .iter()
+            .filter_map(|b| b.get(&question.id).cloned())
+            .collect();
+        let value = match &question.kind {
+            QuestionKind::Choice { options, .. } => {
+                serde_json::to_value(tally_choice(options, &answers))?
+            }
+            QuestionKind::Ranking { options } => {
+                serde_json::to_value(tally_ranking(options, &answers))?
+            }
+            QuestionKind::Likert { points, .. } => {
+                serde_json::to_value(tally_likert(*points, &answers))?
+            }
+            QuestionKind::Vas { .. } => serde_json::to_value(tally_vas(&answers))?,
+            QuestionKind::Text { .. } => {
+                let entries: Vec<&str> = answers
+                    .iter()
+                    .filter_map(|a| match a {
+                        Answer::Text(text) => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let n = entries.len();
+                prose.insert(question.id.clone(), serde_json::json!(entries));
+                serde_json::json!({ "n": n })
+            }
+            // The box refuses times questions in a spec; a row that carries
+            // one anyway is answered honestly rather than guessed at.
+            QuestionKind::Times { .. } => serde_json::json!({ "unsupported": "times" }),
+        };
+        tallies.insert(question.id.clone(), value);
+    }
+
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "poll": poll_id,
+                "state": state,
+                "resolution": tally["resolution"],
+                "responded": responded,
+                "total": total,
+                "tallies": tallies,
+                // Stranger prose, clearly fenced: whatever reads this with
+                // tools routes it through the extraction pass first.
+                "prose": prose,
+            })
+        );
+        return Ok(());
+    }
+
+    println!("poll `{poll_id}` ({state}): {responded} of {total} answered");
+    if let Some(resolution) = tally["resolution"].as_str() {
+        println!("outcome: {resolution}");
+    }
+    for question in &spec.questions {
+        let prompt = question.prompt.as_deref().unwrap_or(&spec.title);
+        println!("\n{prompt}");
+        let answers: Vec<Answer> = ballots
+            .iter()
+            .filter_map(|b| b.get(&question.id).cloned())
+            .collect();
+        match &question.kind {
+            QuestionKind::Choice { options, .. } => {
+                for (id, count) in tally_choice(options, &answers).counts {
+                    let label = options
+                        .iter()
+                        .find(|o| o.id == id)
+                        .map(|o| o.label.as_str())
+                        .unwrap_or(&id);
+                    println!("  {count:>3}  {label}");
+                }
+            }
+            QuestionKind::Ranking { options } => {
+                let ranked = tally_ranking(options, &answers);
+                for (id, count) in &ranked.first_preferences {
+                    let label = options
+                        .iter()
+                        .find(|o| &o.id == id)
+                        .map(|o| o.label.as_str())
+                        .unwrap_or(id);
+                    println!("  {count:>3}  {label}   (first preferences)");
+                }
+                if closed {
+                    match &ranked.winner {
+                        Some(winner) => println!("  winner by instant runoff: {winner}"),
+                        None => println!("  no runoff winner"),
+                    }
+                } else {
+                    println!("  (runoff runs when the poll closes)");
+                }
+            }
+            QuestionKind::Likert { points, .. } => {
+                let t = tally_likert(*points, &answers);
+                println!("  distribution 1..={points}: {:?}", t.counts);
+                if let (Some(median), Some(mean)) = (t.median, t.mean) {
+                    println!("  n {}  median {median}  mean {mean:.2}", t.n);
+                }
+            }
+            QuestionKind::Vas { .. } => {
+                let t = tally_vas(&answers);
+                if let (Some(median), Some(mean)) = (t.median, t.mean) {
+                    println!("  n {}  median {median}  mean {mean:.1}  (0–100)", t.n);
+                } else {
+                    println!("  no answers yet");
+                }
+            }
+            QuestionKind::Text { .. } => {
+                // A person reading a stranger's prose in a terminal is the
+                // safe context — the front door's `show` rule.
+                for answer in &answers {
+                    if let Answer::Text(text) = answer {
+                        println!("  · {}", text.replace('\n', "\n    "));
+                    }
+                }
+            }
+            QuestionKind::Times { .. } => println!("  (times ride `polls status` unspecced)"),
         }
     }
     Ok(())
