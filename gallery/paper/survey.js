@@ -7,6 +7,11 @@
   // A closed survey is read-only and stays exactly as rendered.
   if (!form.querySelector("button[type=submit]")) return;
   var live = form.getAttribute("data-live") === "1";
+  // A specimen with no server behind it (the gallery). The widgets below
+  // still upgrade; every path that would touch the network is off, because
+  // a POST to a static file comes back as "Couldn't save" the moment
+  // anyone drags a row.
+  var demo = form.getAttribute("data-demo") === "1";
 
   var status = document.getElementById("savestate");
   var say = function (text) {
@@ -42,7 +47,7 @@
   // hands back the button — the JS-off path is also the degraded path. A
   // 204 refreshes results immediately: the voter who just voted sees
   // their bar tick up now, not at the next interval.
-  var autosave = true;
+  var autosave = !demo;
   var timer = null, inflight = false, again = false;
   var fallback = function () {
     say("Couldn’t save — use the button below.");

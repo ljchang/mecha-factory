@@ -33,8 +33,8 @@ use mecha_manifest::availability::{availability, Interval, Slot};
 use mecha_manifest::{escape_text, FieldKind, FormOptions, Phase, RequestType, Theme};
 use mecha_manifest::{poll_page, BookingOptions, PollAnswer, PollCandidate, PollPageOptions};
 use mecha_manifest::{
-    survey_page, Answer, Ballot, Identity, PollSpec, QuestionDisplay, QuestionKind,
-    QuestionResults, Show, SurveyPageOptions,
+    screen_page, survey_page, Answer, Ballot, Identity, PollSpec, QuestionDisplay, QuestionKind,
+    QuestionResults, ScreenPageOptions, Show, SurveyPageOptions,
 };
 use mecha_manifest::{RequestKind, BUILT_IN_THEMES, MAX_FILE_BYTES_PER_TYPE};
 use serde_json::{json, Map, Value};
@@ -1055,11 +1055,17 @@ fn survey_pages(
             show: Show::AfterVote,
             identity: Identity::Anonymous,
             live: false,
+            // The open form is the one worth touching: `demo` loads the
+            // enhancement so the ranking has its grip and the VAS its
+            // slider, while every path to the network stays off. Rendering
+            // this page without it was a gallery that quietly showed the
+            // JS-off baseline and called it the form.
+            demo: true,
             resolution: None,
         },
     );
 
-    let results = specimen_results(closed_spec);
+    let results = specimen_results(closed_spec, false);
     let closed = survey_page(
         closed_spec,
         &mine,
@@ -1077,19 +1083,53 @@ fn survey_pages(
             show: Show::AfterClose,
             identity: Identity::Named,
             live: false,
+            // Not the closed page: a closed survey is read-only and stays
+            // exactly as rendered, which is what the script itself does
+            // (it returns early when there is no submit button). Shipping
+            // an inert script here would only imply otherwise.
+            demo: false,
             resolution: Some("Replication it is — projects due the last week of classes.".into()),
+        },
+    );
+
+    // The wall. Same ballots, read the way a projector must read them —
+    // and open rather than closed, because the only moment this page is
+    // worth looking at is while the room is still answering.
+    let screen = screen_page(
+        open_spec,
+        &specimen_results(open_spec, true),
+        &ScreenPageOptions {
+            join_url: Some("nocturne.example.edu/p/lc/pace".into()),
+            responded: 5,
+            open: true,
+            resolution: None,
+            theme,
+            assets: String::new(),
+            // A golden file cannot poll: `live` is what wires the 2s
+            // refresh in, and the page is designed to answer identically
+            // without it, one reload behind.
+            live: false,
         },
     );
 
     vec![
         ("survey.html", form.html),
         ("survey.closed.html", closed.html),
+        ("survey.screen.html", screen.html),
     ]
 }
 
 /// Five specimen ballots, tallied by the same pure functions the box and
 /// home run — invented numbers would document tallies nobody computes.
-fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
+///
+/// `projected` is the box's own `results_for` distinction, kept here so the
+/// projector specimen is built the way the wall is built rather than by
+/// editing the participant's view. Three things move together under it,
+/// because they are one decision — *a projector is an audience, mid-poll*:
+/// prose becomes the word cloud and never the sentences, nobody's name
+/// rides a tally, and the ranking shows first preferences alone (IRV rounds
+/// on a partial electorate imply a winner one more ballot can flip).
+fn specimen_results(spec: &PollSpec, projected: bool) -> Vec<QuestionResults> {
     let ballots: Vec<(&str, Ballot)> = [
         (
             "Priya",
@@ -1184,7 +1224,7 @@ fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
                 },
                 QuestionKind::Ranking { options } => QuestionDisplay::Ranking {
                     tally: mecha_manifest::tally_ranking(options, &answers),
-                    complete: true,
+                    complete: !projected,
                 },
                 QuestionKind::Likert { points, .. } => QuestionDisplay::Likert {
                     tally: mecha_manifest::tally_likert(*points, &answers),
@@ -1200,34 +1240,43 @@ fn specimen_results(spec: &PollSpec) -> Vec<QuestionResults> {
                             _ => None,
                         })
                         .collect();
-                    QuestionDisplay::Text {
-                        cloud: mecha_manifest::word_cloud(&texts, 2),
-                        entries: named
-                            .iter()
-                            .filter_map(|(name, answer)| match answer {
-                                Answer::Text(text) => {
-                                    Some((Some((*name).to_string()), text.clone()))
-                                }
-                                _ => None,
-                            })
-                            .collect(),
+                    let cloud = mecha_manifest::word_cloud(&texts, 2);
+                    if projected {
+                        QuestionDisplay::TextCloud {
+                            n: texts.len(),
+                            cloud,
+                        }
+                    } else {
+                        QuestionDisplay::Text {
+                            cloud,
+                            entries: named
+                                .iter()
+                                .filter_map(|(name, answer)| match answer {
+                                    Answer::Text(text) => {
+                                        Some((Some((*name).to_string()), text.clone()))
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                        }
                     }
                 }
                 QuestionKind::Times { .. } => unreachable!("the specimen has no times"),
             };
-            let voters = (!matches!(question.kind, QuestionKind::Text { .. })).then(|| {
-                named
-                    .iter()
-                    .map(|(name, answer)| {
-                        let words = match answer {
-                            Answer::Choice(ids) | Answer::Ranking(ids) => ids.join(", "),
-                            Answer::Likert(v) | Answer::Vas(v) => v.to_string(),
-                            Answer::Text(_) => String::new(),
-                        };
-                        ((*name).to_string(), words)
-                    })
-                    .collect()
-            });
+            let voters =
+                (!projected && !matches!(question.kind, QuestionKind::Text { .. })).then(|| {
+                    named
+                        .iter()
+                        .map(|(name, answer)| {
+                            let words = match answer {
+                                Answer::Choice(ids) | Answer::Ranking(ids) => ids.join(", "),
+                                Answer::Likert(v) | Answer::Vas(v) => v.to_string(),
+                                Answer::Text(_) => String::new(),
+                            };
+                            ((*name).to_string(), words)
+                        })
+                        .collect()
+                });
             QuestionResults { display, voters }
         })
         .collect()
@@ -1278,14 +1327,16 @@ fn landing(entries: &[Entry]) -> String {
     body.push_str(
         "<section>\n<h2>The survey</h2>\n<p class=\"blurb\">The general poll: \
          every question kind on one page, rendered by the renderer the gate \
-         serves — the open form before your vote, and the closed poll with \
-         tallies, the runoff rounds, and the named-voters disclosure.</p>\n",
+         serves — the open form before your vote, the closed poll with \
+         tallies, the runoff rounds and the named-voters disclosure, and the \
+         projector's own view of the same ballots.</p>\n",
     );
     for theme in BUILT_IN_THEMES {
         body.push_str(&format!(
             "<p class=\"theme\"><span class=\"name\">{name}</span> \
              <a href=\"{name}/survey.html\">open form</a> · \
-             <a href=\"{name}/survey.closed.html\">closed, with results</a></p>\n",
+             <a href=\"{name}/survey.closed.html\">closed, with results</a> · \
+             <a href=\"{name}/survey.screen.html\">the projector</a></p>\n",
             name = escape_text(theme.name)
         ));
     }
