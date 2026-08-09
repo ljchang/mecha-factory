@@ -12,7 +12,7 @@ name = "factory-publish"
 path = "src/main.rs"
 
 [dependencies]
-mecha-manifest = { path = "../mecha-manifest", version = "0.1.0" }
+mecha-manifest = { path = "../mecha-manifest", version = "0.2.0" }
 anyhow.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
