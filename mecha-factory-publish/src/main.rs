@@ -1657,6 +1657,9 @@ fn polls_command(action: PollsAction) -> Result<()> {
                         poll_spec.audience.max_ballots.unwrap_or(0)
                     );
                     println!("  {url}");
+                    if let Some(screen) = reply["screen_url"].as_str() {
+                        println!("projector: {screen}");
+                    }
                     println!(
                         "\nOne vote per person is a cookie and an honor system — the page \
                          says so. Post the link where the audience already is."
@@ -1723,6 +1726,9 @@ fn polls_command(action: PollsAction) -> Result<()> {
                 }
                 println!("\nrecord: {}", path.display());
                 println!("links:  {}  ← one row per person, for the mail-merge", links_path.display());
+                if let Some(screen) = reply["screen_url"].as_str() {
+                    println!("projector: {screen}  ← aggregates only; prose stays off the wall");
+                }
                 println!("Send each person their own link — it is their identity on the poll.");
                 return Ok(());
             }

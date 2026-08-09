@@ -810,6 +810,52 @@ fn median_of_sorted(sorted: &[u8]) -> Option<f64> {
     })
 }
 
+/// The words a set of text answers keeps saying — the input to a word
+/// cloud, which is the one visualization prose supports without projecting
+/// anyone's sentence.
+///
+/// Three rules make it safe and honest:
+/// - **Counted per ballot, not per occurrence**: one answer repeating a
+///   word fifty times scores 1, so nobody can shout their way to 72pt.
+/// - **`min_count` is the projection guard**: at 2, a word reaches the
+///   wall only when two different ballots chose it — a single troll's
+///   slur never renders, without a profanity list to maintain.
+/// - Stopwords and short tokens drop, because "the" at maximum size is
+///   what every naive cloud shows.
+///
+/// Sorted by count then alphabetically, capped at 40 — deterministic, so
+/// two ends render one cloud.
+pub fn word_cloud(texts: &[&str], min_count: usize) -> Vec<(String, usize)> {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for text in texts {
+        let words: BTreeSet<String> = text
+            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .map(|w| w.trim_matches('\'').to_lowercase())
+            .filter(|w| w.chars().count() >= 3 && !STOPWORDS.contains(&w.as_str()))
+            .collect();
+        for word in words {
+            *counts.entry(word).or_default() += 1;
+        }
+    }
+    let mut cloud: Vec<(String, usize)> = counts
+        .into_iter()
+        .filter(|(_, count)| *count >= min_count.max(1))
+        .collect();
+    cloud.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    cloud.truncate(40);
+    cloud
+}
+
+/// Function words that carry no signal at any size.
+const STOPWORDS: &[&str] = &[
+    "about", "after", "all", "also", "and", "any", "are", "because", "been", "before", "but",
+    "can", "could", "did", "does", "for", "from", "had", "has", "have", "her", "him", "his",
+    "how", "into", "its", "just", "like", "more", "most", "much", "not", "now", "one", "only",
+    "our", "out", "over", "she", "should", "some", "than", "that", "the", "their", "them",
+    "then", "there", "they", "this", "too", "very", "was", "were", "what", "when", "which",
+    "who", "why", "will", "with", "would", "you", "your",
+];
+
 /// One IRV counting round: who held how many first preferences among the
 /// options still standing, who was eliminated on it, and how many ballots
 /// had nobody left to prefer.
@@ -1354,6 +1400,22 @@ mod tests {
         assert_eq!(tally.winner, None);
         assert_eq!(tally.n, 0);
         assert!(tally.rounds.is_empty());
+    }
+
+    #[test]
+    fn the_cloud_counts_ballots_not_repetitions_and_guards_the_wall() {
+        let texts = [
+            "More coffee! coffee coffee COFFEE",
+            "the coffee machine is broken",
+            "slides posted earlier, please",
+        ];
+        let cloud = word_cloud(&texts, 2);
+        // Repetition inside one answer counts once; two ballots make two.
+        assert_eq!(cloud, vec![("coffee".to_string(), 2)]);
+        // At min_count 1 the singletons appear, stopwords and shorts never.
+        let all = word_cloud(&texts, 1);
+        assert!(all.iter().any(|(w, _)| w == "slides"));
+        assert!(all.iter().all(|(w, _)| w != "the" && w != "is"));
     }
 
     #[test]

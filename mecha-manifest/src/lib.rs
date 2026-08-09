@@ -83,14 +83,16 @@ pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::{site_header, FormOptions, FormPage};
 pub use media::{content_type, sniff, FileType};
 pub use poll::{
-    tally_choice, tally_likert, tally_ranking, tally_vas, validate_ballot, Answer, Audience,
-    AudienceKind, Ballot, ChoiceTally, Identity, LikertTally, PollOption, PollQuestion, PollSpec,
+    tally_choice, tally_likert, tally_ranking, tally_vas, validate_ballot, word_cloud, Answer,
+    Audience, AudienceKind, Ballot, ChoiceTally, Identity, LikertTally, PollOption, PollQuestion,
+    PollSpec,
     QuestionKind, RankingRound, RankingTally, ResultsPolicy, Show, VasTally,
     DEFAULT_SUPPRESSION_FLOOR, MAX_TEXT_ANSWER,
 };
 pub use poll_render::{
-    ballot_from_form, intro_line, promise_line, results_fragments, survey_page,
-    QuestionDisplay, QuestionResults, SurveyPageOptions,
+    ballot_from_form, intro_line, promise_line, results_fragments, screen_count_line,
+    screen_page, survey_page, QuestionDisplay, QuestionResults, ScreenPageOptions,
+    SurveyPageOptions,
 };
 pub use request::{
     reminder_minutes, valid_id, Acknowledgment, BookingPolicy, Field, FieldKind, RequestKind,

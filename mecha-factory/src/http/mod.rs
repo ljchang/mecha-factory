@@ -228,6 +228,16 @@ pub fn router(app: Shared) -> Router {
             "/p/{handle}/{poll_id}/results.json",
             get(poll::link_results),
         )
+        // The projector: a creator capability, aggregates only, the word
+        // cloud standing in for anyone's sentence.
+        .route(
+            "/p/{handle}/{poll_id}/screen/{token}",
+            get(poll::screen_page),
+        )
+        .route(
+            "/p/{handle}/{poll_id}/screen/{token}/data.json",
+            get(poll::screen_data),
+        )
         // GET is a page with a button and POST is the verification, because
         // mail scanners follow GETs — see `intake::confirm_page`.
         .route(

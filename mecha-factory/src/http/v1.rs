@@ -831,6 +831,9 @@ pub async fn put_poll(
         participants.push((name.trim().to_string(), crate::intake::hash_token(&token)));
         tokens.push((name.trim().to_string(), token));
     }
+    // Every general poll gets a projector capability at birth — minted
+    // here because it is hashed here, like the participant tokens.
+    let screen_token = general.as_ref().map(|_| crate::intake::mint_token());
     let row = match &general {
         // A general poll's truth is its spec; the times columns hold
         // explicit nothings rather than values anyone might read.
@@ -844,6 +847,7 @@ pub async fn put_poll(
             candidates: "[]".into(),
             spec: Some(serde_json::to_string(spec).unwrap_or_else(|_| "{}".into())),
             resolution: None,
+            screen_token_hash: screen_token.as_deref().map(crate::intake::hash_token),
             state: "open".into(),
             created_at: crate::db::now(),
             closed_at: None,
@@ -858,6 +862,7 @@ pub async fn put_poll(
             candidates: serde_json::to_string(&push.candidates).unwrap_or_else(|_| "[]".into()),
             spec: None,
             resolution: None,
+            screen_token_hash: None,
             state: "open".into(),
             created_at: crate::db::now(),
             closed_at: None,
@@ -888,6 +893,8 @@ pub async fn put_poll(
     // ballots mint their own capability at first save.
     let link_url = link_audience
         .then(|| format!("{base}/p/{}/{poll_id}", user.handle));
+    let screen_url = screen_token
+        .map(|token| format!("{base}/p/{}/{poll_id}/screen/{token}", user.handle));
     tracing::info!(%poll_id, participants = urls.len(), link = link_audience, "poll created");
     (
         StatusCode::OK,
@@ -896,6 +903,7 @@ pub async fn put_poll(
             "participants": urls.len(),
             "urls": urls,
             "url": link_url,
+            "screen_url": screen_url,
         })),
     )
         .into_response()
