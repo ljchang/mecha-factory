@@ -64,6 +64,7 @@ mod csp;
 mod digest;
 mod form;
 mod media;
+mod poll;
 mod request;
 mod schema;
 pub mod theme;
@@ -80,6 +81,12 @@ pub use csp::{gate_headers, Header};
 pub use digest::{digest_files, MANIFEST_FILE};
 pub use form::{site_header, FormOptions, FormPage};
 pub use media::{content_type, sniff, FileType};
+pub use poll::{
+    tally_choice, tally_likert, tally_ranking, tally_vas, validate_ballot, Answer, Audience,
+    AudienceKind, Ballot, ChoiceTally, Identity, LikertTally, PollOption, PollQuestion, PollSpec,
+    QuestionKind, RankingRound, RankingTally, ResultsPolicy, Show, VasTally,
+    DEFAULT_SUPPRESSION_FLOOR, MAX_TEXT_ANSWER,
+};
 pub use request::{
     reminder_minutes, valid_id, Acknowledgment, BookingPolicy, Field, FieldKind, RequestKind,
     RequestType, Step, MAX_FILE_BYTES_PER_FIELD, MAX_FILE_BYTES_PER_TYPE,
