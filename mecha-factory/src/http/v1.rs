@@ -836,6 +836,7 @@ pub async fn put_poll(
             deadline: spec.deadline.clone(),
             candidates: "[]".into(),
             spec: Some(serde_json::to_string(spec).unwrap_or_else(|_| "{}".into())),
+            resolution: None,
             state: "open".into(),
             created_at: crate::db::now(),
             closed_at: None,
@@ -849,6 +850,7 @@ pub async fn put_poll(
             deadline: push.deadline.clone(),
             candidates: serde_json::to_string(&push.candidates).unwrap_or_else(|_| "[]".into()),
             spec: None,
+            resolution: None,
             state: "open".into(),
             created_at: crate::db::now(),
             closed_at: None,
@@ -888,8 +890,12 @@ pub async fn put_poll(
 }
 
 /// `GET /v1/instruments/{id}/polls/{poll_id}` — the tally, for home's
-/// ranker. Names and tri-state answers; the free-text-free shape is the
-/// whole point of the poll being typed.
+/// ranker and the status/export verbs. The identity policy binds here
+/// exactly as it binds the page: an `anonymous` poll's ballots ride
+/// nameless, so the agent at home can tally and cannot un-anonymise —
+/// response *rate* stays visible (who answered is lifecycle, not ballot
+/// content), which is why names still ride on the rows that carry no
+/// answers.
 pub async fn get_poll(
     State(app): State<Shared>,
     Extension(origin): Extension<Origin>,
@@ -906,16 +912,44 @@ pub async fn get_poll(
     let Ok(Some(poll)) = app.db.poll_get(&user.id, &poll_id) else {
         return Failure::json(StatusCode::NOT_FOUND, "no such poll").into_response();
     };
-    let participants = app
+    let anonymous = match poll.general_spec() {
+        Ok(spec) => spec.is_some_and(|s| {
+            s.results.identity(s.audience.kind) == mecha_manifest::Identity::Anonymous
+        }),
+        Err(e) => {
+            tracing::error!(%poll_id, error = %e, "unreadable poll spec");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+    let mut participants = app
         .db
         .poll_participants(&user.id, &poll_id)
         .unwrap_or_default();
+    if anonymous {
+        // The store orders rows by name, and order is a join: nameless
+        // ballots in alphabetical order of their owners un-anonymise by
+        // position against a known roster. Re-order the answered rows by
+        // their ballot text — stable, and a function of nothing but what
+        // the row is allowed to show.
+        participants.sort_by(|a, b| match (&a.answers, &b.answers) {
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (Some(a), Some(b)) => a.cmp(b),
+            (None, None) => a.name.cmp(&b.name),
+        });
+    }
     let answers: Vec<serde_json::Value> = participants
         .iter()
         .map(|p| {
+            // An anonymous ballot row carries the ballot and nothing else —
+            // a submission timestamp is a correlator too. Who has answered
+            // stays readable as the roster minus the named unanswered rows:
+            // rate is lifecycle, ballots are content.
+            let named = !anonymous || p.answers.is_none();
             serde_json::json!({
-                "name": p.name,
-                "responded_at": p.responded_at,
+                "name": named.then_some(p.name.as_str()),
+                "responded_at": named.then_some(p.responded_at.as_deref()).flatten(),
                 "answers": p.answers.as_deref()
                     .and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok()),
             })
@@ -934,6 +968,7 @@ pub async fn get_poll(
                 .unwrap_or_default(),
             "spec": poll.spec.as_deref()
                 .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+            "resolution": poll.resolution,
             "participants": answers,
         })),
     )
@@ -941,11 +976,15 @@ pub async fn get_poll(
 }
 
 /// `POST /v1/instruments/{id}/polls/{poll_id}/close` — no more answers.
+/// The body may carry a `resolution`: what happened, rendered at the top
+/// of the closed page so the links people hold don't dead-end at a frozen
+/// tally.
 pub async fn close_poll(
     State(app): State<Shared>,
     Extension(origin): Extension<Origin>,
     Path((_id, poll_id)): Path<(String, String)>,
     headers: HeaderMap,
+    body: String,
 ) -> Response {
     if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
@@ -954,7 +993,28 @@ pub async fn close_poll(
         Ok((_, user)) => user,
         Err(refusal) => return *refusal,
     };
-    match app.db.poll_close(&user.id, &poll_id, &crate::db::now()) {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(deny_unknown_fields)]
+    struct CloseBody {
+        #[serde(default)]
+        resolution: Option<String>,
+    }
+    let close: CloseBody = match serde_json::from_str(if body.is_empty() { "{}" } else { &body })
+    {
+        Ok(close) => close,
+        Err(e) => {
+            return Failure::json(StatusCode::BAD_REQUEST, format!("close: {e}")).into_response()
+        }
+    };
+    let resolution = close.resolution.as_deref().map(str::trim).filter(|r| !r.is_empty());
+    if resolution.is_some_and(|r| r.len() > 2000) {
+        return Failure::json(StatusCode::BAD_REQUEST, "resolution over 2000 characters")
+            .into_response();
+    }
+    match app
+        .db
+        .poll_close(&user.id, &poll_id, &crate::db::now(), resolution)
+    {
         Ok(closed) => (
             StatusCode::OK,
             Json(serde_json::json!({"poll": poll_id, "closed": closed})),

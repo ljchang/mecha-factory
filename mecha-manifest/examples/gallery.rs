@@ -1055,6 +1055,7 @@ fn survey_pages(
             show: Show::AfterVote,
             identity: Identity::Anonymous,
             live: false,
+            resolution: None,
         },
     );
 
@@ -1076,6 +1077,9 @@ fn survey_pages(
             show: Show::AfterClose,
             identity: Identity::Named,
             live: false,
+            resolution: Some(
+                "Replication it is — projects due the last week of classes.".into(),
+            ),
         },
     );
 

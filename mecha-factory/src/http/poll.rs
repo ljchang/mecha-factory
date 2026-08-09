@@ -258,6 +258,7 @@ fn render_general(
         show: spec.results.show,
         identity: view.identity,
         live: true,
+        resolution: poll.resolution.clone(),
     };
     let page = survey_page(spec, &view.mine, results.as_deref(), &options);
     (

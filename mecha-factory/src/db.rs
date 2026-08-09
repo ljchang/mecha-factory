@@ -380,6 +380,10 @@ pub struct PollRow {
     /// A `PollSpec` as JSON, present on general polls. NULL is a poll from
     /// before the column — a times poll, described by the columns beside it.
     pub spec: Option<String>,
+    /// Loomio's outcome statement, adopted: what happened, written at close,
+    /// so the link people hold answers "so what happened?" instead of
+    /// dead-ending at a frozen tally.
+    pub resolution: Option<String>,
     pub state: String,
     pub created_at: String,
     pub closed_at: Option<String>,
@@ -2038,7 +2042,7 @@ impl Db {
             Ok(conn
                 .query_row(
                     "SELECT user_id, id, title, timezone, duration_minutes, deadline, \
-                     candidates, spec, state, created_at, closed_at FROM polls \
+                     candidates, spec, resolution, state, created_at, closed_at FROM polls \
                      WHERE user_id = ?1 AND id = ?2",
                     params![user_id, id],
                     poll_row,
@@ -2054,13 +2058,13 @@ impl Db {
             Ok(conn
                 .query_row(
                     "SELECT p.user_id, p.id, p.title, p.timezone, p.duration_minutes, \
-                     p.deadline, p.candidates, p.spec, p.state, p.created_at, p.closed_at, \
-                     pp.name \
+                     p.deadline, p.candidates, p.spec, p.resolution, p.state, p.created_at, \
+                     p.closed_at, pp.name \
                      FROM poll_participants pp \
                      JOIN polls p ON p.user_id = pp.user_id AND p.id = pp.poll_id \
                      WHERE pp.token_hash = ?1",
                     params![token_hash],
-                    |r| Ok((poll_row(r)?, r.get::<_, String>(11)?)),
+                    |r| Ok((poll_row(r)?, r.get::<_, String>(12)?)),
                 )
                 .optional()?)
         })
@@ -2099,11 +2103,22 @@ impl Db {
         })
     }
 
-    pub fn poll_close(&self, user_id: &str, id: &str, now: &str) -> Result<bool> {
+    /// Close, with an optional resolution — what happened, for the page the
+    /// links keep pointing at. Only an open poll closes; the resolution is
+    /// written in the same statement so a closed-with-outcome poll can never
+    /// exist half-written.
+    pub fn poll_close(
+        &self,
+        user_id: &str,
+        id: &str,
+        now: &str,
+        resolution: Option<&str>,
+    ) -> Result<bool> {
         self.with(|conn| {
             let updated = conn.execute(
-                "UPDATE polls SET state = 'closed', closed_at = ?3                  WHERE user_id = ?1 AND id = ?2 AND state = 'open'",
-                params![user_id, id, now],
+                "UPDATE polls SET state = 'closed', closed_at = ?3, resolution = ?4 \
+                 WHERE user_id = ?1 AND id = ?2 AND state = 'open'",
+                params![user_id, id, now, resolution],
             )?;
             Ok(updated == 1)
         })
@@ -2723,9 +2738,10 @@ fn poll_row(r: &rusqlite::Row) -> rusqlite::Result<PollRow> {
         deadline: r.get(5)?,
         candidates: r.get(6)?,
         spec: r.get(7)?,
-        state: r.get(8)?,
-        created_at: r.get(9)?,
-        closed_at: r.get(10)?,
+        resolution: r.get(8)?,
+        state: r.get(9)?,
+        created_at: r.get(10)?,
+        closed_at: r.get(11)?,
     })
 }
 
@@ -2864,10 +2880,15 @@ fn migrate(conn: &Connection) -> Result<()> {
     // ledger old enough to predate polls entirely gets the column from the
     // CREATE TABLE in the batch below instead.
     if (3..12).contains(&version) {
-        if let Err(e) = conn.execute_batch("ALTER TABLE polls ADD COLUMN spec TEXT;") {
-            let text = e.to_string();
-            if !text.contains("duplicate column") && !text.contains("no such table") {
-                return Err(e.into());
+        for alter in [
+            "ALTER TABLE polls ADD COLUMN spec TEXT;",
+            "ALTER TABLE polls ADD COLUMN resolution TEXT;",
+        ] {
+            if let Err(e) = conn.execute_batch(alter) {
+                let text = e.to_string();
+                if !text.contains("duplicate column") && !text.contains("no such table") {
+                    return Err(e.into());
+                }
             }
         }
     }
@@ -3197,6 +3218,7 @@ fn migrate(conn: &Connection) -> Result<()> {
             deadline         TEXT,
             candidates       TEXT NOT NULL,
             spec             TEXT,
+            resolution       TEXT,
             state            TEXT NOT NULL DEFAULT 'open',
             created_at       TEXT NOT NULL,
             closed_at        TEXT,
