@@ -130,9 +130,12 @@ fn a_survey_reveals_results_after_the_vote_and_refuses_off_vocabulary() {
     assert_eq!(asset.status, 200);
     assert!(asset.body.contains("results.json"), "{}", asset.body);
     // The step-5 polish rides the same file: the thumbless VAS track and
-    // the buttoned rank list.
+    // the rank list with both its paths — drag on the grip, buttons for
+    // the keyboard.
     assert!(asset.body.contains("vas-range"), "{}", asset.body);
     assert!(asset.body.contains("rank-list"), "{}", asset.body);
+    assert!(asset.body.contains("setPointerCapture"), "{}", asset.body);
+    assert!(asset.body.contains("grip"), "{}", asset.body);
 
     // Home reads the spec and the tagged ballots back.
     let reply = Request::new("GET", "/v1/instruments/book/polls/paper-vote", &gate)
