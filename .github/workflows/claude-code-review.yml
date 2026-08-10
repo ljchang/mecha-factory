@@ -1,0 +1,119 @@
+name: Claude PR review
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    name: review
+    runs-on: ubuntu-latest
+    # Two exclusions, both for the same reason: a red X that means "no
+    # credential" is worse than no check at all.
+    #
+    # A pull request from a fork gets no access to repository secrets, so the
+    # action cannot authenticate and would fail on every external contribution.
+    #
+    # A Dependabot pull request reads Dependabot's own secret store rather than
+    # the repository's, so it cannot authenticate either — and an LLM review of
+    # a version bump is not worth the tokens even when it can.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.type != 'Bot'
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          # A subscription credential, not a metered API key: Pro/Max plans
+          # authenticate the action through OAuth, so a review costs plan
+          # usage rather than API credits. Generate with `claude setup-token`
+          # and store as CLAUDE_CODE_OAUTH_TOKEN.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Review this pull request. The PR branch is already checked out in
+            the working directory. Read CONTRIBUTING.md and the module-level
+            doc comments on any file the diff touches before judging it — this
+            codebase records *why* each decision was made at the top of the
+            file that implements it, and most real defects here are the
+            undoing of one of those rather than ordinary bugs.
+
+            Weight your attention in this order:
+
+            1. Boundaries that are enforced structurally. Eroding one is the
+               most expensive defect this repo can ship:
+               - **The class decides the origin.** `static`, `interactive` and
+                 `compute` exist to have different policies; an origin that
+                 serves whatever it is asked collapses three policies into one.
+               - **The response policy lives in `mecha-manifest`**, so the
+                 local preview server and the box send identical headers. A
+                 policy that varies per bundle is one nobody can state or test.
+               - **Bytes never meet identity on an artifact origin.** The gate
+                 decides who may read and mints a short-lived capability; the
+                 artifact origin holds no session and learns no identity.
+               - **Scope split:** `Publish` writes versions, `Release` moves an
+                 alias. An agent's key can do all the work and must never be
+                 the thing that decides the world sees it.
+               - **The box holds no credential that reaches home.** Packets go
+                 one way: home publishes and drains, the origin never dials
+                 out.
+
+            2. Oracle rules. A private bundle, an unshared one, and one that
+               never existed must answer identically; the sign-in form must
+               answer identically whether or not an address has grants. Any
+               new status code, redirect, timing difference or error string
+               that distinguishes them turns a private URL into a directory of
+               what exists.
+
+            3. Failures dressed as benign states. A previous review of this
+               repo found a whole family at once: a sign-out that survived a
+               failed revoke, a valid session rendered as signed-out, an empty
+               security ledger rendered as truth, a one-time link burned by a
+               failure between redeem and session-mint. A database error must
+               not read as "no rows", and a sign-in link is spent only when the
+               session lands.
+
+            4. Immutability and the one moving part. A version row is inserted
+               once and never updated; nothing is deleted but an acknowledged
+               queue row. A takedown moves the alias, never the bytes. A change
+               that adds an `UPDATE` against `bundles` or a delete of a version
+               is undoing the property the whole design rests on.
+
+            5. Reporting that asserts more than was established. The local
+               store is not evidence about the origin: a machine can hold a
+               publish key and never move the box's alias, so a message
+               derived from local state can describe a box that never
+               happened. Ask of any new user- or agent-facing string whether
+               every claim in it was actually established by the code path
+               that prints it.
+
+            6. Tests. Ask whether a new guarantee is actually measured, and in
+               particular whether the test would fail on the *old* behaviour —
+               a guard that passes either way certifies the bug. Where a claim
+               is about the wire or the environment, prefer asserting on what
+               was actually sent or served over a re-derivation of the logic.
+
+            Be specific and concise. Cite file:line. If the change is sound,
+            say so briefly rather than inventing findings — a review that
+            always finds something teaches maintainers to ignore it.
+
+            Use `gh pr comment` for top-level feedback.
+            Use `mcp__github_inline_comment__create_inline_comment` (with
+            `confirmed: true`) for specific code issues.
+            Only post GitHub comments — do not return review text as a message.
+
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(cargo check:*),Bash(cargo clippy:*),Bash(cargo test:*)"
