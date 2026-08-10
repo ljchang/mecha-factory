@@ -609,3 +609,259 @@ fn the_viewer_knows_its_owner_and_its_controls_return_there() {
     );
     assert_eq!(elsewhere.status, 200, "rendered the page, followed nothing");
 }
+
+// ---- the inventory: four kinds, one answer about reach ------------------
+
+/// A minimal servable form. `[verification]` is what makes it servable at
+/// all — see `RequestType::servable`.
+fn form_toml(id: &str, kind: &str) -> String {
+    // A booking type carries [availability] or it parses to nothing a slot
+    // could ever be offered from — home's half of the same file.
+    let availability = if kind == "booking" {
+        "[availability]\ntimezone = \"America/New_York\"\ndurations = [30]\n\
+         [[availability.windows]]\nday = \"tue\"\nstart = \"13:00\"\nend = \"17:00\"\n"
+    } else {
+        ""
+    };
+    format!(
+        "id = \"{id}\"\nversion = 1\ntitle = \"{id} title\"\nkind = \"{kind}\"\n\
+         {availability}\
+         [[fields]]\nname = \"who\"\nlabel = \"Your name\"\nkind = \"text\"\n\
+         max_length = 80\nrequired = true\n\
+         [[fields]]\nname = \"reply_to\"\nlabel = \"Your email\"\nkind = \"email\"\n\
+         required = true\n\
+         [verification]\nfield = \"reply_to\"\n"
+    )
+}
+
+fn put_type(server: &Server, id: &str, manifest: String) {
+    let parsed = mecha_manifest::RequestType::from_toml(&manifest)
+        .unwrap_or_else(|e| panic!("fixture `{id}` does not parse: {e}"));
+    server
+        .db
+        .type_put(&mecha_factory::db::TypeRow {
+            user_id: server.user.id.clone(),
+            id: id.into(),
+            title: parsed.title.clone(),
+            manifest,
+            schema: "{}".into(),
+            updated_at: mecha_factory::db::now(),
+        })
+        .unwrap();
+}
+
+fn put_poll(server: &Server, id: &str, audience: &str) {
+    let spec = mecha_manifest::PollSpec::from_toml(&format!(
+        "title = \"{id} poll\"\n[audience]\nkind = \"{audience}\"\n\
+         {extra}[[questions]]\nid = \"q\"\nkind = \"choice\"\n\
+         [[questions.options]]\nid = \"a\"\nlabel = \"A\"\n\
+         [[questions.options]]\nid = \"b\"\nlabel = \"B\"\n",
+        extra = if audience == "link" {
+            "max_ballots = 50\n"
+        } else {
+            ""
+        }
+    ))
+    .unwrap_or_else(|e| panic!("poll fixture `{id}` does not parse: {e}"));
+    server
+        .db
+        .poll_create(
+            &mecha_factory::db::PollRow {
+                user_id: server.user.id.clone(),
+                id: id.into(),
+                title: format!("{id} poll"),
+                timezone: "America/New_York".into(),
+                duration_minutes: 0,
+                deadline: None,
+                candidates: "[]".into(),
+                spec: Some(serde_json::to_string(&spec).unwrap()),
+                resolution: None,
+                screen_token_hash: None,
+                state: "open".into(),
+                created_at: mecha_factory::db::now(),
+                closed_at: None,
+            },
+            &[],
+        )
+        .unwrap();
+}
+
+/// The page answered "what have I got" with bundles alone, so a form, a
+/// booking page and a poll were all served to strangers while their owner's
+/// own page showed no sign they existed. Every assertion here fails against
+/// that page.
+#[test]
+fn the_account_page_knows_all_four_kinds_not_only_bundles() {
+    let server = common::start();
+    let session = signed_in(&server);
+    put_type(&server, "letter", form_toml("letter", "request"));
+    put_type(
+        &server,
+        "office-hours",
+        form_toml("office-hours", "booking"),
+    );
+    put_poll(&server, "lab-lunch", "link");
+
+    let page = get(&server, "/account", Some(&session));
+    assert_eq!(page.status, 200, "{}", page.body);
+    let gate = server.gate;
+
+    // Each kind under its own heading, and each linked where it is served —
+    // a form at /f/, a booking page at /s/, a link poll at /p/.
+    for (heading, path) in [
+        ("Forms", "/f/alice/letter"),
+        ("Booking pages", "/s/alice/office-hours"),
+        ("Polls", "/p/alice/lab-lunch"),
+    ] {
+        assert!(page.body.contains(heading), "no {heading}: {}", page.body);
+        assert!(
+            page.body.contains(&format!("href=\"http://{gate}{path}\"")),
+            "{heading} is not linked at {path}: {}",
+            page.body
+        );
+    }
+}
+
+/// A booking type must not be listed as a form. `/f/` refuses to serve one
+/// (`intake::resolve`), so a form row pointing there would be a link to a
+/// 404 on the owner's own page.
+#[test]
+fn a_booking_type_is_not_listed_among_the_forms() {
+    let server = common::start();
+    let session = signed_in(&server);
+    put_type(
+        &server,
+        "office-hours",
+        form_toml("office-hours", "booking"),
+    );
+
+    let page = get(&server, "/account", Some(&session));
+    assert!(
+        !page.body.contains("/f/alice/office-hours"),
+        "a booking type was offered at the form route: {}",
+        page.body
+    );
+    assert!(
+        page.body.contains("/s/alice/office-hours"),
+        "the booking page is missing: {}",
+        page.body
+    );
+}
+
+/// A type with no `[verification]` is not served, so the page must not offer
+/// a link to it — it says why instead.
+#[test]
+fn an_unservable_type_is_named_with_its_reason_and_no_link() {
+    let server = common::start();
+    let session = signed_in(&server);
+    let bare = "id = \"draft\"\nversion = 1\ntitle = \"Draft\"\n\
+                [[fields]]\nname = \"who\"\nlabel = \"You\"\nkind = \"text\"\n\
+                max_length = 80\n"
+        .to_string();
+    put_type(&server, "draft", bare);
+
+    let page = get(&server, "/account", Some(&session));
+    assert!(page.body.contains("draft"), "{}", page.body);
+    assert!(
+        !page.body.contains("/f/alice/draft"),
+        "an unservable type was linked: {}",
+        page.body
+    );
+    assert!(
+        page.body.contains("no [verification]"),
+        "the reason is not given: {}",
+        page.body
+    );
+}
+
+/// A roster poll's every real URL carries somebody's ballot capability, so
+/// there is no shared URL to publish. Listing one would be an invitation to
+/// hand out a link that answers nobody.
+#[test]
+fn a_roster_poll_offers_no_public_url_and_a_link_poll_does() {
+    let server = common::start();
+    let session = signed_in(&server);
+    put_poll(&server, "shared", "link");
+    put_poll(&server, "invited", "roster");
+
+    let page = get(&server, "/account", Some(&session));
+    assert!(
+        page.body.contains("/p/alice/shared"),
+        "the link poll has no URL: {}",
+        page.body
+    );
+    assert!(
+        !page.body.contains("/p/alice/invited"),
+        "a roster poll was given a shared URL: {}",
+        page.body
+    );
+    assert!(
+        page.body.contains("one capability URL per participant"),
+        "the roster poll's reason is not given: {}",
+        page.body
+    );
+}
+
+/// `visibility` alone said "everyone" for a bundle whose live version an
+/// operator had withheld — the flag is on the alias and the withholding is on
+/// the version. The page reads the reach now, which is the same conclusion
+/// `http/artifacts.rs` reaches before serving a byte.
+#[test]
+fn a_withheld_live_version_does_not_read_as_readable_by_everyone() {
+    let server = common::start();
+    let session = signed_in(&server);
+    server
+        .db
+        .bundle_insert(&mecha_factory::db::BundleRow {
+            user_id: server.user.id.clone(),
+            id: "brief".into(),
+            version: 1,
+            digest: "d-brief".into(),
+            class: mecha_manifest::ContentClass::Static,
+            title: "brief".into(),
+            description: None,
+            template: "report".into(),
+            published_at: None,
+            received_at: mecha_factory::db::now(),
+            withheld_at: None,
+            withheld_reason: None,
+        })
+        .unwrap();
+    server
+        .db
+        .alias_set(
+            &server.user.id,
+            "brief",
+            Some(1),
+            mecha_manifest::Visibility::Public,
+            &mecha_factory::db::now(),
+        )
+        .unwrap();
+
+    // Public and aliased: everyone.
+    let page = get(&server, "/account", Some(&session));
+    assert!(page.body.contains("everyone"), "{}", page.body);
+
+    // Withheld: the same row must stop claiming that.
+    server
+        .db
+        .bundle_withhold(
+            &server.user.id,
+            "brief",
+            1,
+            Some("a complaint"),
+            Some(&mecha_factory::db::now()),
+        )
+        .unwrap();
+    let page = get(&server, "/account", Some(&session));
+    assert!(
+        page.body.contains("withheld"),
+        "the withholding is invisible: {}",
+        page.body
+    );
+    assert!(
+        !page.body.contains("everyone"),
+        "a withheld bundle still reads as public: {}",
+        page.body
+    );
+}

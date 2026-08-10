@@ -158,11 +158,97 @@ pub async fn overview(
     render_overview(&app, &token, &user)
 }
 
+/// The three sections that are not bundles: forms, booking pages and polls.
+///
+/// Read-only for now, and deliberately so — this is the step that makes the
+/// page *know* about them. Every one of them was already being served to
+/// strangers while the owner's own page showed no sign it existed, which is
+/// the gap worth closing first; the controls are a later decision about what
+/// a browser session may do, not a rendering one.
+///
+/// A kind with nothing in it prints nothing. An empty table under a heading
+/// is a page telling you about a feature rather than about your account.
+fn instrument_sections(inv: &crate::inventory::Inventory, gate: &str) -> String {
+    let esc = mecha_manifest::escape_text;
+    let mut out = String::new();
+
+    // `reach` is the whole content of these tables: the owner's question is
+    // "is this thing live, and where", and the answer is one field computed
+    // in one place.
+    let mut section =
+        |anchor: &str,
+         heading: &str,
+         blurb: &str,
+         rows: Vec<(String, String, &crate::inventory::Reach)>| {
+            if rows.is_empty() {
+                return;
+            }
+            out.push_str(&format!(
+                "<h2 id=\"{anchor}\">{heading}</h2><p>{blurb}</p>\
+             <table><tr><th>id</th><th>title</th><th>where</th></tr>"
+            ));
+            for (id, title, reach) in rows {
+                let where_cell = match reach.path() {
+                    Some(path) => format!("<a href=\"{gate}{path}\">{}{path}</a>", esc(gate)),
+                    // Not a link, because there is nothing at the other end for
+                    // anyone — including the owner reading this row.
+                    None => format!("<em>{}</em>", esc(reach.reason().unwrap_or("closed"))),
+                };
+                out.push_str(&format!(
+                    "<tr><td><code>{}</code></td><td>{}</td><td>{where_cell}</td></tr>",
+                    esc(&id),
+                    esc(&title),
+                ));
+            }
+            out.push_str("</table>");
+        };
+
+    section(
+        "forms",
+        "Forms",
+        "A typed way for somebody to reach you. What arrives waits in the \
+         queue until a machine of yours drains it.",
+        inv.forms
+            .iter()
+            .map(|t| (t.id.clone(), t.title.clone(), &t.reach))
+            .collect(),
+    );
+    section(
+        "booking",
+        "Booking pages",
+        "The slots a machine of yours last pushed, minus what has been \
+         taken. Availability is never computed here.",
+        inv.bookings
+            .iter()
+            .map(|t| (t.id.clone(), t.title.clone(), &t.reach))
+            .collect(),
+    );
+    section(
+        "polls",
+        "Polls",
+        "A poll with a link audience has one URL anybody may answer at. A \
+         roster poll has one per participant and none to publish — the \
+         capability is the identity.",
+        inv.polls
+            .iter()
+            .map(|p| (p.id.clone(), p.title.clone(), &p.reach))
+            .collect(),
+    );
+
+    out
+}
+
 fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
     let csrf = csrf(token);
     let esc = mecha_manifest::escape_text;
 
-    let bundles = app.db.bundles_overview(&user.id).unwrap_or_default();
+    // One read of everything this user has, and every section below renders
+    // from it. See `inventory.rs`: the point is that no surface reaches its
+    // own conclusion about what a stranger can open.
+    let inv = crate::inventory::Inventory::read(&app.db, user);
+    let gate = app.config.base_url(Role::Gate);
+
+    let bundles = &inv.bundles;
     let artifacts = if bundles.is_empty() {
         "<p>Nothing published yet. A connected machine publishes with \
          <code>factory-publish publish</code>; what lands here is yours to \
@@ -192,7 +278,7 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
                     .unwrap_or_default(),
             )
         };
-        for bundle in &bundles {
+        for bundle in bundles {
             let public = bundle.visibility == mecha_manifest::Visibility::Public;
             let vis_word = if public { "public" } else { "private" };
             let shown = match bundle.aliased {
@@ -210,12 +296,9 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
             // wrong origin and rescued by a redirect. A viewer URL is
             // class-independent, and the viewer — which does read the class —
             // is what prints the bare share URL.
-            let url = format!(
-                "{}/view/{}/{}",
-                app.config.base_url(Role::Gate),
-                user.handle,
-                bundle.id
-            );
+            // Always the viewer, whatever the reach: the owner may read their
+            // own private bundle, and this row is the owner's.
+            let url = format!("{gate}/view/{}/{}", user.handle, bundle.id);
             // Every stored version, with a pin for whichever the share URL
             // should follow.
             let versions = app
@@ -264,7 +347,11 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
                  <td>{shown}</td><td>{vis}</td><td>{actions}</td></tr>",
                 id = esc(&bundle.id),
                 title = esc(&bundle.title),
-                vis = if public { "everyone" } else { "nobody" },
+                // The reach, not the visibility flag. They differ in the one
+                // case that matters: a public bundle whose live version an
+                // operator withheld reads "everyone" from the flag alone,
+                // and serves nobody.
+                vis = bundle.reach.reason().unwrap_or("everyone"),
             ));
         }
         rows.push_str("</table>");
@@ -300,15 +387,17 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
     machines.push_str("</table>");
 
     // Sign-out, pairing and the identity line live in the header's dropdown
-    // now; the page body is the two ledgers and nothing twice.
+    // now; the page body is the ledgers and nothing twice.
     let body = format!(
         "<h1><code>{handle}</code></h1>\
          <h2 id=\"artifacts\">Artifacts</h2>{artifacts}\
+         {instruments}\
          <h2 id=\"machines\">Machines</h2>\
          <p>Each connected machine holds its own keys. Revoking here is what \
          makes a lost laptop somebody else's brick — a key that is used is a \
          machine that is alive.</p>{machines}",
         handle = esc(&user.handle),
+        instruments = instrument_sections(&inv, &gate),
     );
     let chrome = crate::http::intake::Chrome::Account {
         handle: user.handle.clone(),
