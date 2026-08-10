@@ -296,6 +296,7 @@ pub fn router(app: Shared) -> Router {
         // a switchboard somebody named.
         .route("/@{handle}", get(hangar::show))
         .route("/@a/{name}", get(hangar::asset))
+        .route("/@{handle}/{slug}", get(hangar::switchboard))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
         // The version switcher sits at the bare `v/`, a path the version

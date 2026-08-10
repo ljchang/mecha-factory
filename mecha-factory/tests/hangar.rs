@@ -15,6 +15,32 @@ fn get(server: &Server, target: &str) -> Reply {
     server.get(server.gate, target)
 }
 
+/// A session cookie for the default user, by walking the path they would.
+fn signed_in(server: &Server) -> String {
+    Request::new("POST", "/account/signin", server.gate.to_string())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body("email=alice%40example.org".to_string())
+        .send(server.gate);
+    let token = server.verification_token();
+    let finished = Request::new(
+        "POST",
+        &format!("/account/s/{token}"),
+        server.gate.to_string(),
+    )
+    .header("Content-Type", "application/x-www-form-urlencoded")
+    .body(String::new())
+    .send(server.gate);
+    let cookie = finished.header("set-cookie").expect("a session cookie");
+    cookie
+        .split_once('=')
+        .unwrap()
+        .1
+        .split(';')
+        .next()
+        .unwrap()
+        .to_string()
+}
+
 fn push(server: &Server, target: &str, body: &str) -> Reply {
     Request::new("PUT", target, server.gate.to_string())
         .auth(&server.key(Scope::Release))
@@ -236,4 +262,152 @@ fn the_artifact_origins_root_redirects_to_the_hangar() {
         location.contains("/@alice"),
         "no redirect to the hangar: {location:?}"
     );
+}
+
+// ---- switchboards -------------------------------------------------------
+
+fn a_form(server: &Server, id: &str) {
+    let manifest = format!(
+        "id = \"{id}\"\nversion = 1\ntitle = \"{id} title\"\n\
+         [[fields]]\nname = \"who\"\nlabel = \"You\"\nkind = \"text\"\nmax_length = 80\nrequired = true\n\
+         [[fields]]\nname = \"reply_to\"\nlabel = \"Email\"\nkind = \"email\"\nrequired = true\n\
+         [verification]\nfield = \"reply_to\"\n"
+    );
+    let parsed = mecha_manifest::RequestType::from_toml(&manifest).unwrap();
+    server
+        .db
+        .type_put(&mecha_factory::db::TypeRow {
+            user_id: server.user.id.clone(),
+            id: id.into(),
+            title: parsed.title.clone(),
+            manifest,
+            schema: "{}".into(),
+            updated_at: mecha_factory::db::now(),
+        })
+        .unwrap();
+}
+
+const HELLO: &str = "slug = \"hello\"\nheading = \"Get in touch\"\n\
+                     intro = \"The fastest way to reach me.\"\n\
+                     [[entry]]\nkind = \"form\"\nid = \"letter\"\nlabel = \"Request a letter\"\n\
+                     blurb = \"Three weeks, please.\"\n\
+                     [[entry]]\nkind = \"link\"\nurl = \"https://cosanlab.com/x\"\nlabel = \"Lab website\"\n";
+
+#[test]
+fn a_switchboard_renders_its_patched_lines() {
+    let server = common::start();
+    a_form(&server, "letter");
+    assert_eq!(push(&server, "/v1/boards/hello", HELLO).status, 200);
+
+    let page = get(&server, "/@alice/hello");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("Get in touch"), "{}", page.body);
+    assert!(page.body.contains("Three weeks, please."), "{}", page.body);
+    assert!(
+        page.body
+            .contains(&format!("http://{}/f/alice/letter", server.gate)),
+        "{}",
+        page.body
+    );
+    // An external line shows its host, always: a page that made an off-origin
+    // link look first-party would be a phishing kit with a nice theme.
+    assert!(
+        page.body.contains("https://cosanlab.com/x"),
+        "{}",
+        page.body
+    );
+    assert!(
+        page.body.contains("cosanlab.com<"),
+        "the host is not shown: {}",
+        page.body
+    );
+}
+
+/// The toggle is the hangar's. A URL in somebody's email signature must not
+/// break because its owner hid their index.
+#[test]
+fn a_switchboard_works_while_the_hangar_is_off() {
+    let server = common::start();
+    a_form(&server, "letter");
+    assert_eq!(push(&server, "/v1/boards/hello", HELLO).status, 200);
+    // No profile at all, so `enabled` is false.
+    assert_eq!(get(&server, "/@alice").status, 404);
+    assert_eq!(get(&server, "/@alice/hello").status, 200);
+}
+
+/// A line pointing at nothing is left off the page rather than served as a
+/// dead button — and its owner is told in the cockpit instead.
+#[test]
+fn a_dark_line_is_omitted_from_the_page_and_reported_to_its_owner() {
+    let server = common::start();
+    // `letter` is never created, so the line has nothing to point at.
+    assert_eq!(push(&server, "/v1/boards/hello", HELLO).status, 200);
+
+    let page = get(&server, "/@alice/hello");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        !page.body.contains("Request a letter"),
+        "a dark line was rendered: {}",
+        page.body
+    );
+    assert!(!page.body.contains("/f/alice/letter"), "{}", page.body);
+    // The line that does resolve is still there.
+    assert!(page.body.contains("Lab website"), "{}", page.body);
+
+    // And the owner learns about it where they can act.
+    let session = signed_in(&server);
+    let cockpit = Request::new("GET", "/account", server.gate.to_string())
+        .header("Cookie", &format!("__Host-factory-session={session}"))
+        .send(server.gate);
+    assert!(cockpit.body.contains("Dark lines"), "{}", cockpit.body);
+    assert!(
+        cockpit.body.contains("no form called `letter`"),
+        "the reason is not named: {}",
+        cockpit.body
+    );
+}
+
+/// A form that exists but is not servable is a different fix from one that
+/// does not exist, so the report says which.
+#[test]
+fn a_line_at_something_not_public_says_so_rather_than_saying_it_is_missing() {
+    let server = common::start();
+    // Parses, but declares no [verification], so it is never served.
+    let manifest = "id = \"letter\"\nversion = 1\ntitle = \"Letter\"\n\
+                    [[fields]]\nname = \"who\"\nlabel = \"You\"\nkind = \"text\"\nmax_length = 80\n";
+    server
+        .db
+        .type_put(&mecha_factory::db::TypeRow {
+            user_id: server.user.id.clone(),
+            id: "letter".into(),
+            title: "Letter".into(),
+            manifest: manifest.into(),
+            schema: "{}".into(),
+            updated_at: mecha_factory::db::now(),
+        })
+        .unwrap();
+    assert_eq!(push(&server, "/v1/boards/hello", HELLO).status, 200);
+
+    let session = signed_in(&server);
+    let cockpit = Request::new("GET", "/account", server.gate.to_string())
+        .header("Cookie", &format!("__Host-factory-session={session}"))
+        .send(server.gate);
+    assert!(
+        cockpit.body.contains("is not public"),
+        "an unservable target read as missing: {}",
+        cockpit.body
+    );
+}
+
+/// A reserved slug answers what an unclaimed one answers, and neither can be
+/// told from a handle that does not exist.
+#[test]
+fn a_reserved_or_unclaimed_slug_is_the_same_refusal() {
+    let server = common::start();
+    let unclaimed = get(&server, "/@alice/teaching");
+    let reserved = get(&server, "/@alice/account");
+    let no_person = get(&server, "/@nobody/teaching");
+    assert_eq!(unclaimed.status, 404);
+    assert_eq!(reserved.body, unclaimed.body);
+    assert_eq!(no_person.body, unclaimed.body);
 }

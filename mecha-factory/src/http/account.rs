@@ -392,12 +392,14 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
         "<h1><code>{handle}</code></h1>\
          <h2 id=\"artifacts\">Artifacts</h2>{artifacts}\
          {instruments}\
+         {boards}\
          <h2 id=\"machines\">Machines</h2>\
          <p>Each connected machine holds its own keys. Revoking here is what \
          makes a lost laptop somebody else's brick — a key that is used is a \
          machine that is alive.</p>{machines}",
         handle = esc(&user.handle),
         instruments = instrument_sections(&inv, &gate),
+        boards = board_section(app, user, &gate),
     );
     let chrome = crate::http::intake::Chrome::Account {
         handle: user.handle.clone(),
@@ -881,4 +883,72 @@ pub async fn asset(
     Path(name): Path<String>,
 ) -> Response {
     super::intake::serve_asset(&app, &origin, &name)
+}
+
+/// The boards this user has, and every line of them that is dark.
+///
+/// The dark-line report is the other half of the switchboard's rule that a
+/// dangling line is **omitted rather than rendered dead**: the page stays
+/// clean for a stranger, and the owner is the one who finds out. It reads
+/// `hangar::dark_lines`, which resolves against the same inventory the page
+/// renders from — a second opinion here would let the cockpit say a line is
+/// fine while the page quietly drops it.
+fn board_section(app: &Shared, user: &UserRow, gate: &str) -> String {
+    let esc = mecha_manifest::escape_text;
+    let boards = app
+        .db
+        .records(&user.id, crate::db::RECORD_BOARD)
+        .unwrap_or_default();
+    let dark = crate::http::hangar::dark_lines(app, user);
+    if boards.is_empty() && dark.is_empty() {
+        return String::new();
+    }
+
+    let mut out = String::from(
+        "<h2 id=\"boards\">Pages</h2>\
+         <p>Your hangar lists what is public. A switchboard is a page of \
+         lines you patch by hand and name yourself.</p>\
+         <table><tr><th>page</th><th>where</th><th></th></tr>",
+    );
+    for (slug, row) in &boards {
+        let (name, url) = if slug.is_empty() {
+            ("the hangar".to_string(), format!("{gate}/@{}", user.handle))
+        } else {
+            (
+                slug.clone(),
+                format!("{gate}/@{}/{}", user.handle, esc(slug)),
+            )
+        };
+        // Drift is the actionable column: the box holds something this
+        // user's machine does not, and a later push would overwrite it.
+        let note = if row.drifted() {
+            "edited here since its last push — <code>pull</code> to keep it"
+        } else {
+            ""
+        };
+        out.push_str(&format!(
+            "<tr><td>{}</td><td><a href=\"{url}\">{url}</a></td><td>{note}</td></tr>",
+            esc(&name),
+        ));
+    }
+    out.push_str("</table>");
+
+    if !dark.is_empty() {
+        out.push_str(
+            "<h3>Dark lines</h3>\
+             <p>These are on a page of yours and point at nothing, so they are \
+             left off it rather than served as a dead button. Fix the target \
+             or remove the line.</p><ul>",
+        );
+        for (board, label, why) in &dark {
+            out.push_str(&format!(
+                "<li><strong>{}</strong> on {} — {}</li>",
+                esc(label),
+                esc(board),
+                esc(why)
+            ));
+        }
+        out.push_str("</ul>");
+    }
+    out
 }
