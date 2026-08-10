@@ -73,8 +73,8 @@ enum Command {
         #[arg(long)]
         visibility: Option<String>,
     },
-    /// Render a marimo notebook as a `compute`-class bundle. Executes the
-    /// notebook, so it is bounded by a timeout.
+    /// Render a marimo notebook as a `compute`-class bundle. The cells run in
+    /// the reader's browser under Pyodide, not here.
     Notebook {
         /// The notebook `.py`.
         source: PathBuf,
@@ -82,7 +82,8 @@ enum Command {
         out: PathBuf,
         #[arg(long)]
         title: Option<String>,
-        /// Seconds the export may take. It runs the notebook.
+        /// Seconds the export may take. It does not run your cells — that
+        /// happens in the reader's browser — but any subprocess can hang.
         #[arg(long, default_value_t = 300)]
         timeout: u64,
         /// Build it even though the Python runtime is still CDN-loaded. A

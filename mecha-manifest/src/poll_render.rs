@@ -1382,7 +1382,35 @@ pub(crate) const SURVEY_STRUCTURE: &str = r#"
 .survey .question { margin:1.5rem 0; padding:1rem 0; border-top:1px solid var(--line, #8884); }
 .survey .question h2 { font-size:1.05rem; margin:0 0 .5rem; }
 .survey .req { color:var(--accent, inherit); }
-.survey .opt { display:block; margin:.35rem 0; }
+/* A choice is a card you press, not a dot you aim at.
+   The radio stays in the markup and in the tab order — it is what a form
+   posts, what a screen reader announces, and what works with the script
+   blocked — but it is not what anyone looks at. `:has(:checked)` moves the
+   selected state onto the whole card, which is a target the size of the thing
+   being chosen rather than a 16-pixel circle beside it. That matters most in
+   the case this arrived with: an option that *is* a picture, where the dot sat
+   outside the image it referred to and the image itself was not clickable.
+   The scale keeps its dots (`.point`), because five cards in a row stop
+   reading as a scale. */
+.survey .opt:not(.rank) { display:flex; align-items:center; gap:.5rem;
+  margin:.35rem 0; padding:.5rem .65rem; border:1px solid var(--rule, #8883);
+  border-radius:var(--radius); cursor:pointer; position:relative;
+  transition:border-color .12s ease, background-color .12s ease; }
+.survey .opt:not(.rank):hover { border-color:var(--accent); }
+/* Visually gone, functionally present: still focusable, still announced,
+   still the thing that posts. `display:none` would take all three away. */
+.survey .opt:not(.rank) > input { position:absolute; width:1px; height:1px;
+  opacity:0; margin:0; pointer-events:none; }
+.survey .opt:not(.rank):has(:checked) { border-color:var(--accent);
+  background:color-mix(in srgb, var(--accent) 12%, transparent); }
+/* The keyboard has to be able to see where it is, and the input it would
+   normally ring is invisible now. */
+.survey .opt:not(.rank):has(:focus-visible) { outline:2px solid var(--accent);
+  outline-offset:2px; }
+.survey .opt:not(.rank):has(:checked)::after { content:"✓"; margin-left:auto;
+  padding-left:.5rem; color:var(--accent); font-weight:700; }
+.survey .opt:not(.rank):has(:disabled) { cursor:default; opacity:.7; }
+.survey .opt:not(.rank):has(:disabled):hover { border-color:var(--rule, #8883); }
 .survey .opt .detail, .survey .cap { opacity:.75; font-size:.9rem; }
 .survey .cap { margin:.25rem 0; }
 /* A scale is one row of equal columns, each point's label under its control.
@@ -1454,13 +1482,23 @@ pub(crate) const SURVEY_STRUCTURE: &str = r#"
 .survey .qmedia { display:block; max-width:100%; height:auto; border-radius:var(--radius);
   margin:.35rem 0 .6rem; }
 .survey .optmedia { max-width:100%; height:auto; border-radius:var(--radius); }
-/* An option with a picture stacks: control and label on one line, the image
-   under them, so a row of choices reads as a row of pictures rather than a
-   row of controls with pictures somewhere behind. */
-.survey .opt.has-media { display:grid; grid-template-columns:auto 1fr; gap:.3rem .5rem;
-  align-items:center; max-width:22rem; }
-.survey .opt.has-media .optmedia { grid-column:1 / span 2; max-height:14rem;
-  object-fit:contain; justify-self:start; }
+/* A picture option is a card with the picture in it: the image first, its
+   label under it, and the whole thing the target. Choosing between figures
+   should mean clicking the figure. */
+.survey .opt.has-media { flex-direction:column; align-items:stretch; gap:.45rem;
+  max-width:22rem; padding:.5rem; }
+.survey .opt.has-media .optmedia { max-height:14rem; object-fit:contain;
+  border-radius:calc(var(--radius) - 2px); background:#0000000a; }
+.survey .opt.has-media .optlabel { font-size:.95rem; }
+/* The tick belongs on the image, not trailing under the caption. */
+.survey .opt.has-media:has(:checked)::after { position:absolute; top:.75rem;
+  right:.75rem; margin:0; padding:0; width:1.5rem; height:1.5rem;
+  display:flex; align-items:center; justify-content:center; border-radius:50%;
+  background:var(--accent); color:var(--on-accent); font-size:.85rem; }
+/* Side by side when there is room: comparing figures means seeing them at
+   once, and a column of two puts the second one below the fold. */
+.survey .opts:has(.opt.has-media) { display:flex; flex-wrap:wrap; gap:.6rem;
+  align-items:flex-start; }
 .survey .rank-list .optmedia { max-height:2.5rem; width:auto; margin-right:.4rem; }
 
 /* `layout` in the spec, as one class on one wrapper. Horizontal wraps
