@@ -13,29 +13,34 @@
 //! `mcp.rs` formats them for a model. Neither owns the behaviour, and adding a
 //! third front end costs nothing.
 //!
-//! ### The prose boundary, which is the one security decision here
+//! ### Other people's words, and why they are returned rather than withheld
 //!
-//! A poll's text answers are written by other people — and a `link` poll is open
-//! to the internet, so they are written by strangers. Handing that prose to a
-//! run holding the mailbox and the calendar is exactly what the front door
-//! exists to prevent, and the shape of the answer is borrowed from it
-//! wholesale: [`Status::for_privileged_run`] returns the typed tallies, the
-//! counts, and the ids — and there is deliberately **no argument that makes it
-//! return the prose**. The CLI reads `Status` directly, because a person reading
-//! a stranger's words in their own terminal is the safe context.
+//! A poll's text answers are written by other people, and a `link` poll is open
+//! to the internet, so they are written by strangers. The first version of
+//! [`Status::for_agent`] withheld them — counts only — on the front door's
+//! reasoning. That was wrong, and the correction is worth keeping.
 //!
-//! What remains on the privileged side, stated so nobody has to rediscover it:
-//! the question *prompts* are echoed back from the box, so a compromised origin
-//! could rewrite the user's own question text. That is a smaller channel than
-//! stranger prose by a wide margin, and the fix if it ever matters is to cache
-//! the spec in the local record at create time and render prompts from home.
-//! Recorded rather than fixed, because pretending it is not there is how the
-//! next person concludes the boundary is total.
+//! The front door withholds because its typed form already carries everything a
+//! triage run needs; the prose there is pure risk. In a poll the prose **is the
+//! data** — "what did people say" is most of why anyone runs one — so a tool
+//! that answers `{"count": 7}` is a feature that does not work, and the word
+//! cloud that makes text worth collecting lives in the presenter anyway.
 //!
-//! `polls export` is deliberately **not** reachable as a tool for the same
-//! reason — it writes every ballot's prose into a file in the workspace, where
-//! `fs_read` makes it indistinguishable from bytes we wrote ourselves. The
-//! exclusion list in `main.rs` says so in writing.
+//! What makes returning it right is that mecha already has a mechanism for
+//! third-party words, and it is not silence: `poll_status` carries
+//! `openWorldHint`, so everything here arrives marked `untrusted_input` and
+//! arms the trifecta interlock — the same treatment as a mail body, a fetched
+//! page, or a pkg retrieval, every one of which the model reads in full.
+//! Withholding on top of that was stricter than how mecha treats the user's own
+//! inbox.
+//!
+//! What survives is the **separation**. Typed tallies are numbers the box
+//! computed from enum answers; prose is sentences somebody typed; they ride in
+//! different fields and never merge. That is the property that lets an answer
+//! summarise what people wrote without treating any of it as an instruction.
+//! `polls export` stays off the tool surface for a different and smaller
+//! reason — it is a bulk CSV dump of a whole ballot set, which is a person's
+//! errand rather than an agent's.
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
@@ -142,19 +147,38 @@ pub enum Status {
     },
 }
 
-/// What a run holding tools may see: everything above, minus the prose.
+/// The tally as an agent reads it: typed answers and prose, kept apart.
 ///
-/// The shape is [`crate::requests::Record::for_privileged_run`]'s, and so is the
-/// rule — no argument, no flag, no "include_prose: bool". A boundary with a
-/// parameter is a boundary until the first person in a hurry.
+/// **This deliberately carries the free text**, and the first version of it
+/// deliberately did not — the reasoning is worth keeping because the correction
+/// is the interesting part. Withholding was borrowed from the front door, where
+/// a stranger's prose is pure risk because the typed form already carries
+/// everything the run needs. In a poll the prose *is* the data: "what did
+/// people say" is most of why anyone runs one, and an answer that reports
+/// `{"answers": 7}` is a feature that does not work.
+///
+/// What makes returning it right is that mecha already has a mechanism for
+/// other people's words, and it is not silence. `poll_status` carries
+/// `openWorldHint`, so everything here arrives marked `untrusted_input` and
+/// arms the trifecta interlock — the same treatment as a mail body, a fetched
+/// page, or a pkg retrieval, every one of which the model reads. Withholding
+/// on top of that was stricter than how mecha treats the user's own inbox.
+///
+/// What survives from the original design is the *separation*: typed tallies
+/// are numbers the box computed from enum answers, prose is other people's
+/// sentences, and the two never merge into one undifferentiated blob. Whatever
+/// reads this can tell which is which, which is the property that lets a
+/// summary say "three people asked for more time" without treating the words
+/// as instructions.
 #[derive(Debug, Clone)]
-pub struct Privileged {
+pub struct AgentView {
     pub poll_id: String,
     pub state: String,
     pub resolution: Option<String>,
     pub responded: usize,
     pub total: usize,
-    /// Serialised for whichever front end wants it; the prose is already gone.
+    /// Serialised for whichever front end wants it, prose fenced in its own
+    /// section rather than mixed into the typed one.
     pub body: Value,
 }
 
@@ -171,8 +195,8 @@ impl Status {
         }
     }
 
-    /// The tally with every free-text answer replaced by its count.
-    pub fn for_privileged_run(&self) -> Privileged {
+    /// The tally an agent reads: typed answers and prose, kept apart.
+    pub fn for_agent(&self) -> AgentView {
         match self {
             Status::Times {
                 poll_id,
@@ -181,7 +205,7 @@ impl Status {
                 total,
                 ranked,
                 clean_winner,
-            } => Privileged {
+            } => AgentView {
                 poll_id: poll_id.clone(),
                 state: state.clone(),
                 resolution: None,
@@ -210,10 +234,10 @@ impl Status {
                 spec,
                 tallies,
                 prose,
-                // Deliberately not destructured into the body below: the
-                // ballots carry the words.
+                // The ballots carry the same words in a shape nobody needs
+                // twice; `prose` below is the one that ships.
                 ballots: _,
-            } => Privileged {
+            } => AgentView {
                 poll_id: poll_id.clone(),
                 state: state.clone(),
                 resolution: resolution.clone(),
@@ -227,11 +251,13 @@ impl Status {
                         "prompt": q.prompt,
                         "tally": tallies.get(&q.id),
                     })).collect::<Vec<_>>(),
-                    // Named, counted, and withheld. A model that needs the words
-                    // has to ask the user to read them, which is the point.
-                    "withheld_prose": prose.iter().map(|(id, entries)| json!({
+                    // Fenced, never folded into `questions` above. These are
+                    // other people's sentences; the boundary that matters is
+                    // that a reader can always tell them from the numbers.
+                    "text_answers": prose.iter().map(|(id, entries)| json!({
                         "question": id,
-                        "answers": entries.len(),
+                        "count": entries.len(),
+                        "answers": entries,
                     })).collect::<Vec<_>>(),
                 }),
             },
@@ -758,10 +784,11 @@ mod tests {
         assert!(err.contains("appears twice"), "{err}");
     }
 
-    /// The load-bearing test of the whole module: prose written by other people
-    /// must not survive the trip to a run that holds tools.
+    /// Prose reaches the agent — it is the data — but it never merges into the
+    /// typed tallies. A reader that cannot tell a count from a sentence is one
+    /// that can be talked into treating a sentence as an instruction.
     #[test]
-    fn the_privileged_view_counts_prose_and_never_carries_it() {
+    fn the_agent_view_carries_prose_in_its_own_fenced_section() {
         let spec = mecha_manifest::PollSpec::from_toml(
             r#"
             title = "Retro"
@@ -794,20 +821,25 @@ mod tests {
             prose,
         };
 
-        // The CLI's view has the words: a person reading them in a terminal is
-        // the safe context.
-        let Status::General { prose, .. } = &status else {
-            unreachable!()
-        };
-        assert!(prose["notes"][0].contains("IGNORE PREVIOUS"));
+        let view = status.for_agent();
+        let body = &view.body;
 
-        // The privileged view has the count and nothing else.
-        let rendered = serde_json::to_string(&status.for_privileged_run().body).unwrap();
+        // The words are there — withholding them is what made this useless.
+        let text = &body["text_answers"][0];
+        assert_eq!(text["question"], "notes");
+        assert_eq!(text["count"], 1);
+        assert!(text["answers"][0]
+            .as_str()
+            .unwrap()
+            .contains("IGNORE PREVIOUS"));
+
+        // And they are *only* there: the typed side stays numbers, so nothing
+        // a respondent typed can arrive dressed as a tally.
+        let typed = serde_json::to_string(&body["questions"]).unwrap();
         assert!(
-            !rendered.contains("IGNORE PREVIOUS"),
-            "prose reached a run with tools: {rendered}"
+            !typed.contains("IGNORE PREVIOUS"),
+            "prose leaked into the typed section: {typed}"
         );
-        assert!(rendered.contains("\"answers\":1"), "{rendered}");
     }
 
     #[test]

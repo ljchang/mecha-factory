@@ -74,8 +74,48 @@ pub struct PollQuestion {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub required: bool,
+    /// Whether the choices run down the page or across it.
+    ///
+    /// Presentation, deliberately kept out of [`QuestionKind`]: the kind is
+    /// what a question *means* and therefore what an answer may be, and a
+    /// tally must never change because someone rearranged a page. Five points
+    /// in a row is the conventional Likert item and reads as a scale; five
+    /// options down the page reads as a list of things to pick between. The
+    /// default is whatever each kind already rendered, so no existing spec
+    /// changes meaning by upgrading.
+    #[serde(default, skip_serializing_if = "Layout::is_default")]
+    pub layout: Layout,
     #[serde(flatten)]
     pub kind: QuestionKind,
+}
+
+/// Which way a question's controls run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    /// Each kind's existing rendering: scales across, everything else down.
+    #[default]
+    Auto,
+    /// One control per line.
+    Vertical,
+    /// Controls on one line, wrapping when they must.
+    Horizontal,
+}
+
+impl Layout {
+    fn is_default(&self) -> bool {
+        matches!(self, Layout::Auto)
+    }
+
+    /// Whether this question's controls should run across the page, given what
+    /// the kind renders as when nobody says.
+    pub fn is_horizontal(&self, default_horizontal: bool) -> bool {
+        match self {
+            Layout::Auto => default_horizontal,
+            Layout::Horizontal => true,
+            Layout::Vertical => false,
+        }
+    }
 }
 
 /// What a question asks, and therefore what an answer may be.
@@ -460,7 +500,7 @@ fn check_options(question: &str, options: &[PollOption]) -> Result<()> {
 /// TOML because serde's `flatten` forfeits `deny_unknown_fields` — a typo'd
 /// key in a schema format silently doing nothing is not acceptable. The
 /// same arrangement as `check_field_keys` in request.rs.
-const COMMON_QUESTION_KEYS: &[&str] = &["id", "prompt", "required", "kind"];
+const COMMON_QUESTION_KEYS: &[&str] = &["id", "prompt", "required", "kind", "layout"];
 
 fn allowed_question_keys(kind: &str) -> Option<&'static [&'static str]> {
     Some(match kind {
@@ -1161,6 +1201,7 @@ mod tests {
             id: "q".into(),
             prompt: None,
             required: false,
+            layout: Layout::Auto,
             kind,
         }
     }

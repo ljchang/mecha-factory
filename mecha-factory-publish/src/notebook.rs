@@ -10,21 +10,30 @@
 //! it is also what `marimo-book`'s own source concludes after shipping the
 //! islands path in production.
 //!
-//! This is the one template that **executes code we did not write** — the
-//! export runs the notebook to capture its state — which is why §2.3 splits
-//! rendering from publishing at all. Two consequences are load-bearing:
+//! **The export does not execute the notebook**, and this file said the
+//! opposite for a long time. Measured on marimo 0.23.16 rather than reasoned
+//! about: a notebook whose cell body writes a file exports without writing it,
+//! a statement at *module top level* does not run either, and a notebook that
+//! imports a package which does not exist and then raises `SystemExit` exports
+//! cleanly with exit 0. `export html-wasm` parses the file — it does not even
+//! import it. Execution is the browser's job, under Pyodide, which is the whole
+//! point of a WASM bundle.
 //!
-//! - **The render is bounded by a timeout.** A hung notebook must not stall a
-//!   scheduled run for as long as the run's own ceiling. Inherited from
-//!   marimo-book, which pays for it: `MarimoIslandGenerator.build()` executes
-//!   in-process and gets no timeout for free.
-//! - **Confinement is this crate's job, and it is not done yet.** The design
-//!   is explicit that a renderer executing arbitrary Python must not also hold
-//!   the publish key or reach the network, and equally explicit that an
-//!   unenforced claim is decoration. So it is *stated* rather than implied:
-//!   today the export runs as you, exactly as `shell` does under mecha's
-//!   default `[sandbox] kind = "none"`. See `confinement` in the crate README
-//!   before wiring this to anything unattended.
+//! The correction matters because the old claim was load-bearing elsewhere: it
+//! is why mecha's config records the notebook template as the one path running
+//! code we did not write, and why that template was kept off unattended paths.
+//! `marimo export html` (no `-wasm`) *does* execute, and so does
+//! `MarimoIslandGenerator.build()` — which is probably where the belief came
+//! from. Neither is what runs here.
+//!
+//! What remains true:
+//!
+//! - **The render is still bounded by a timeout.** Not because the notebook
+//!   runs, but because a subprocess can hang for reasons of its own, and a
+//!   scheduled run must not wait out its whole ceiling on one.
+//! - **`vendor_runtime` reaches the network**, fetching Pyodide from a pinned
+//!   allowlist and recording a digest. That, not execution, is the one thing
+//!   this template does that a confined renderer would need to be allowed.
 //!
 //! ### What the export actually produces, measured rather than assumed
 //!
@@ -104,7 +113,8 @@ const RUNTIME_HOSTS: [&str; 2] = ["cdn.jsdelivr.net/pyodide", "wasm.marimo.app"]
 pub struct NotebookOptions {
     /// The marimo executable. A venv's `bin/marimo`, or whatever is on `PATH`.
     pub marimo: PathBuf,
-    /// Wall-clock ceiling on the export, which *executes the notebook*.
+    /// Wall-clock ceiling on the export. Not because it runs the notebook — it
+    /// does not — but because any subprocess can hang.
     pub timeout: Duration,
     pub title: Option<String>,
     /// Produce the bundle even though its Python runtime still comes from a
@@ -314,9 +324,9 @@ fn export(source: &Path, out: &Path, options: &NotebookOptions) -> Result<()> {
             )
         })?;
 
-    // The export executes the notebook, so it is bounded. Polling rather than
-    // blocking: there is no timeout on `wait`, and a hung notebook must not
-    // hold a scheduled run for as long as the run's own ceiling.
+    // Bounded anyway. Polling rather than blocking: there is no timeout on
+    // `wait`, and a stalled subprocess must not hold a scheduled run for as
+    // long as the run's own ceiling.
     let started = Instant::now();
     loop {
         match child.try_wait()? {
@@ -342,8 +352,9 @@ fn export(source: &Path, out: &Path, options: &NotebookOptions) -> Result<()> {
                 let _ = child.kill();
                 let _ = child.wait();
                 bail!(
-                    "the export of {} did not finish in {:?} — it executes the \
-                     notebook, so a cell that blocks blocks this",
+                    "the export of {} did not finish in {:?}. It does not run your \
+                     cells — that happens in the browser — so this is marimo itself \
+                     stalling, or a very large notebook",
                     source.display(),
                     options.timeout
                 );

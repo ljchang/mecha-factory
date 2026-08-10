@@ -2052,10 +2052,9 @@ mod surface {
         (
             "polls export",
             NotATool(
-                "it writes every ballot's free text into a file in the workspace, where \
-                 fs_read makes a stranger's words indistinguishable from bytes we wrote \
-                 ourselves. poll_status counts prose and never quotes it, and this would be \
-                 the way around that. A person exports their own poll.",
+                "a bulk CSV dump of every ballot, for a spreadsheet or an analysis script — \
+                 a person's errand, and one whose output nobody reads in a chat window. \
+                 poll_status already returns the answers an agent needs, prose included.",
             ),
         ),
         (
