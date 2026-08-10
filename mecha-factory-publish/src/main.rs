@@ -533,6 +533,7 @@ fn main() -> Result<()> {
                 store.set_alias(&id, Some(published.version), visibility, &now)?;
                 println!("  alias  → v{}", published.version);
             }
+            let mut mirrored = None;
             if !no_push {
                 // Local first, always. The store is the record; the box is a
                 // copy of it that the world can read, and a push that fails
@@ -544,7 +545,10 @@ fn main() -> Result<()> {
                     (!no_alias).then_some(published.version),
                     visibility,
                 ) {
-                    Ok(Some(at)) => println!("{}", at.columns()),
+                    Ok(Some(at)) => {
+                        println!("{}", at.columns());
+                        mirrored = Some(at);
+                    }
                     Ok(None) => {}
                     Err(e) => {
                         eprintln!("\nthe box did not take it: {e:#}");
@@ -557,7 +561,7 @@ fn main() -> Result<()> {
                     }
                 }
             }
-            reach(&store, &id)?;
+            reach(&store, &id, mirrored.as_ref())?;
         }
 
         Command::Push {
@@ -587,19 +591,14 @@ fn main() -> Result<()> {
                 Some(at) => {
                     println!("{id} v{version}");
                     println!("{}", at.columns());
-                    // Narrowed from "the visibility we asked for was private"
-                    // to "the alias actually says private now": with
-                    // `--no-alias` this side changed nothing, and telling
-                    // somebody their public bundle serves nobody is the same
-                    // kind of wrong as the message this whole change removes.
-                    if at.serves == remote::Serves::OwnerOnly {
-                        println!(
-                            "  It is private, so the origin serves it to nobody else. \
-                             The page above opens for you, signed in at the gate; \
-                             `factory-publish alias {id} {version} --visibility public` \
-                             publishes it."
-                        );
-                    }
+                    // The caveat used to be inline and conditional on the
+                    // visibility this side asked for, which meant `--no-alias`
+                    // — where nothing was asked and `serves` is `Unchanged` —
+                    // printed a bare bytes URL with no caveat at all. It goes
+                    // through `reach` now, like `publish` always did, so every
+                    // state says something and no state has to be remembered
+                    // in two places.
+                    reach(&store, &id, Some(&at))?;
                 }
                 None => bail!(
                     "no factory is configured. Write ~/.mecha/factory/config.toml with \
@@ -795,10 +794,11 @@ fn main() -> Result<()> {
             });
             store.set_alias(&id, Some(version), visibility, &now)?;
             println!("{id} → v{version}");
-            if let Some(at) = remote::mirror_alias(&id, Some(version), visibility)? {
+            let mirrored = remote::mirror_alias(&id, Some(version), visibility)?;
+            if let Some(at) = &mirrored {
                 println!("{}", at.columns());
             }
-            reach(&store, &id)?;
+            reach(&store, &id, mirrored.as_ref())?;
         }
 
         Command::Unpublish { id } => {
@@ -880,7 +880,7 @@ fn main() -> Result<()> {
             if alias.as_ref().and_then(|a| a.version).is_none() {
                 println!("  the share URL resolves to nothing (taken down)");
             }
-            reach(&store, &id)?;
+            reach(&store, &id, None)?;
         }
 
         Command::Fetch { id, out, version } => {
@@ -932,27 +932,68 @@ fn parse_visibility(text: Option<&str>) -> Result<Option<Visibility>> {
 /// enforced now — the origin serves a private bundle to nobody, and answers
 /// exactly what it answers for a bundle that never existed — so what this
 /// prints depends on whether there is a box at all.
-fn reach(store: &BundleStore, id: &str) -> Result<()> {
+/// The `reach` line: who can actually read this, on the origin.
+///
+/// Takes the [`remote::Mirrored`] the box answered with when this command got
+/// one, because the *local* store's visibility is not evidence about the
+/// origin's — see the comment inside. `None` is for the read-only commands
+/// that never asked.
+fn reach(store: &BundleStore, id: &str, at: Option<&remote::Mirrored>) -> Result<()> {
     let visibility = store
         .alias(id)?
         .map(|a| a.visibility)
         .unwrap_or(Visibility::Private);
     let remote = remote::Remote::configured().ok().flatten();
-    match (remote, visibility) {
-        (None, _) => println!(
+    if remote.is_none() {
+        println!(
             "  reach  whoever can read {} — no factory is configured, so it is \
              published locally and nowhere else",
             store.root().display()
-        ),
-        (Some(_), Visibility::Private) => println!(
-            "  reach  nobody else: it is on the box and marked private, which the \
-             origin enforces by serving the bytes to no one but you. Its viewer \
-             page still opens, signed in at the gate. \
-             `factory-publish alias {id} <version> --visibility public` publishes it."
-        ),
-        (Some(_), Visibility::Public) => {
+        );
+        return Ok(());
+    }
+    // What the box was actually told, when this command told it something.
+    // The local visibility is not evidence about the origin: a machine with
+    // only a publish key sets the local alias and never moves the box's, so
+    // this line used to print "anyone with the link — it is public on the
+    // origin" directly beneath a note saying the alias had not moved.
+    match at.map(|at| at.serves) {
+        Some(remote::Serves::Everyone) => {
             println!("  reach  anyone with the link — it is public on the origin")
         }
+        Some(remote::Serves::OwnerOnly) => {
+            println!(
+                "  reach  nobody else: it is on the box and marked private, which \
+                 the origin enforces by serving the bytes to no one but you."
+            );
+            // Named only when one was printed — `columns()` omits the page
+            // line against a box that reported none, and pointing at a line
+            // that is not there is how a reader ends up opening the bytes URL
+            // expecting a page.
+            match at.and_then(|at| at.page()) {
+                Some(page) => println!("         Open it at {page}, signed in at the gate."),
+                None => println!("         Open it from your account page at the gate."),
+            }
+            println!(
+                "         `factory-publish alias {id} <version> --visibility public` \
+                 publishes it."
+            );
+        }
+        Some(remote::Serves::Nothing) => println!(
+            "  reach  nobody: the share URL points at nothing. Every version is \
+             still on the box."
+        ),
+        // Either this command did not touch the alias, or it is a read-only
+        // one that never asked. Both mean the same thing here: the origin's
+        // answer is whatever it already was, and the local record cannot say.
+        Some(remote::Serves::Unchanged) | None => println!(
+            "  reach  whatever the alias on the box already said — this did not \
+             change it{}",
+            match visibility {
+                Visibility::Public => " (locally it is marked public)",
+                Visibility::Private => " (locally it is marked private)",
+            }
+        ),
     }
     Ok(())
 }
@@ -2153,6 +2194,42 @@ mod tests {
     use super::Reach;
     use clap::CommandFactory;
     use std::collections::BTreeSet;
+
+    /// The remediation command a publish-key-only machine prints has to be a
+    /// command this binary accepts.
+    ///
+    /// It was not: it spelled the version `--version {v}` where `alias` takes
+    /// it positionally, so the one instruction that gets a staged bundle in
+    /// front of a reader failed with `unexpected argument '--version'`. Prose
+    /// cannot check itself, so it is parsed here through the real `Cli` — the
+    /// only assertion that would have caught it.
+    #[test]
+    fn the_printed_release_command_parses() {
+        use clap::Parser;
+
+        let printed = mecha_factory_publish::remote::release_command("brief", 3);
+        let argv: Vec<&str> = printed.split_whitespace().collect();
+        assert_eq!(argv[0], "factory-publish", "{printed}");
+
+        let parsed = super::Cli::try_parse_from(&argv).unwrap_or_else(|e| {
+            panic!(
+                "the note tells the user to run `{printed}`, which this \
+                                        binary refuses:\n{e}"
+            )
+        });
+        match parsed.command {
+            super::Command::Alias {
+                id,
+                version,
+                visibility,
+            } => {
+                assert_eq!(id, "brief");
+                assert_eq!(version, 3);
+                assert_eq!(visibility.as_deref(), Some("public"));
+            }
+            _ => panic!("`{printed}` parses, but as some other subcommand"),
+        }
+    }
 
     /// Every path clap knows about, one level into any group.
     fn cli_paths() -> BTreeSet<String> {

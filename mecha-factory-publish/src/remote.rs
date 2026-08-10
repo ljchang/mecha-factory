@@ -172,7 +172,7 @@ pub enum Serves {
 /// printed whichever single URL it happened to be holding, which is how a
 /// private bundle's 404 came to be announced as "it is live at".
 #[derive(Debug)]
-pub struct Reach {
+pub struct Mirrored {
     pub viewer: Option<String>,
     pub bare: String,
     pub serves: Serves,
@@ -182,41 +182,65 @@ pub struct Reach {
     pub note: String,
 }
 
-impl Reach {
-    /// The page to hand a person, falling back to the bytes when the box is
-    /// too old to have named one.
-    pub fn for_a_person(&self) -> &str {
-        self.viewer.as_deref().unwrap_or(&self.bare)
+impl Mirrored {
+    /// The page to hand a person, when the box named one.
+    ///
+    /// **Deliberately not a fallback to the bytes URL.** That is what this
+    /// returned first, and it reinstated the exact lie the type exists to
+    /// remove: with no page, `page` and `bare` became the same string, and
+    /// the private arm then read "only you can open it: <URL>. <the same URL>
+    /// serves nobody" about an origin that holds no session and answers 404.
+    /// A missing page is a thing to say less about, never a different URL to
+    /// name in its place.
+    pub fn page(&self) -> Option<&str> {
+        self.viewer.as_deref()
     }
 
     /// One honest sentence about who can open it — for an agent's answer, and
     /// anything else with room for prose rather than columns.
     ///
-    /// Every arm names the viewer page first, because that is the URL a
-    /// person is meant to receive, and the bare one second with what it is
-    /// for. The private arm is the one that matters: it is the state a
-    /// publish key leaves behind, and where the old wording — "it is live
-    /// at …" — was simply false about a URL that serves nobody.
+    /// Two variants of every arm, because a box that named no page has no
+    /// page, and the versions without one are the arms real traffic
+    /// exercises until the origin is redeployed. The rule they all obey:
+    /// **the bare URL is named only where it actually serves somebody.**
+    /// Private, taken down, and alias-untouched all mean it does not, so
+    /// those arms describe it rather than offering it.
     pub fn sentence(&self) -> String {
-        let page = self.for_a_person();
         let bare = &self.bare;
-        let body = match self.serves {
-            Serves::Everyone => format!(
+        let body = match (self.serves, self.page()) {
+            (Serves::Everyone, Some(page)) => format!(
                 "Anyone with the link can read it at {page}. The bytes on their \
                  own — for a machine, a citation, or a projector — are at {bare}."
             ),
-            Serves::OwnerOnly => format!(
+            (Serves::Everyone, None) => {
+                format!("Anyone with the link can read it at {bare}.")
+            }
+            (Serves::OwnerOnly, Some(page)) => format!(
                 "It is private, so only you can open it: {page}, signed in at the \
                  gate. {bare} serves nobody until it is released."
             ),
-            Serves::Nothing => format!(
+            (Serves::OwnerOnly, None) => format!(
+                "It is private, so {bare} serves nobody until it is released. \
+                 Until then it is yours alone, from your account page at the gate."
+            ),
+            (Serves::Nothing, Some(page)) => format!(
                 "Its share URL now resolves to nothing. Every version is still on \
                  the box, and {page} still opens for you."
             ),
-            Serves::Unchanged => format!(
-                "The page is {page} and the bytes are at {bare}. Who may read it \
-                 is whatever the alias already said — this did not change it."
+            (Serves::Nothing, None) => format!(
+                "Its share URL now resolves to nothing, so {bare} serves nobody. \
+                 Every version is still on the box."
             ),
+            // The bare URL is deliberately absent from both: this arm is
+            // reached when the alias was never moved, which for an agent's
+            // first publish means it names no version and that URL 404s.
+            (Serves::Unchanged, Some(page)) => format!(
+                "The page is {page}. Who may read it is whatever the alias \
+                 already said — this did not change it."
+            ),
+            (Serves::Unchanged, None) => "Who may read it is whatever the alias already said — \
+                 this did not change it."
+                .to_string(),
         };
         format!("{body}{}", self.note)
     }
@@ -617,6 +641,19 @@ impl Remote {
     }
 }
 
+/// The command that publishes a version, as a person would type it.
+///
+/// One function because the string is *instructions* — the only way a bundle
+/// staged by a publish-key-only machine ever reaches a reader — and it was
+/// wrong: it spelled the version `--version {v}` where `alias` takes it
+/// positionally, so clap refused the one command the note existed to give.
+/// A string nobody can run is worse than no string, because it reads as a
+/// route out and is not one. `main.rs`'s test module parses what this returns
+/// through the real `Cli`, which is the check the prose could not have.
+pub fn release_command(id: &str, version: u32) -> String {
+    format!("factory-publish alias {id} {version} --visibility public")
+}
+
 /// Push a version and set the alias on the box, when there is one.
 ///
 /// `Ok(None)` means no remote is configured, which is an ordinary state and not
@@ -629,7 +666,7 @@ pub fn mirror(
     version: u32,
     alias_to: Option<u32>,
     visibility: Visibility,
-) -> Result<Option<Reach>> {
+) -> Result<Option<Mirrored>> {
     let Some(remote) = Remote::configured()? else {
         return Ok(None);
     };
@@ -671,13 +708,13 @@ pub fn mirror(
                 note.push_str(&format!(
                     "\nversion {target} is on the box and is not published: no release \
                      key here, so the alias did not move. Release it with \
-                     `factory-publish alias {id} --version {target}` from a machine \
-                     that has one."
+                     `{}` from a machine that has one.",
+                    release_command(id, target)
                 ));
             }
         }
     }
-    Ok(Some(Reach {
+    Ok(Some(Mirrored {
         viewer,
         bare: pushed.url,
         serves,
@@ -693,7 +730,7 @@ pub fn mirror_alias(
     id: &str,
     version: Option<u32>,
     visibility: Visibility,
-) -> Result<Option<Reach>> {
+) -> Result<Option<Mirrored>> {
     let Some(remote) = Remote::installed(Scope::Release)? else {
         return Ok(None);
     };
@@ -708,7 +745,7 @@ pub fn mirror_alias(
             Visibility::Private => Serves::OwnerOnly,
         },
     };
-    Ok(Some(Reach {
+    Ok(Some(Mirrored {
         viewer,
         bare,
         serves,
@@ -817,8 +854,8 @@ mod tests {
     const PAGE: &str = "https://gate.example.org/view/alice/brief";
     const BYTES: &str = "https://alice.art.example.org/b/brief/";
 
-    fn reach(serves: Serves, viewer: Option<&str>, note: &str) -> Reach {
-        Reach {
+    fn reach(serves: Serves, viewer: Option<&str>, note: &str) -> Mirrored {
+        Mirrored {
             viewer: viewer.map(String::from),
             bare: BYTES.into(),
             serves,
@@ -888,17 +925,71 @@ mod tests {
         );
     }
 
-    /// A box older than `viewer_url` must degrade to the bytes, never to a
-    /// blank — a URL-shaped hole in a sentence reads as a broken link rather
-    /// than as an old server, and an empty `page` column reads as one too.
+    /// With no page, no arm may offer the bytes URL as one that opens.
+    ///
+    /// This replaces a test that asserted the opposite and passed: it checked
+    /// that a missing page "falls back to the bytes", on `Serves::Everyone`
+    /// alone — the single arm where that substitution happens to be true. In
+    /// the other three the same fallback made `page` and `bare` one string,
+    /// so the private arm read "only you can open it: <URL>. <the same URL>
+    /// serves nobody", about an origin that holds no session and answers 404.
+    /// That is the "it is live at" lie this whole type exists to remove,
+    /// reinstated in the arm today's deployed box exercises.
     #[test]
-    fn a_box_that_names_no_page_falls_back_to_the_bytes() {
+    fn with_no_page_no_arm_offers_the_bytes_as_one_that_opens() {
+        // Phrases that promise the URL beside them can be opened. If a new
+        // arm is written with one of these and no page, this fails.
+        const PROMISES: [&str; 4] = [
+            "only you can open it:",
+            "still opens",
+            "The page is",
+            "read it at",
+        ];
+
+        for serves in [
+            Serves::Everyone,
+            Serves::OwnerOnly,
+            Serves::Nothing,
+            Serves::Unchanged,
+        ] {
+            let said = reach(serves, None, "").sentence();
+            for promise in PROMISES {
+                if let Some(at) = said.find(promise) {
+                    // `Everyone` is the one state where the bare URL *is*
+                    // openable, so it alone may be promised.
+                    assert_eq!(
+                        serves,
+                        Serves::Everyone,
+                        "{serves:?} promises \"{promise}\" with no page, and the only \
+                         URL it can mean is one that serves nobody: {said}"
+                    );
+                    let _ = at;
+                }
+            }
+        }
+    }
+
+    /// The columns degrade to the bytes line alone rather than printing an
+    /// empty `page` row, which would read as a broken link rather than an old
+    /// server.
+    #[test]
+    fn a_box_that_names_no_page_prints_no_page_line() {
         let at = reach(Serves::Everyone, None, "");
-        assert_eq!(at.for_a_person(), BYTES);
-        assert!(at.sentence().contains(BYTES));
+        assert_eq!(at.page(), None);
         let columns = at.columns();
         assert!(!columns.contains("page"), "no empty page line: {columns:?}");
         assert!(columns.contains(&format!("bytes  {BYTES}")), "{columns:?}");
+    }
+
+    /// The one instruction that gets a publish-key-only bundle released has
+    /// to be a command that runs. `main.rs`'s test module parses it through
+    /// the real `Cli`; this pins the shape that clap rejected — the version
+    /// is positional, never `--version`.
+    #[test]
+    fn the_release_command_puts_the_version_where_alias_wants_it() {
+        let command = release_command("brief", 3);
+        assert!(command.contains(" brief 3"), "{command}");
+        assert!(!command.contains("--version"), "clap rejects it: {command}");
     }
 
     /// A store with one pushable version in it, rooted in a tempdir.

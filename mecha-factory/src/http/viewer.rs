@@ -581,6 +581,28 @@ pub async fn view(
     };
     let esc = mecha_manifest::escape_text;
 
+    // This version's bytes, on the artifact origin — the immutable URL a
+    // citation names and a projector shows.
+    //
+    // Restored here because the account page used to be the only surface
+    // offering a per-version bare URL, and pointing its rows at the viewer
+    // took the last one away. It belongs on this page anyway: the account
+    // page has no class to consult, and this one does.
+    //
+    // Offered **only when the bundle is public**, because that is the only
+    // state in which the URL serves anyone. A private bundle's version URL
+    // answers 404 to its owner as much as to a stranger — the gate mints a
+    // capability instead — so linking it while private would be the same
+    // "here is a URL that opens" lie this page exists to avoid.
+    let bytes_link = if public && live.is_some() {
+        format!(
+            "<a href=\"{art_base}/b/{id}/v/{version}/\">v{version} bytes</a>",
+            id = esc(&id),
+        )
+    } else {
+        String::new()
+    };
+
     // The version menu.
     let mut version_links = String::new();
     for v in &versions {
@@ -748,7 +770,7 @@ pub async fn view(
          <p><code>{handle}/{id}</code> — every version is immutable; the \
          share URL follows the live one.</p>\
          <nav>{version_links}\
-         <a href=\"{art_base}/b/{id}/\">share URL</a></nav>\
+         <a href=\"{art_base}/b/{id}/\">share URL</a>{bytes_link}</nav>\
          </div></details>\
          {manage}{identity}\
          </div></header>\n\
