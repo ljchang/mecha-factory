@@ -544,7 +544,7 @@ fn main() -> Result<()> {
                     (!no_alias).then_some(published.version),
                     visibility,
                 ) {
-                    Ok(Some(url)) => println!("  url    {url}"),
+                    Ok(Some(at)) => println!("{}", at.columns()),
                     Ok(None) => {}
                     Err(e) => {
                         eprintln!("\nthe box did not take it: {e:#}");
@@ -584,13 +584,20 @@ fn main() -> Result<()> {
                 (!no_alias).then_some(version),
                 visibility,
             )? {
-                Some(url) => {
-                    println!("{id} v{version} → {url}");
-                    if visibility == Visibility::Private {
+                Some(at) => {
+                    println!("{id} v{version}");
+                    println!("{}", at.columns());
+                    // Narrowed from "the visibility we asked for was private"
+                    // to "the alias actually says private now": with
+                    // `--no-alias` this side changed nothing, and telling
+                    // somebody their public bundle serves nobody is the same
+                    // kind of wrong as the message this whole change removes.
+                    if at.serves == remote::Serves::OwnerOnly {
                         println!(
-                            "  It is private, so the origin serves it to nobody. \
-                             `factory-publish alias {id} {version}` after making it \
-                             public, or set the visibility on the box."
+                            "  It is private, so the origin serves it to nobody else. \
+                             The page above opens for you, signed in at the gate; \
+                             `factory-publish alias {id} {version} --visibility public` \
+                             publishes it."
                         );
                     }
                 }
@@ -788,8 +795,8 @@ fn main() -> Result<()> {
             });
             store.set_alias(&id, Some(version), visibility, &now)?;
             println!("{id} → v{version}");
-            if let Some(url) = remote::mirror_alias(&id, Some(version), visibility)? {
-                println!("  url    {url}");
+            if let Some(at) = remote::mirror_alias(&id, Some(version), visibility)? {
+                println!("{}", at.columns());
             }
             reach(&store, &id)?;
         }
@@ -938,9 +945,10 @@ fn reach(store: &BundleStore, id: &str) -> Result<()> {
             store.root().display()
         ),
         (Some(_), Visibility::Private) => println!(
-            "  reach  nobody: it is on the box and marked private, which the origin \
-             enforces by serving it to no one. `factory-publish alias {id} <version>` \
-             after making it public."
+            "  reach  nobody else: it is on the box and marked private, which the \
+             origin enforces by serving the bytes to no one but you. Its viewer \
+             page still opens, signed in at the gate. \
+             `factory-publish alias {id} <version> --visibility public` publishes it."
         ),
         (Some(_), Visibility::Public) => {
             println!("  reach  anyone with the link — it is public on the origin")

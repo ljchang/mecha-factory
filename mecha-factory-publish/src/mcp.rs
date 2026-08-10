@@ -140,7 +140,11 @@ fn tools() -> Vec<ToolSpec> {
             description:
                 "Publish an already-rendered bundle directory as a new immutable version and \
                  point its share URL at it. Publishing identical bytes returns the existing \
-                 version rather than making a new one.",
+                 version rather than making a new one. The answer names two URLs and they \
+                 are not interchangeable: give a **person** the viewer page, which carries \
+                 the version menu and the owner's controls, and use the bare bytes URL only \
+                 for something that is not a browser — another tool fetching it, a citation, \
+                 a projector. Quote the answer's own URLs rather than composing one.",
             read_only: false,
             open_world: true,
             schema: || {
@@ -172,7 +176,9 @@ fn tools() -> Vec<ToolSpec> {
             description:
                 "Point a bundle's share URL at a specific version. This changes what every \
                  existing share link resolves to, which is a publication rather than \
-                 bookkeeping.",
+                 bookkeeping. Like bundle_publish, the answer names the viewer page for a \
+                 person and the bare bytes URL for a machine; quote them rather than \
+                 composing one.",
             read_only: false,
             open_world: true,
             schema: || {
@@ -384,9 +390,10 @@ fn tools() -> Vec<ToolSpec> {
             name: "notebook_render",
             description:
                 "Render a marimo notebook (.py) into a publishable bundle that runs in the \
-                 reader's browser. This *executes the notebook* to export it, so treat it like \
-                 running the file. Without `vendor_runtime` the bundle keeps marimo's CDN loader \
-                 and will not boot on the origin.",
+                 reader's browser. The export parses the file and does not run it — the cells \
+                 execute in the reader's browser under Pyodide, not here. Without \
+                 `vendor_runtime` the bundle keeps marimo's CDN loader and will not boot on \
+                 the origin.",
             read_only: false,
             open_world: false,
             schema: || {
@@ -723,7 +730,7 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 Some(published.version),
                 visibility,
             ) {
-                Ok(Some(url)) => format!("\nIt is live at {url}."),
+                Ok(Some(reach)) => format!("\n{}", reach.sentence()),
                 Ok(None) => String::new(),
                 Err(e) => {
                     anyhow::bail!(
@@ -768,7 +775,7 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             });
             store.set_alias(&id, Some(version), visibility, &now)?;
             let reach = match crate::remote::mirror_alias(&id, Some(version), visibility)? {
-                Some(url) => format!(" It is live at {url}."),
+                Some(reach) => format!(" {}", reach.sentence()),
                 None => String::new(),
             };
             Ok(format!(

@@ -130,6 +130,110 @@ pub struct Pushed {
     pub existing: bool,
     pub url: String,
     pub version_url: String,
+    /// The gate's viewer page for this bundle — chrome, version menu, owner
+    /// controls, the bytes framed inside it.
+    ///
+    /// `None` against a box that predates the field, which is the whole
+    /// reason it is an `Option` rather than an empty string: every caller has
+    /// to decide what to say when there is no page to name, and a blank one
+    /// smuggled into a sentence reads as a broken link rather than an old
+    /// server.
+    pub viewer_url: Option<String>,
+}
+
+/// Who the box will serve a mirrored bundle to, as far as *this* operation
+/// actually decided it.
+///
+/// Four states rather than a `Visibility`, because two of them are not
+/// visibilities at all and collapsing them is how a report comes to assert
+/// something nobody established. A push that could not move the alias, and a
+/// `--no-alias` push, both leave the question exactly as they found it; a
+/// takedown answers it in a way neither "public" nor "private" says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Serves {
+    /// The alias names a version and this operation made it readable.
+    Everyone,
+    /// The alias names a version and this operation made it private.
+    OwnerOnly,
+    /// The alias now points at nothing: a takedown.
+    Nothing,
+    /// The alias was not touched, so who may read it is whatever it already
+    /// said — and guessing is the same lie in whichever direction.
+    Unchanged,
+}
+
+/// Where a bundle on the box can be read, in both spellings, and what did
+/// not happen.
+///
+/// The two URLs are for different readers and the difference is not cosmetic:
+/// `viewer` is the page a **person** is sent, and `bare` is what a machine
+/// fetches, a citation names, and a projector shows. Everything that reports
+/// a mirror goes through this so the choice is made once — before, each caller
+/// printed whichever single URL it happened to be holding, which is how a
+/// private bundle's 404 came to be announced as "it is live at".
+#[derive(Debug)]
+pub struct Reach {
+    pub viewer: Option<String>,
+    pub bare: String,
+    pub serves: Serves,
+    /// What the caller must be told about what did *not* happen — an alias
+    /// that could not move for want of a release key on this machine, or
+    /// bytes the box already had.
+    pub note: String,
+}
+
+impl Reach {
+    /// The page to hand a person, falling back to the bytes when the box is
+    /// too old to have named one.
+    pub fn for_a_person(&self) -> &str {
+        self.viewer.as_deref().unwrap_or(&self.bare)
+    }
+
+    /// One honest sentence about who can open it — for an agent's answer, and
+    /// anything else with room for prose rather than columns.
+    ///
+    /// Every arm names the viewer page first, because that is the URL a
+    /// person is meant to receive, and the bare one second with what it is
+    /// for. The private arm is the one that matters: it is the state a
+    /// publish key leaves behind, and where the old wording — "it is live
+    /// at …" — was simply false about a URL that serves nobody.
+    pub fn sentence(&self) -> String {
+        let page = self.for_a_person();
+        let bare = &self.bare;
+        let body = match self.serves {
+            Serves::Everyone => format!(
+                "Anyone with the link can read it at {page}. The bytes on their \
+                 own — for a machine, a citation, or a projector — are at {bare}."
+            ),
+            Serves::OwnerOnly => format!(
+                "It is private, so only you can open it: {page}, signed in at the \
+                 gate. {bare} serves nobody until it is released."
+            ),
+            Serves::Nothing => format!(
+                "Its share URL now resolves to nothing. Every version is still on \
+                 the box, and {page} still opens for you."
+            ),
+            Serves::Unchanged => format!(
+                "The page is {page} and the bytes are at {bare}. Who may read it \
+                 is whatever the alias already said — this did not change it."
+            ),
+        };
+        format!("{body}{}", self.note)
+    }
+
+    /// The publisher's two-column spelling, aligned with the `reach` line
+    /// printed under it.
+    pub fn columns(&self) -> String {
+        let mut out = String::new();
+        if let Some(viewer) = &self.viewer {
+            out.push_str(&format!("  page   {viewer}\n"));
+        }
+        out.push_str(&format!("  bytes  {}", self.bare));
+        if !self.note.is_empty() {
+            out.push_str(&self.note);
+        }
+        out
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -224,11 +328,20 @@ impl Remote {
             existing: body["existing"].as_bool().unwrap_or(false),
             url: body["url"].as_str().unwrap_or_default().to_string(),
             version_url: body["version_url"].as_str().unwrap_or_default().to_string(),
+            viewer_url: body["viewer_url"].as_str().map(String::from),
         })
     }
 
     /// Move the share URL on the box, and set who may read it.
-    pub fn alias(&self, id: &str, version: Option<u32>, visibility: Visibility) -> Result<String> {
+    ///
+    /// Answers with the bare share URL and the viewer page, in that order —
+    /// the second is `None` against a box older than the field.
+    pub fn alias(
+        &self,
+        id: &str,
+        version: Option<u32>,
+        visibility: Visibility,
+    ) -> Result<(String, Option<String>)> {
         let payload = serde_json::json!({
             "version": version,
             "visibility": match visibility {
@@ -243,7 +356,10 @@ impl Remote {
                 Some(payload.to_string().as_bytes()),
             )
             .with_context(|| format!("aliasing {id}"))?;
-        Ok(body["url"].as_str().unwrap_or_default().to_string())
+        Ok((
+            body["url"].as_str().unwrap_or_default().to_string(),
+            body["viewer_url"].as_str().map(String::from),
+        ))
     }
 
     /// Upload a request type, which is what makes a form exist at all.
@@ -513,12 +629,22 @@ pub fn mirror(
     version: u32,
     alias_to: Option<u32>,
     visibility: Visibility,
-) -> Result<Option<String>> {
+) -> Result<Option<Reach>> {
     let Some(remote) = Remote::configured()? else {
         return Ok(None);
     };
     let pushed = remote.push(store, id, version)?;
     let mut note = String::new();
+    if pushed.existing {
+        note.push_str("\nIdentical bytes, so the box already had them and minted nothing.");
+    }
+    // The push answers with the viewer page for the version just written; a
+    // successful alias answers with the same page, and either is the same
+    // string. Preferring the alias's keeps one rule — the last word about
+    // where a bundle is comes from the call that last moved it.
+    let mut viewer = pushed.viewer_url.clone();
+    let mut serves = Serves::Unchanged;
+
     // The alias moves second, and only after the bytes are there: the share URL
     // must never point at a version the box does not hold.
     //
@@ -530,25 +656,32 @@ pub fn mirror(
     if let Some(target) = alias_to {
         match Remote::installed(Scope::Release)? {
             Some(releaser) => {
-                releaser.alias(id, Some(target), visibility)?;
+                let (_, aliased) = releaser.alias(id, Some(target), visibility)?;
+                viewer = aliased.or(viewer);
+                serves = match visibility {
+                    Visibility::Public => Serves::Everyone,
+                    Visibility::Private => Serves::OwnerOnly,
+                };
             }
             None => {
-                note = format!(
+                // `Unchanged` stands, and that is the point: this side asked
+                // for a visibility and did not get to apply it, so reporting
+                // the one it *wanted* would describe a box that never
+                // happened.
+                note.push_str(&format!(
                     "\nversion {target} is on the box and is not published: no release \
                      key here, so the alias did not move. Release it with \
                      `factory-publish alias {id} --version {target}` from a machine \
                      that has one."
-                );
+                ));
             }
         }
     }
-    Ok(Some(if pushed.existing {
-        format!(
-            "{} (identical bytes; the box already had them){note}",
-            pushed.url
-        )
-    } else {
-        format!("{}{note}", pushed.url)
+    Ok(Some(Reach {
+        viewer,
+        bare: pushed.url,
+        serves,
+        note,
     }))
 }
 
@@ -560,11 +693,27 @@ pub fn mirror_alias(
     id: &str,
     version: Option<u32>,
     visibility: Visibility,
-) -> Result<Option<String>> {
+) -> Result<Option<Reach>> {
     let Some(remote) = Remote::installed(Scope::Release)? else {
         return Ok(None);
     };
-    Ok(Some(remote.alias(id, version, visibility)?))
+    let (bare, viewer) = remote.alias(id, version, visibility)?;
+    // A `None` version is a takedown, and that is neither of the two
+    // visibilities: the alias keeps whatever it said about *who* while
+    // pointing at nothing at all.
+    let serves = match version {
+        None => Serves::Nothing,
+        Some(_) => match visibility {
+            Visibility::Public => Serves::Everyone,
+            Visibility::Private => Serves::OwnerOnly,
+        },
+    };
+    Ok(Some(Reach {
+        viewer,
+        bare,
+        serves,
+        note: String::new(),
+    }))
 }
 
 /// A key file, with the checks that make one a key file.
@@ -661,8 +810,149 @@ fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<
 
 #[cfg(test)]
 mod tests {
+    use super::connect_tests::one_shot_gate;
     use super::*;
     use mecha_manifest::ContentClass;
+
+    const PAGE: &str = "https://gate.example.org/view/alice/brief";
+    const BYTES: &str = "https://alice.art.example.org/b/brief/";
+
+    fn reach(serves: Serves, viewer: Option<&str>, note: &str) -> Reach {
+        Reach {
+            viewer: viewer.map(String::from),
+            bare: BYTES.into(),
+            serves,
+            note: note.into(),
+        }
+    }
+
+    /// The sentence an agent repeats has to be true about a **private**
+    /// bundle, which is the state a publish key leaves behind.
+    ///
+    /// This is the one that shipped wrong: `mirror` reported the bare
+    /// artifact URL whatever the visibility, and the tool answer wrapped it
+    /// in "It is live at …" — so a model told whoever asked to open a URL
+    /// that answers 404 by design.
+    #[test]
+    fn a_private_bundle_is_never_described_as_live() {
+        let said = reach(Serves::OwnerOnly, Some(PAGE), "").sentence();
+        assert!(said.contains(PAGE), "the page it does open: {said}");
+        assert!(said.contains("private"), "{said}");
+        assert!(!said.contains("live at"), "the old lie: {said}");
+        assert!(!said.contains("Anyone"), "{said}");
+        assert!(
+            said.contains("serves nobody until it is released"),
+            "the bare URL has to be named as what it is: {said}"
+        );
+    }
+
+    /// Every arm names the page before the bytes, because the page is the
+    /// URL a person is meant to receive and a model quotes what it reads
+    /// first.
+    #[test]
+    fn the_page_comes_before_the_bytes_in_every_arm() {
+        for serves in [
+            Serves::Everyone,
+            Serves::OwnerOnly,
+            Serves::Nothing,
+            Serves::Unchanged,
+        ] {
+            let said = reach(serves, Some(PAGE), "").sentence();
+            let page = said
+                .find(PAGE)
+                .unwrap_or_else(|| panic!("{serves:?} names no page: {said}"));
+            if let Some(bytes) = said.find(BYTES) {
+                assert!(page < bytes, "{serves:?} leads with the bytes: {said}");
+            }
+        }
+    }
+
+    /// An alias this side could not move must claim nothing about who may
+    /// read the result — reporting the visibility we *asked* for would
+    /// describe a box that never happened — and the note saying so has to
+    /// survive into the sentence rather than being dropped on the floor.
+    #[test]
+    fn an_unmoved_alias_claims_nothing_and_keeps_its_note() {
+        let said = reach(
+            Serves::Unchanged,
+            Some(PAGE),
+            "\nversion 3 is on the box and is not published: no release key here.",
+        )
+        .sentence();
+        assert!(!said.contains("Anyone"), "{said}");
+        assert!(!said.contains("It is private"), "{said}");
+        assert!(said.contains("this did not change it"), "{said}");
+        assert!(
+            said.contains("no release key here"),
+            "the note rode along: {said}"
+        );
+    }
+
+    /// A box older than `viewer_url` must degrade to the bytes, never to a
+    /// blank — a URL-shaped hole in a sentence reads as a broken link rather
+    /// than as an old server, and an empty `page` column reads as one too.
+    #[test]
+    fn a_box_that_names_no_page_falls_back_to_the_bytes() {
+        let at = reach(Serves::Everyone, None, "");
+        assert_eq!(at.for_a_person(), BYTES);
+        assert!(at.sentence().contains(BYTES));
+        let columns = at.columns();
+        assert!(!columns.contains("page"), "no empty page line: {columns:?}");
+        assert!(columns.contains(&format!("bytes  {BYTES}")), "{columns:?}");
+    }
+
+    /// A store with one pushable version in it, rooted in a tempdir.
+    fn store_with_a_version(dir: &Path) -> BundleStore {
+        let store = BundleStore::open(dir).unwrap();
+        let version = store.version_dir("brief", 1);
+        std::fs::create_dir_all(&version).unwrap();
+        std::fs::write(version.join("index.html"), "<h1>Monday</h1>").unwrap();
+        store
+    }
+
+    /// The page the box named survives the trip into `Pushed`, and a box that
+    /// names none answers `None` rather than an empty string.
+    ///
+    /// Both halves matter and only one of them can be checked against the
+    /// live box: the deployed origin predates the field, so the fallback is
+    /// the arm real traffic exercises today and the other is the arm every
+    /// deploy from here on will.
+    #[test]
+    fn a_push_carries_the_viewer_page_when_the_box_names_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store_with_a_version(dir.path());
+
+        let mut answer = serde_json::json!({
+            "id": "brief",
+            "version": 1,
+            "existing": false,
+            "class": "static",
+            "url": BYTES,
+            "version_url": "https://alice.art.example.org/b/brief/v/1/",
+            "viewer_url": PAGE,
+        });
+        let remote = Remote {
+            gate: one_shot_gate(201, answer.clone()),
+            key: "mk_pub_test".into(),
+            scope: Scope::Publish,
+        };
+        let pushed = remote.push(&store, "brief", 1).unwrap();
+        assert_eq!(pushed.viewer_url.as_deref(), Some(PAGE));
+        assert_eq!(pushed.url, BYTES);
+
+        // The same exchange against a box too old to know the field.
+        answer.as_object_mut().unwrap().remove("viewer_url");
+        let older = Remote {
+            gate: one_shot_gate(201, answer),
+            key: "mk_pub_test".into(),
+            scope: Scope::Publish,
+        };
+        let pushed = older.push(&store, "brief", 1).unwrap();
+        assert_eq!(
+            pushed.viewer_url, None,
+            "a missing page must not arrive as an empty URL"
+        );
+    }
 
     /// The digest the server recomputes is taken over the files *excluding*
     /// `bundle.json`, so rewriting the manifest cannot change the address —
@@ -971,7 +1261,9 @@ mod connect_tests {
     /// JSON, then goes away. `connect` needs nothing more from the far end,
     /// and a stub keeps the test about *this* side — the server's half is
     /// tested in the server's own suite.
-    fn one_shot_gate(status: u16, body: serde_json::Value) -> String {
+    /// `pub(super)` so the `tests` module beside this one can drive a push
+    /// against a scripted answer — one fake gate, not two.
+    pub(super) fn one_shot_gate(status: u16, body: serde_json::Value) -> String {
         use std::io::{Read, Write};
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
