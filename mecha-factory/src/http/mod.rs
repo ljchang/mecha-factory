@@ -128,6 +128,12 @@ pub fn router(app: Shared) -> Router {
             "/v1/instruments/{id}/polls/{poll_id}/close",
             post(v1::close_poll),
         )
+        // The personal public surface's records. `Scope::Release` throughout,
+        // never `Publish` — see `v1::record_author`.
+        .route("/v1/profile", get(v1::get_profile).put(v1::put_profile))
+        .route("/v1/hangar", get(v1::get_hangar).put(v1::put_hangar))
+        .route("/v1/boards", get(v1::list_boards))
+        .route("/v1/boards/{slug}", get(v1::get_board).put(v1::put_board))
         .route("/v1/queue", get(v1::drain))
         .route("/v1/queue/ack", post(v1::ack))
         .route("/v1/queue/attachments/{id}", get(v1::attachment))

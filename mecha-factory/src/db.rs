@@ -26,7 +26,7 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 12;
+const SCHEMA: i64 = 13;
 
 #[derive(Clone)]
 pub struct Db {
@@ -164,6 +164,32 @@ pub struct BundleSummary {
     /// so every surface asking "can a stranger open this" gets one answer.
     pub withheld: bool,
 }
+
+/// One record of the personal public surface, in both its versions.
+///
+/// The pair is the mechanism, not bookkeeping: `baseline` is the TOML exactly
+/// as last pushed and `effective` is what the page renders, so the difference
+/// between them *is* the set of edits a browser made, which is what the next
+/// push has to fold around rather than flatten.
+#[derive(Debug, Clone)]
+pub struct RecordRow {
+    pub baseline: String,
+    pub effective: String,
+    pub updated_at: String,
+}
+
+impl RecordRow {
+    /// Whether the browser has moved this away from the file it was last
+    /// pushed from. What the cockpit says out loud, because an edit nobody
+    /// pulls is an edit the next push may overwrite.
+    pub fn drifted(&self) -> bool {
+        !self.baseline.trim().is_empty() && self.baseline.trim() != self.effective.trim()
+    }
+}
+
+/// The two record kinds, as the column stores them.
+pub const RECORD_PROFILE: &str = "profile";
+pub const RECORD_BOARD: &str = "board";
 
 /// What became of a machine's attempt to redeem a pairing code.
 ///
@@ -2127,6 +2153,124 @@ impl Db {
         })
     }
 
+    // ---- the personal public surface -----------------------------------
+
+    /// One stored record: the file as last pushed, and what the page renders.
+    pub fn record_get(&self, user_id: &str, kind: &str, slug: &str) -> Result<Option<RecordRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT baseline, effective, updated_at FROM records \
+                     WHERE user_id = ?1 AND kind = ?2 AND slug = ?3",
+                    params![user_id, kind, slug],
+                    |r| {
+                        Ok(RecordRow {
+                            baseline: r.get(0)?,
+                            effective: r.get(1)?,
+                            updated_at: r.get(2)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
+    /// Every record of a kind this user has, by slug.
+    pub fn records(&self, user_id: &str, kind: &str) -> Result<Vec<(String, RecordRow)>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT slug, baseline, effective, updated_at FROM records \
+                 WHERE user_id = ?1 AND kind = ?2 ORDER BY slug",
+            )?;
+            let rows = stmt.query_map(params![user_id, kind], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    RecordRow {
+                        baseline: r.get(1)?,
+                        effective: r.get(2)?,
+                        updated_at: r.get(3)?,
+                    },
+                ))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// A push from a machine: fold the incoming file into whatever the
+    /// browser has done since the last one, and answer with the fields the
+    /// file overwrote.
+    ///
+    /// Read-modify-write inside one [`Db::with`], so the ledger lock is held
+    /// across the whole of it and two concurrent pushes cannot both merge
+    /// against the same baseline and lose one of themselves.
+    ///
+    /// `validate` runs on the **merged** text rather than only on the
+    /// incoming one, and inside the lock: a merge combines two texts that
+    /// were each valid alone, and nothing guarantees the result is. Storing
+    /// first and checking after would leave a record no page can render.
+    pub fn record_push(
+        &self,
+        user_id: &str,
+        kind: &str,
+        slug: &str,
+        incoming: &str,
+        now: &str,
+        validate: impl Fn(&str) -> anyhow::Result<()>,
+    ) -> Result<Vec<String>> {
+        self.with(|conn| {
+            let existing: Option<(String, String)> = conn
+                .query_row(
+                    "SELECT baseline, effective FROM records \
+                     WHERE user_id = ?1 AND kind = ?2 AND slug = ?3",
+                    params![user_id, kind, slug],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()?;
+
+            let (merged, overwritten) = match &existing {
+                // Nothing stored: the file is the record, verbatim.
+                None => (incoming.to_string(), Vec::new()),
+                Some((baseline, effective)) => {
+                    let merge = mecha_manifest::merge_push(baseline, effective, incoming)?;
+                    (merge.merged, merge.overwritten)
+                }
+            };
+            validate(&merged)?;
+
+            conn.execute(
+                "INSERT INTO records (user_id, kind, slug, baseline, effective, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                 ON CONFLICT(user_id, kind, slug) DO UPDATE SET \
+                 baseline = ?4, effective = ?5, updated_at = ?6",
+                params![user_id, kind, slug, incoming, merged, now],
+            )?;
+            Ok(overwritten)
+        })
+    }
+
+    /// An edit from the browser. It moves `effective` and leaves `baseline`
+    /// alone — which is exactly what lets the next push tell that this field
+    /// was changed here.
+    pub fn record_edit(
+        &self,
+        user_id: &str,
+        kind: &str,
+        slug: &str,
+        source: &str,
+        now: &str,
+    ) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO records (user_id, kind, slug, baseline, effective, updated_at) \
+                 VALUES (?1, ?2, ?3, '', ?4, ?5) \
+                 ON CONFLICT(user_id, kind, slug) DO UPDATE SET \
+                 effective = ?4, updated_at = ?5",
+                params![user_id, kind, slug, source, now],
+            )?;
+            Ok(())
+        })
+    }
+
     /// The poll a participant token names, with the participant's name —
     /// the capability is the identity.
     pub fn poll_by_token(&self, token_hash: &str) -> Result<Option<(PollRow, String)>> {
@@ -3316,6 +3460,28 @@ fn migrate(conn: &Connection) -> Result<()> {
             answers      TEXT,
             responded_at TEXT,
             PRIMARY KEY (user_id, poll_id, name)
+        );
+
+        -- The personal public surface's records: a profile and the boards
+        -- that wear it. One table for both, because they are structurally
+        -- the same thing -- a TOML source with two writers -- and the merge
+        -- that folds a push into a browser edit is likewise one function
+        -- that knows nothing about which it is folding.
+        --
+        -- `slug` is '' for the profile and for the hangar, since a board
+        -- without a slug *is* the hangar; a switchboard carries its own.
+        -- Two texts per row, and the pair is the whole mechanism:
+        -- `baseline` is the TOML exactly as last pushed and `effective` is
+        -- what the page renders, so a push can tell what the file changed
+        -- apart from what somebody changed in a browser since.
+        CREATE TABLE IF NOT EXISTS records (
+            user_id    TEXT NOT NULL,
+            kind       TEXT NOT NULL,
+            slug       TEXT NOT NULL,
+            baseline   TEXT NOT NULL DEFAULT '',
+            effective  TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, kind, slug)
         );
 
         CREATE TABLE IF NOT EXISTS view_caps (
