@@ -22,6 +22,7 @@ pub mod account;
 pub mod admin;
 pub mod artifacts;
 pub mod booking;
+pub mod hangar;
 pub mod intake;
 pub mod poll;
 pub mod signup;
@@ -290,6 +291,11 @@ pub fn router(app: Shared) -> Router {
         .route("/account/share", post(account::share))
         .route("/account/share-revoke", post(account::share_revoke))
         .route("/account/a/{name}", get(account::asset))
+        // The hangar, and the assets it shares with every other gate page.
+        // `a` is a reserved slug, so `/@{handle}/a/…` can never collide with
+        // a switchboard somebody named.
+        .route("/@{handle}", get(hangar::show))
+        .route("/@a/{name}", get(hangar::asset))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
         // The version switcher sits at the bare `v/`, a path the version
@@ -412,6 +418,12 @@ async fn root(
     origin: Extension<Origin>,
     headers: axum::http::HeaderMap,
 ) -> Response {
+    if origin.role == Role::Artifacts && origin.handle.is_some() {
+        // A tenant's artifact origin root used to serve nothing. Somebody who
+        // has only ever seen an artifact URL will try it, and their hangar is
+        // the answer -- see `hangar::artifact_root`.
+        return hangar::artifact_root(State(app), origin).await;
+    }
     if origin.role != Role::Gate {
         return Failure::text(StatusCode::NOT_FOUND, "not found").into_response();
     }
