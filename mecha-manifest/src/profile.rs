@@ -1,7 +1,7 @@
 //! The personal public surface, as data: a profile, and the boards it wears.
 //!
 //! Two records travel between a person's machine and the box. A [`Profile`] is
-//! who they are — a name, a line about themselves, some links, a theme. A
+//! who they are — a name, a line about themselves, some links. A
 //! [`Board`] is a page: the **hangar** (`slug` absent) lists everything public
 //! and is wired from the inventory, and a **switchboard** (`slug` present) is
 //! a hand-patched set of lines the owner names themselves.
@@ -113,15 +113,6 @@ pub struct Profile {
     /// between a useful page and one that wastes somebody's morning.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timezone: Option<String>,
-    /// One of the built-in themes by name. Unknown names are refused *here*
-    /// so the author learns about a typo; the renderer still falls back,
-    /// because a bad palette must never take a page down.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
-    /// `#rgb` or `#rrggbb`, and nothing else. A CSS colour is a place a
-    /// `url()` can hide, and no palette needs one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub accent: Option<String>,
     #[serde(default, rename = "link", skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Link>,
 }
@@ -187,9 +178,6 @@ pub struct Board {
     pub heading: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub intro: Option<String>,
-    /// Overrides the profile's theme for this board alone.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub theme: Option<String>,
     #[serde(default, rename = "entry", skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<Entry>,
 }
@@ -223,8 +211,6 @@ impl Profile {
         line(&self.location, "location")?;
         prose(&self.bio, "bio")?;
         check_timezone(&self.timezone)?;
-        check_theme(&self.theme)?;
-        check_accent(&self.accent)?;
         if self.links.len() > MAX_LINKS {
             return Err(ManifestError::invalid(format!(
                 "a profile carries at most {MAX_LINKS} links"
@@ -256,7 +242,6 @@ impl Board {
         }
         line(&self.heading, "heading")?;
         prose(&self.intro, "intro")?;
-        check_theme(&self.theme)?;
 
         if self.kind() == BoardKind::Hangar && !self.entries.is_empty() {
             return Err(ManifestError::invalid(
@@ -374,34 +359,6 @@ fn check_timezone(name: &Option<String>) -> Result<()> {
     Ok(())
 }
 
-fn check_theme(name: &Option<String>) -> Result<()> {
-    let Some(name) = name else { return Ok(()) };
-    if crate::BUILT_IN_THEMES
-        .iter()
-        .any(|t| t.name.eq_ignore_ascii_case(name))
-    {
-        return Ok(());
-    }
-    let known: Vec<&str> = crate::BUILT_IN_THEMES.iter().map(|t| t.name).collect();
-    Err(ManifestError::invalid(format!(
-        "`{name}` is not a theme — try one of: {}",
-        known.join(", ")
-    )))
-}
-
-/// `#rgb` or `#rrggbb`. Deliberately not "any CSS colour": a colour is a
-/// place a `url()` can hide, and nothing about a palette needs one.
-fn check_accent(accent: &Option<String>) -> Result<()> {
-    let Some(value) = accent else { return Ok(()) };
-    let hex = value.strip_prefix('#').unwrap_or("");
-    if (hex.len() == 3 || hex.len() == 6) && hex.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Ok(());
-    }
-    Err(ManifestError::invalid(format!(
-        "`{value}` is not a colour — write `#5d5294` or `#abc`"
-    )))
-}
-
 /// An allowlist, never a blocklist. `javascript:`, `data:` and `vbscript:`
 /// are the three anybody thinks to exclude, and keeping a current list of
 /// everything a browser will execute is not a job worth accepting.
@@ -493,13 +450,43 @@ pub fn merge_push(baseline: &str, effective: &str, incoming: &str) -> Result<Mer
     let mut eff = table(effective, "the stored record")?;
     let inc = table(incoming, "the pushed file")?;
 
+    // **No baseline means the file has never spoken about this record**, so
+    // there is nothing to reconcile and the file becomes the record whole.
+    //
+    // The alternative was to treat every stored key as an addition the file
+    // never knew about and keep it — non-destructive, and it leaves a field
+    // written in the cockpit removable only by adding it to the file and then
+    // deleting it again, which nobody would ever guess. This way deletions
+    // work from the first push, `drifted` means something, and the cost is
+    // paid where it can be seen: every displaced field is named, and the
+    // cockpit says the record exists in no file at all.
+    if base.is_empty() && !eff.is_empty() {
+        let mut displaced: Vec<String> = eff
+            .keys()
+            .filter(|key| inc.get(*key) != eff.get(*key))
+            .cloned()
+            .collect();
+        displaced.sort();
+        return Ok(Merge {
+            merged: incoming.to_string(),
+            overwritten: displaced,
+            verbatim: true,
+        });
+    }
+
     let mut overwritten = Vec::new();
     // Changed or added in the pushed file.
     for (key, value) in &inc {
         if base.get(key) == Some(value) {
             continue;
         }
-        if eff.get(key) != base.get(key) {
+        // Only a *disagreement* is an overwrite. Comparing the stored value
+        // against the baseline alone reported one whenever the browser had
+        // moved a field at all — including after a `pull`, where the file now
+        // carries exactly what the browser wrote and nothing is displaced.
+        // That made the workflow the docs recommend announce data loss that
+        // had not happened, in the CLI and to the model both.
+        if eff.get(key) != base.get(key) && eff.get(key) != Some(value) {
             overwritten.push(key.clone());
         }
         eff.insert(key.clone(), value.clone());
@@ -511,7 +498,9 @@ pub fn merge_push(baseline: &str, effective: &str, incoming: &str) -> Result<Mer
         if inc.contains_key(key) {
             continue;
         }
-        if eff.get(key) != base.get(key) {
+        // Same rule: if the browser deleted it too, the file displaced
+        // nothing.
+        if eff.get(key) != base.get(key) && eff.contains_key(key) {
             overwritten.push(key.clone());
         }
         eff.remove(key);
@@ -552,7 +541,7 @@ mod tests {
     #[test]
     fn a_profile_round_trips_through_toml() {
         let source = "enabled = true\ndisplay_name = \"Alice\"\ntagline = \"Neuroscience\"\n\
-                      timezone = \"America/New_York\"\ntheme = \"paper\"\naccent = \"#5d5294\"\n\
+                      timezone = \"America/New_York\"\n\
                       [[link]]\nkind = \"github\"\nurl = \"https://github.com/alice\"\n";
         let profile = Profile::from_toml(source).unwrap();
         assert!(profile.enabled);
@@ -588,17 +577,6 @@ mod tests {
         assert!(Profile::from_toml("[[link]]\nurl = \"https://ok.example\"\n").is_ok());
     }
 
-    #[test]
-    fn an_accent_is_hex_and_never_a_function() {
-        for bad in ["url(x)", "red", "#12345", "rgb(1,2,3)", "#gggggg"] {
-            assert!(
-                Profile::from_toml(&format!("accent = \"{bad}\"\n")).is_err(),
-                "`{bad}` was accepted as an accent"
-            );
-        }
-        assert!(Profile::from_toml("accent = \"#abc\"\n").is_ok());
-    }
-
     /// `EST` and friends *do* parse — the IANA database still carries the
     /// legacy fixed-offset zones — which is exactly why parsing is not the
     /// test. A booking page rendered in `EST` is an hour wrong from March to
@@ -629,11 +607,16 @@ mod tests {
         assert!(Profile::from_toml("bio = \"two\\nlines\"\n").is_ok());
     }
 
+    /// `theme` and `accent` were validated and stored and never rendered —
+    /// a field that saves and is silently ignored is worse than one that is
+    /// refused, because the author concludes the feature is broken rather
+    /// than absent. They come back with the renderer that reads them.
     #[test]
-    fn an_unknown_theme_is_named_rather_than_ignored() {
-        let err = Profile::from_toml("theme = \"midnight\"\n").unwrap_err();
-        assert!(err.to_string().contains("not a theme"), "{err}");
-        assert!(Profile::from_toml("theme = \"Paper\"\n").is_ok(), "by case");
+    fn a_palette_is_refused_until_something_renders_it() {
+        for absent in ["theme = \"paper\"\n", "accent = \"#5d5294\"\n"] {
+            assert!(Profile::from_toml(absent).is_err(), "{absent} was accepted");
+        }
+        assert!(Board::from_toml("slug = \"x\"\ntheme = \"paper\"\n").is_err());
     }
 
     #[test]
@@ -823,5 +806,74 @@ mod merge_settling_tests {
         let out = Profile::from_toml(&merge.merged).unwrap();
         assert_eq!(out.tagline.as_deref(), Some("kept"));
         assert_eq!(out.location.as_deref(), Some("y"));
+    }
+}
+
+#[cfg(test)]
+mod merge_review_tests {
+    use super::*;
+
+    /// A record written in the cockpit has no baseline, so the first push has
+    /// nothing to reconcile against and takes the file whole — naming what it
+    /// displaced, which is what makes `pull` the obvious first move.
+    #[test]
+    fn a_first_push_over_a_cockpit_record_replaces_and_names_what_it_displaced() {
+        let browser = "enabled = true\nbio = \"written here\"\ndisplay_name = \"Alice\"\n";
+        let file = "enabled = true\ndisplay_name = \"Alice\"\n";
+        let merge = merge_push("", browser, file).unwrap();
+        assert_eq!(merge.merged, file, "the file becomes the record");
+        assert_eq!(merge.overwritten, vec!["bio".to_string()]);
+        // And it is now removable, which was the whole complaint: the second
+        // push has a baseline and the ordinary deletion path applies.
+        let merge = merge_push(file, file, "enabled = true\n").unwrap();
+        let profile = Profile::from_toml(&merge.merged).unwrap();
+        assert!(profile.display_name.is_none(), "a deletion still applies");
+    }
+
+    /// An empty record is not a displacement, so a first push onto nothing is
+    /// silent rather than announcing it overwrote a page nobody wrote.
+    #[test]
+    fn a_first_push_onto_an_empty_record_displaces_nothing() {
+        let merge = merge_push("", "", "enabled = true\n").unwrap();
+        assert!(merge.overwritten.is_empty(), "{:?}", merge.overwritten);
+    }
+
+    /// The workflow the docs recommend must not announce data loss that did
+    /// not happen: after a pull the file carries exactly what the browser
+    /// wrote, so the push displaces nothing.
+    #[test]
+    fn pull_then_push_reports_no_overwrite() {
+        let base = "tagline = \"a\"\nlocation = \"x\"\n";
+        let edited = "tagline = \"kept\"\nlocation = \"x\"\n";
+        // What `pull` writes to the file is the stored record.
+        let merge = merge_push(base, edited, edited).unwrap();
+        assert!(
+            merge.overwritten.is_empty(),
+            "a pull-then-push announced a loss that did not happen: {:?}",
+            merge.overwritten
+        );
+        let profile = Profile::from_toml(&merge.merged).unwrap();
+        assert_eq!(profile.tagline.as_deref(), Some("kept"));
+    }
+
+    /// Both sides deleting the same field is agreement, not a conflict.
+    #[test]
+    fn a_deletion_both_sides_made_is_not_an_overwrite() {
+        let base = "tagline = \"a\"\nlocation = \"x\"\n";
+        let edited = "location = \"x\"\n";
+        let file = "location = \"y\"\n";
+        let merge = merge_push(base, edited, file).unwrap();
+        assert!(merge.overwritten.is_empty(), "{:?}", merge.overwritten);
+        let profile = Profile::from_toml(&merge.merged).unwrap();
+        assert!(profile.tagline.is_none());
+        assert_eq!(profile.location.as_deref(), Some("y"));
+    }
+
+    /// A genuine disagreement still reports, or the warning would be useless.
+    #[test]
+    fn a_real_conflict_is_still_named() {
+        let base = "tagline = \"a\"\n";
+        let merge = merge_push(base, "tagline = \"browser\"\n", "tagline = \"file\"\n").unwrap();
+        assert_eq!(merge.overwritten, vec!["tagline".to_string()]);
     }
 }

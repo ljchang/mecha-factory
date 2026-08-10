@@ -133,16 +133,27 @@ pub(crate) fn masthead(profile: &mecha_manifest::Profile, user: &UserRow) -> Str
     if !profile.links.is_empty() {
         out.push_str("<nav class=\"links\">");
         for link in &profile.links {
-            // A label if there is one, else the kind's own name, else the
-            // host — which is the honest fallback for a link we know nothing
-            // about, and the same rule a switchboard's `link` line follows.
             let label = match (&link.label, link.kind) {
                 (Some(label), _) => label.clone(),
                 (None, mecha_manifest::LinkKind::Other) => host_of(&link.url),
                 (None, kind) => format!("{kind:?}"),
             };
+            // **The host is shown beside every link, always** — including a
+            // labelled one, which is what this used to omit. A label is the
+            // author's own words and can say anything: `label = "Sign in to
+            // the factory"` on `https://evil.example/login`, rendered on the
+            // gate origin where the real sign-in and the `__Host-` cookie
+            // live, is a credential-harvesting link wearing our chrome. The
+            // switchboard renderer already did this; the two disagreed while
+            // a comment here claimed they matched.
+            let host = host_of(&link.url);
+            let shown = if label == host {
+                String::new()
+            } else {
+                format!("<span class=\"muted\"> {}</span>", esc(&host))
+            };
             out.push_str(&format!(
-                "<a href=\"{}\">{}</a> ",
+                "<a href=\"{}\">{}</a>{shown} ",
                 esc(&link.url),
                 esc(&label)
             ));
@@ -264,7 +275,7 @@ pub async fn show(
         shell_with(
             profile.display_name.as_deref().unwrap_or(&user.handle),
             &body,
-            "/@a/",
+            "/a/",
             &chrome,
         ),
     )
@@ -408,7 +419,7 @@ pub async fn switchboard(
     }
 
     let chrome = chrome_for(&app, &headers, &user);
-    page(StatusCode::OK, shell_with(&heading, &body, "/@a/", &chrome))
+    page(StatusCode::OK, shell_with(&heading, &body, "/a/", &chrome))
 }
 
 /// Every dark line a user has, across all their boards — for the cockpit.

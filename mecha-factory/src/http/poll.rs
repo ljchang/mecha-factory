@@ -64,7 +64,7 @@ fn resolve(app: &Shared, handle: &str, poll_id: &str, token: &str) -> Option<(Po
 /// if any, has not passed. The deadline is enforced here rather than by a
 /// sweeper — a poll nobody touches after its deadline needs nothing done
 /// to refuse correctly.
-fn still_open(poll: &PollRow, now: chrono::DateTime<chrono::Utc>) -> bool {
+pub(crate) fn still_open(poll: &PollRow, now: chrono::DateTime<chrono::Utc>) -> bool {
     poll.state == "open"
         && poll
             .deadline

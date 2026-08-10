@@ -179,11 +179,23 @@ pub struct RecordRow {
 }
 
 impl RecordRow {
-    /// Whether the browser has moved this away from the file it was last
-    /// pushed from. What the cockpit says out loud, because an edit nobody
-    /// pulls is an edit the next push may overwrite.
+    /// Whether the box holds something no push produced — an edit the next
+    /// push may displace.
+    ///
+    /// **An empty baseline counts**, and that is the case this used to miss:
+    /// a record written in the cockpit has no baseline at all, so it reported
+    /// as settled while existing in no file anywhere. Since a first push over
+    /// such a record replaces it whole (`merge_push`), that silence was
+    /// pointed at the one moment a warning matters most.
     pub fn drifted(&self) -> bool {
-        !self.baseline.trim().is_empty() && self.baseline.trim() != self.effective.trim()
+        !self.effective.trim().is_empty() && self.baseline.trim() != self.effective.trim()
+    }
+
+    /// Whether any push has ever set this record. Distinguishes "edited here
+    /// since the last push" from "written here and never pushed at all",
+    /// which need different sentences.
+    pub fn never_pushed(&self) -> bool {
+        self.baseline.trim().is_empty()
     }
 }
 

@@ -125,6 +125,7 @@ impl Inventory {
     /// when one is unreadable.
     pub fn read(db: &Db, user: &UserRow) -> Self {
         let mut inv = Inventory::default();
+        let now = chrono::Utc::now();
 
         for row in db.bundles_overview(&user.id).unwrap_or_default() {
             // The same three conditions `http/artifacts.rs` reaches before it
@@ -190,7 +191,12 @@ impl Inventory {
         }
 
         for row in db.polls(&user.id).unwrap_or_default() {
-            let open = row.state == "open";
+            // The same predicate the handler at `/p/{handle}/{id}` applies.
+            // Reading `state` alone was broader than the code it claims to
+            // mirror: nothing closes a poll when its deadline passes, so an
+            // expired one was advertised, rendered its ballot, and then
+            // refused the submission.
+            let open = crate::http::poll::still_open(&row, now);
             // A spec that no longer parses is not a link audience: fail
             // closed, exactly as `PollRow::general_spec` does for the page
             // itself, rather than guessing at an audience and publishing a
@@ -366,11 +372,47 @@ fn kind_word(kind: mecha_manifest::EntryKind) -> &'static str {
 
 /// The host out of a URL, for showing where an off-origin line goes.
 ///
+/// **The userinfo is stripped, and that is the whole point of the function.**
+/// `https://gate.example.org@evil.example/signin` is a legal URL that a
+/// browser sends to `evil.example`; a reader shown everything before the
+/// first `/` would read a host beginning with the name they trust. Splitting
+/// on `://` and `/?#` alone made the host display an aid to the attack it
+/// exists to prevent.
+///
 /// String work rather than a URL parser: the value already passed the
 /// manifest's `http(s)`-only check, so what is left is display.
 pub fn host_of(url: &str) -> String {
-    url.split_once("://")
-        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(rest))
-        .unwrap_or(url)
-        .to_string()
+    let after_scheme = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Everything up to the **last** `@` is userinfo. The last, not the first:
+    // a password may itself contain one.
+    match authority.rsplit_once('@') {
+        Some((_, host)) => host.to_string(),
+        None => authority.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod host_tests {
+    #[test]
+    fn userinfo_never_reaches_the_reader() {
+        for (url, host) in [
+            ("https://evil.example/x", "evil.example"),
+            (
+                "https://gate.example.org@evil.example/signin",
+                "evil.example",
+            ),
+            ("https://a@b@evil.example/", "evil.example"),
+            (
+                "https://user:pw@evil.example:8443/p?q#f",
+                "evil.example:8443",
+            ),
+            ("https://plain.example", "plain.example"),
+        ] {
+            assert_eq!(super::host_of(url), host, "for {url}");
+        }
+    }
 }

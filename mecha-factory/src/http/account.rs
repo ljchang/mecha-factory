@@ -924,10 +924,16 @@ fn board_section(app: &Shared, user: &UserRow, gate: &str, csrf: &str) -> String
         let url = format!("{gate}/@{}/{}", esc(&user.handle), esc(slug));
         // Drift is the actionable column: the box holds something this
         // user's machine does not, and a later push would overwrite it.
-        let note = if row.drifted() {
-            "edited here since its last push — <code>pull</code> to keep it"
-        } else {
-            ""
+        // Two different sentences, because they need different actions: one
+        // record has drifted from a file that exists, the other exists in no
+        // file at all and a first push would replace it whole.
+        let note = match (row.drifted(), row.never_pushed()) {
+            (true, true) => {
+                "written here and never pushed — a push would replace it; \
+                             <code>pull</code> first"
+            }
+            (true, false) => "edited here since its last push — <code>pull</code> to keep it",
+            _ => "",
         };
         out.push_str(&format!(
             "<tr><td>{name}</td><td><a href=\"{url}\">{url}</a></td><td>{note}</td>\

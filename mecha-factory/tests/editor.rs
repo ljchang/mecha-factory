@@ -259,3 +259,86 @@ fn an_edit_here_is_visible_to_the_next_push_as_drift() {
     assert!(row.baseline.contains("From the file"));
     assert!(row.effective.contains("From the browser"));
 }
+
+// ---- review fixes -------------------------------------------------------
+
+/// `record_edit` is an upsert, so a save against a slug nobody claimed used
+/// to insert one — with none of `create`'s guards. A name that can never be
+/// reissued must not be spent by pressing Save on a page you were linked to.
+#[test]
+fn saving_an_unclaimed_slug_does_not_claim_it() {
+    let server = common::start();
+    let session = signed_in(&server);
+    let csrf = csrf_of(&server, &session);
+
+    // The editor for a slug nobody claimed is not a page at all.
+    assert_eq!(
+        get(&server, "/account/edit/board/teaching", &session).status,
+        404
+    );
+
+    let source = "slug = \"teaching\"\nheading = \"Teaching\"\n";
+    let reply = post(
+        &server,
+        "/account/edit",
+        &format!(
+            "csrf={csrf}&what=board&slug=teaching&source={}",
+            enc(source)
+        ),
+        &session,
+    );
+    assert_eq!(reply.status, 404, "{}", reply.body);
+    assert!(
+        server
+            .db
+            .record_get(&server.user.id, mecha_factory::db::RECORD_BOARD, "teaching")
+            .unwrap()
+            .is_none(),
+        "the slug was claimed by a save"
+    );
+    assert_eq!(server.get(server.gate, "/@alice/teaching").status, 404);
+
+    // Through `create`, with its confirmation, it works and then saves.
+    assert_eq!(
+        post(
+            &server,
+            "/account/boards",
+            &format!("csrf={csrf}&slug=teaching&confirm=yes"),
+            &session
+        )
+        .status,
+        303
+    );
+    let reply = post(
+        &server,
+        "/account/edit",
+        &format!(
+            "csrf={csrf}&what=board&slug=teaching&source={}",
+            enc(source)
+        ),
+        &session,
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+}
+
+/// A record written here exists in no file, and a first push replaces it
+/// whole — so the cockpit has to say so before that happens, not after.
+#[test]
+fn a_record_that_was_never_pushed_says_so_in_the_cockpit() {
+    let server = common::start();
+    let session = signed_in(&server);
+    let csrf = csrf_of(&server, &session);
+    post(
+        &server,
+        "/account/boards",
+        &format!("csrf={csrf}&slug=teaching&confirm=yes"),
+        &session,
+    );
+
+    let page = get(&server, "/account", &session);
+    assert!(
+        page.body.contains("never pushed"),
+        "the cockpit did not warn that this exists in no file: {}",
+        page.body
+    );
+}

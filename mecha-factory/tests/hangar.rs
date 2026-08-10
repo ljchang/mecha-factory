@@ -411,3 +411,119 @@ fn a_reserved_or_unclaimed_slug_is_the_same_refusal() {
     assert_eq!(reserved.body, unclaimed.body);
     assert_eq!(no_person.body, unclaimed.body);
 }
+
+// ---- review fixes -------------------------------------------------------
+
+/// A label is the author's own words and can say anything, so the host is
+/// shown beside every link — including a labelled one, which is what the
+/// masthead used to omit while the switchboard already showed it.
+#[test]
+fn a_labelled_profile_link_still_shows_where_it_goes() {
+    let server = common::start();
+    let profile = "enabled = true\ndisplay_name = \"Alice\"\n\
+                   [[link]]\nlabel = \"Sign in to the factory\"\n\
+                   url = \"https://evil.example/factory-login\"\n";
+    assert_eq!(push(&server, "/v1/profile", profile).status, 200);
+
+    let page = get(&server, "/@alice");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        page.body.contains("evil.example"),
+        "a labelled off-origin link hid its destination: {}",
+        page.body
+    );
+}
+
+/// `https://trusted@evil.example/` is a legal URL a browser sends to
+/// `evil.example`. Showing everything before the first `/` made the host
+/// display an aid to the attack it exists to prevent.
+#[test]
+fn a_userinfo_url_does_not_borrow_a_trusted_hosts_name() {
+    let server = common::start();
+    let profile = format!(
+        "enabled = true\n[[link]]\nurl = \"https://gate.{}@evil.example/signin\"\n",
+        server.gate
+    );
+    assert_eq!(push(&server, "/v1/profile", &profile).status, 200);
+
+    let page = get(&server, "/@alice");
+    assert!(page.body.contains("evil.example"), "{}", page.body);
+    assert!(
+        !page
+            .body
+            .contains(&format!("gate.{}@evil.example<", server.gate)),
+        "the userinfo was rendered as the host: {}",
+        page.body
+    );
+}
+
+/// `a` is a legal handle; only the *slug* `a` is reserved. A static segment
+/// under `/@` shadowed every switchboard that user could ever make.
+#[test]
+fn a_one_letter_handle_can_still_serve_a_switchboard() {
+    let server = common::start();
+    let user = server.add_user("a");
+    server
+        .db
+        .record_edit(
+            &user.id,
+            mecha_factory::db::RECORD_BOARD,
+            "teaching",
+            "slug = \"teaching\"\nheading = \"Teaching\"\n",
+            &mecha_factory::db::now(),
+        )
+        .unwrap();
+
+    let page = get(&server, "/@a/teaching");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("Teaching"), "{}", page.body);
+
+    // And the shared assets still serve, from outside the /@ namespace.
+    let css = get(&server, "/a/form.css");
+    assert_eq!(css.status, 200, "{}", css.head);
+}
+
+/// Nothing closes a poll when its deadline passes, so the inventory has to
+/// apply the same predicate the handler does or the page advertises a ballot
+/// that will refuse the answer.
+#[test]
+fn an_expired_poll_is_not_listed_even_though_its_state_is_open() {
+    let server = common::start();
+    assert_eq!(push(&server, "/v1/profile", ENABLED).status, 200);
+    let spec = mecha_manifest::PollSpec::from_toml(
+        "title = \"Lunch\"\n[audience]\nkind = \"link\"\nmax_ballots = 50\n\
+         [[questions]]\nid = \"q\"\nkind = \"choice\"\n\
+         [[questions.options]]\nid = \"a\"\nlabel = \"A\"\n\
+         [[questions.options]]\nid = \"b\"\nlabel = \"B\"\n",
+    )
+    .unwrap();
+    server
+        .db
+        .poll_create(
+            &mecha_factory::db::PollRow {
+                user_id: server.user.id.clone(),
+                id: "lunch".into(),
+                title: "Lunch poll".into(),
+                timezone: "America/New_York".into(),
+                duration_minutes: 0,
+                deadline: Some("2020-01-01T00:00:00Z".into()),
+                candidates: "[]".into(),
+                spec: Some(serde_json::to_string(&spec).unwrap()),
+                resolution: None,
+                screen_token_hash: None,
+                state: "open".into(),
+                created_at: mecha_factory::db::now(),
+                closed_at: None,
+            },
+            &[],
+        )
+        .unwrap();
+
+    let page = get(&server, "/@alice");
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(
+        !page.body.contains("/p/alice/lunch"),
+        "an expired poll was advertised: {}",
+        page.body
+    );
+}
