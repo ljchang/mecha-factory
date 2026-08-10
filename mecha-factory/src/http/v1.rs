@@ -271,7 +271,45 @@ pub async fn publish(
     published(&app, &user, &id, version, false, StatusCode::CREATED)
 }
 
+/// The two prefixes a published bundle is addressed from: the artifact origin
+/// that serves its bytes, and the gate viewer that puts chrome beside them.
+///
+/// Returned as a pair because the difference is not cosmetic, and a caller
+/// choosing badly is a caller handing someone a dead link:
+///
+/// - **The artifact origin** (`https://<handle>.art…/b/<id>/`) serves bytes and
+///   nothing else — no chrome, no session, `immutable` at a version URL. That
+///   is what a machine fetches, what a citation names, and what a projector
+///   shows.
+/// - **The gate viewer** (`https://gate…/view/<handle>/<id>`) is the page a
+///   *person* is sent: the version menu, the owner's release and share
+///   controls, the account corner, with the bytes framed cross-origin from the
+///   origin above.
+///
+/// The case that makes this load-bearing rather than a nicety: a **private**
+/// bundle's artifact URL serves nobody by design, and an agent's key can push
+/// bytes but never move an alias — so the state a publish most often lands in
+/// is the one where the artifact URL is a 404 and the viewer URL is the only
+/// address that opens. A response carrying only the first is a response that
+/// reports a broken link as a success.
+///
+/// Both are minted here rather than derived by the client, for the same reason
+/// `url` always was: the origin scheme is this deployment's to know, and the
+/// bundle's *class* decides which artifact origin it lives on — a client that
+/// guessed would be wrong the first time somebody published a notebook.
+fn addresses(app: &Shared, handle: &str, class: mecha_manifest::ContentClass) -> (String, String) {
+    (
+        app.config.user_url(Role::for_class(class), handle),
+        format!("{}/view/{handle}", app.config.base_url(Role::Gate)),
+    )
+}
+
 /// What a publish answers with: enough to print a URL without asking again.
+///
+/// The `viewer_*` fields are additive — `url` and `version_url` keep exactly
+/// the meaning they had, so a publisher built against the older shape is
+/// unaffected and one built against this shape can be pointed at an older box
+/// and find them missing rather than wrong.
 fn published(
     app: &Shared,
     user: &UserRow,
@@ -287,7 +325,7 @@ fn published(
         .flatten()
         .map(|row| row.class)
         .unwrap_or_default();
-    let base = app.config.user_url(Role::for_class(class), &user.handle);
+    let (base, viewer) = addresses(app, &user.handle, class);
     (
         status,
         Json(serde_json::json!({
@@ -297,6 +335,8 @@ fn published(
             "class": class.as_str(),
             "url": format!("{base}/b/{id}/"),
             "version_url": format!("{base}/b/{id}/v/{version}/"),
+            "viewer_url": format!("{viewer}/{id}"),
+            "viewer_version_url": format!("{viewer}/{id}/{version}"),
         })),
     )
         .into_response()
@@ -392,7 +432,7 @@ pub async fn alias(
         .and_then(|v| app.db.bundle(&user.id, &id, v).ok().flatten())
         .map(|row| row.class)
         .unwrap_or_default();
-    let base = app.config.user_url(Role::for_class(class), &user.handle);
+    let (base, viewer) = addresses(&app, &user.handle, class);
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -403,6 +443,7 @@ pub async fn alias(
                 Visibility::Private => "private",
             },
             "url": format!("{base}/b/{id}/"),
+            "viewer_url": format!("{viewer}/{id}"),
         })),
     )
         .into_response()

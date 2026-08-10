@@ -31,6 +31,15 @@ fn a_bundle_published_and_then_aliased_is_a_page_on_the_internet() {
         format!("http://alice.{}/b/brief/", server.artifacts),
         "a published URL names its owner, from the first one"
     );
+    assert_eq!(
+        published["viewer_url"],
+        format!("http://{gate}/view/alice/brief"),
+        "and the page a person is sent, which is a different origin"
+    );
+    assert_eq!(
+        published["viewer_version_url"],
+        format!("http://{gate}/view/alice/brief/1")
+    );
 
     // Published is not yet readable: the alias has not moved and nothing is
     // public.
@@ -41,6 +50,12 @@ fn a_bundle_published_and_then_aliased_is_a_page_on_the_internet() {
         .body(r#"{"version":1,"visibility":"public"}"#)
         .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.json()["viewer_url"],
+        format!("http://{gate}/view/alice/brief"),
+        "the alias answers with it too — a release is where a person is \
+         handed the link"
+    );
 
     let reply = server.get(server.artifacts, "/b/brief/");
     assert_eq!(reply.status, 302);
@@ -52,6 +67,125 @@ fn a_bundle_published_and_then_aliased_is_a_page_on_the_internet() {
         .header("content-security-policy")
         .unwrap()
         .contains("script-src 'none'"));
+}
+
+/// The link a publish reports has to be one that opens, and for most of a
+/// bundle's life the artifact URL is not.
+///
+/// A publish key pushes bytes and can never move an alias, so
+/// published-but-not-released is where an agent's publish *lands* rather than
+/// an edge case it might reach — and there the artifact origin serves nobody,
+/// by design. The response used to carry only that URL, so a publisher
+/// reported a 404 as a success and whoever asked was handed a dead link. The
+/// viewer URL is the one that opens: for the owner, and later for an address
+/// a share names.
+#[test]
+fn the_url_a_publish_reports_before_release_is_one_that_opens() {
+    let server = start();
+    let gate = server.gate.to_string();
+
+    let reply = Request::new("POST", "/v1/bundles", &gate)
+        .auth(&server.key(Scope::Publish))
+        .body(bundle_archive("brief", 1, ContentClass::Static, "Monday"))
+        .send(server.gate);
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    let published = reply.json();
+
+    // The state as left by a publish key: no alias, so the artifact origin
+    // answers exactly as it would for a bundle that never existed.
+    assert_eq!(server.get(server.artifacts, "/b/brief/").status, 404);
+    assert_eq!(
+        published["url"],
+        format!("http://alice.{}/b/brief/", server.artifacts),
+        "still reported, because a machine still wants it"
+    );
+
+    // The owner, signed in at the gate, gets the page.
+    let token = mecha_factory::intake::mint_token();
+    server
+        .db
+        .session_create(
+            &server.user.id,
+            &mecha_factory::intake::hash_token(&token),
+            &mecha_factory::db::now(),
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap();
+    let cookie = format!("__Host-factory-session={token}");
+
+    // Driven off what the response *said*, not off a path written here: the
+    // property under test is that the reported URL is the one that opens, so
+    // a response that reports nothing has to fail rather than be routed
+    // around by the test.
+    let reported = published["viewer_url"]
+        .as_str()
+        .expect("a publish reports the URL a person is sent");
+    let path = reported
+        .strip_prefix(&format!("http://{gate}"))
+        .unwrap_or_else(|| panic!("{reported} is not on the gate"));
+
+    // It resolves to the newest version the owner has, even with no alias
+    // pointing anywhere — which is the state we are in.
+    let bare = Request::new("GET", path, &gate)
+        .header("Cookie", &cookie)
+        .send(server.gate);
+    assert_eq!(bare.status, 303, "{}", bare.head);
+    let versioned = bare.header("location").unwrap();
+    assert_eq!(versioned, "/view/alice/brief/1");
+    assert_eq!(
+        published["viewer_version_url"],
+        format!("http://{gate}{versioned}"),
+        "and the versioned spelling names the same page"
+    );
+
+    let page = Request::new("GET", &versioned, &gate)
+        .header("Cookie", &cookie)
+        .send(server.gate);
+    assert_eq!(page.status, 200, "{}", page.body);
+    // Real bytes behind it, not the world's 404: a private preview frames a
+    // capability.
+    assert!(page.body.contains("/g/"), "{}", page.body);
+    assert!(page.body.contains("Manage"), "{}", page.body);
+}
+
+/// The refusal page has to be a door for the owner, not only for a reader.
+///
+/// The body's form mails a link to an address a *share* names, and an owner
+/// holds no share to their own bundle — so before this, an owner following
+/// the URL their own publish reported, while signed out, would fill that
+/// form in, be told a link was on its way, and get nothing. Now the tenant
+/// sign-in corner is on the page. It leaks nothing: the corner is identical
+/// on every refusal, so private, unshared and never-published still answer
+/// the same.
+#[test]
+fn the_viewer_sign_in_page_offers_the_account_corner_too() {
+    let server = start();
+    let gate = server.gate.to_string();
+    Request::new("POST", "/v1/bundles", &gate)
+        .auth(&server.key(Scope::Publish))
+        .body(bundle_archive("brief", 1, ContentClass::Static, "Monday"))
+        .send(server.gate);
+
+    let private = server.get(server.gate, "/view/alice/brief/1");
+    assert_eq!(private.status, 200, "{}", private.body);
+    assert!(private.body.contains("Sign in to view"), "{}", private.body);
+    assert!(
+        private.body.contains("action=\"/view/signin\""),
+        "the reader form: {}",
+        private.body
+    );
+    assert!(
+        private.body.contains("action=\"/account/signin\""),
+        "the owner's door: {}",
+        private.body
+    );
+
+    // And the oracle holds: a bundle that never existed answers with the
+    // same two doors.
+    let absent = server.get(server.gate, "/view/alice/nosuch/1");
+    assert_eq!(absent.status, 200, "{}", absent.body);
+    assert!(absent.body.contains("action=\"/view/signin\""));
+    assert!(absent.body.contains("action=\"/account/signin\""));
 }
 
 /// The one that would have published the shape of a private machine, and that
