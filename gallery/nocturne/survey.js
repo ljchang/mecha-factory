@@ -139,9 +139,14 @@
       if (!labels.length) return;
       var rows = Array.prototype.map.call(labels, function (label, index) {
         var sel = label.querySelector("select");
+        var img = label.querySelector(".optmedia");
         return {
           sel: sel,
           name: label.querySelector(".optlabel").textContent,
+          // The picture is part of the option, so it has to survive the swap
+          // to a buttoned list — otherwise ranking pictures becomes ranking
+          // their captions.
+          img: img ? img.cloneNode(true) : null,
           rank: sel.value === "" ? null : parseInt(sel.value, 10),
           declared: index
         };
@@ -168,10 +173,87 @@
         });
         queueSave();
       };
-      var announce = function (row) {
+      // `rows` is only resorted when a drag ends, so mid-drag the truth is
+      // the DOM. Passing the element says "ask where it actually is".
+      var announce = function (row, li) {
+        var at =
+          li && li.parentNode === list
+            ? Array.prototype.indexOf.call(list.children, li)
+            : rows.indexOf(row);
         live.textContent =
-          row.name + " is now " + (rows.indexOf(row) + 1) + " of " + rows.length + ".";
+          row.name + " is now " + (at + 1) + " of " + rows.length + ".";
       };
+      // --- the drag, owned by the list rather than by a row ---------------
+      // Pointer capture lives on the *list*, and that is the whole fix for a
+      // drag that used to move exactly one row and then die. Capturing on the
+      // grip looks natural and is wrong: the first reorder moves the row's
+      // `li`, an `insertBefore` on an attached node is a remove and an insert,
+      // and removing the capturing element releases the capture — so every
+      // pointermove after the first went nowhere. The list is the one node in
+      // this widget that never moves.
+      var drag = null;
+
+      var endDrag = function () {
+        if (!drag) return;
+        drag.item.classList.remove("dragging");
+        drag.item.style.transform = "";
+        // The DOM is where the drag happened; make it the order.
+        var order = Array.prototype.map.call(list.children, function (li) {
+          return li.rowRef;
+        });
+        rows.length = 0;
+        Array.prototype.push.apply(rows, order);
+        var row = drag.row;
+        drag = null;
+        announce(row);
+        sync();
+        render(null);
+      };
+
+      list.addEventListener("pointermove", function (event) {
+        if (!drag || event.pointerId !== drag.id) return;
+        var item = drag.item;
+        // The row tracks the pointer between swaps. Without this nothing
+        // appears to move until the order changes, which reads as a dead drag.
+        item.style.transform =
+          "translateY(" + (event.clientY - drag.startY) + "px)";
+
+        // Swap on midpoints rather than on "whatever is under the cursor":
+        // once a row moves under the pointer, hit-testing returns the dragged
+        // row itself and the gesture stalls against its own result.
+        var others = Array.prototype.filter.call(list.children, function (li) {
+          return li !== item;
+        });
+        var before = null;
+        for (var i = 0; i < others.length; i++) {
+          var box = others[i].getBoundingClientRect();
+          if (event.clientY < box.top + box.height / 2) {
+            before = others[i];
+            break;
+          }
+        }
+        var moved = false;
+        if (before === null) {
+          if (item !== list.lastChild) {
+            list.appendChild(item);
+            moved = true;
+          }
+        } else if (before !== item.nextSibling) {
+          list.insertBefore(item, before);
+          moved = true;
+        }
+        if (moved) {
+          // Re-baseline so the row sits in its new slot and keeps following
+          // from there, instead of jumping by the distance already travelled.
+          drag.startY = event.clientY;
+          item.style.transform = "";
+          announce(drag.row, item);
+        }
+      });
+      list.addEventListener("pointerup", endDrag);
+      list.addEventListener("pointercancel", endDrag);
+      list.addEventListener("lostpointercapture", endDrag);
+
       var render = function (focus) {
         list.textContent = "";
         rows.forEach(function (row, index) {
@@ -209,42 +291,19 @@
           up.addEventListener("click", function () { move(-1); });
           down.addEventListener("click", function () { move(1); });
 
+          // Starting a drag is all a row does; the list owns the rest. See
+          // the handlers above for why the capture cannot live here.
           grip.addEventListener("pointerdown", function (event) {
             event.preventDefault();
-            try { grip.setPointerCapture(event.pointerId); } catch (e) {}
+            try { list.setPointerCapture(event.pointerId); } catch (e) {}
+            drag = { id: event.pointerId, item: item, row: row, startY: event.clientY };
             item.classList.add("dragging");
           });
-          grip.addEventListener("pointermove", function (event) {
-            if (!item.classList.contains("dragging")) return;
-            var el = document.elementFromPoint(event.clientX, event.clientY);
-            var over = el && el.closest ? el.closest(".rank-list li") : null;
-            if (!over || over === item || over.parentNode !== list) return;
-            var kids = Array.prototype.slice.call(list.children);
-            if (kids.indexOf(over) < kids.indexOf(item)) {
-              list.insertBefore(item, over);
-            } else {
-              list.insertBefore(item, over.nextSibling);
-            }
-          });
-          var drop = function () {
-            if (!item.classList.contains("dragging")) return;
-            item.classList.remove("dragging");
-            // The DOM is where the drag happened; make it the order.
-            var order = Array.prototype.map.call(list.children, function (li) {
-              return li.rowRef;
-            });
-            rows.length = 0;
-            Array.prototype.push.apply(rows, order);
-            announce(row);
-            sync();
-            render(null);
-          };
-          grip.addEventListener("pointerup", drop);
-          grip.addEventListener("pointercancel", drop);
 
           item.appendChild(grip);
           item.appendChild(up);
           item.appendChild(down);
+          if (row.img) item.appendChild(row.img.cloneNode(true));
           item.appendChild(name);
           list.appendChild(item);
           // Focus follows the moved row, so arrows keep working from the

@@ -17,38 +17,56 @@
 <form method="post" action="#" class="survey" data-demo="1">
 <section class="question">
 <h2>Which paper should the discussion section take on?</h2>
+<div class="opts">
 <label class="opt"><input type="radio" name="q_paper" value="world-models"> <span class="optlabel">World models are enough</span> <span class="detail">Chen et al., 2026</span> <a href="https://example.org/world-models" rel="noopener">link</a></label>
 <label class="opt"><input type="radio" name="q_paper" value="affect-probes"> <span class="optlabel">Affective probes in fMRI decoding</span></label>
+</div>
 <div class="results-slot" id="results-q-paper"></div>
 </section>
 <section class="question">
 <h2>Rank the project formats you&#39;d prefer.</h2>
+<div class="opts">
 <p class="cap">Rank your preferences — 1 is best. Ranking only some is fine.</p>
 <label class="opt rank"><select name="q_order_o_replication"><option value="">—</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select> <span class="optlabel">Replication study</span></label>
 <label class="opt rank"><select name="q_order_o_reanalysis"><option value="">—</option><option value="1" selected>1</option><option value="2">2</option><option value="3">3</option></select> <span class="optlabel">Reanalysis of an open dataset</span></label>
 <label class="opt rank"><select name="q_order_o_proposal"><option value="">—</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select> <span class="optlabel">Novel study proposal</span></label>
+</div>
 <div class="results-slot" id="results-q-order"></div>
 </section>
 <section class="question">
+<h2>Which version of Figure 2 should go in the paper?</h2>
+<div class="opts">
+<label class="opt has-media"><input type="radio" name="q_figure" value="scatter"> <img class="optmedia" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgMTAwIj48cmVjdCB3aWR0aD0iMTYwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2VlZjFmYiIvPjxnIGZpbGw9IiM1ZDUyOTQiPjxjaXJjbGUgY3g9IjIwIiBjeT0iODAiIHI9IjMuMiIvPjxjaXJjbGUgY3g9IjMxIiBjeT0iNjkiIHI9IjMuMiIvPjxjaXJjbGUgY3g9IjQyIiBjeT0iNTgiIHI9IjMuMiIvPjxjaXJjbGUgY3g9IjUzIiBjeT0iNjUiIHI9IjMuMiIvPjxjaXJjbGUgY3g9IjY0IiBjeT0iNTQiIHI9IjMuMiIvPjxjaXJjbGUgY3g9Ijc1IiBjeT0iNDMiIHI9IjMuMiIvPjxjaXJjbGUgY3g9Ijg2IiBjeT0iNTAiIHI9IjMuMiIvPjxjaXJjbGUgY3g9Ijk3IiBjeT0iMzkiIHI9IjMuMiIvPjxjaXJjbGUgY3g9IjEwOCIgY3k9IjI4IiByPSIzLjIiLz48Y2lyY2xlIGN4PSIxMTkiIGN5PSIzNSIgcj0iMy4yIi8+PGNpcmNsZSBjeD0iMTMwIiBjeT0iMjQiIHI9IjMuMiIvPjwvZz48cGF0aCBkPSJNMTYgODQgTDE0NiAyNiIgc3Ryb2tlPSIjMmIyMzUwIiBzdHJva2Utd2lkdGg9IjIuNSIgZmlsbD0ibm9uZSIvPjwvc3ZnPg==" alt="A scatter plot of eleven points with a rising fitted line" width="220" loading="lazy" decoding="async"><span class="optlabel">Scatter with a fitted line</span></label>
+<label class="opt has-media"><input type="radio" name="q_figure" value="heat"> <img class="optmedia" src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNjAgMTAwIj48cmVjdCB3aWR0aD0iMTYwIiBoZWlnaHQ9IjEwMCIgZmlsbD0iI2VlZjFmYiIvPjxyZWN0IHg9IjE2IiB5PSIxNCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjE1Ii8+PHJlY3QgeD0iMzgiIHk9IjE0IiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiM1ZDUyOTQiIG9wYWNpdHk9IjAuMjYiLz48cmVjdCB4PSI2MCIgeT0iMTQiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzVkNTI5NCIgb3BhY2l0eT0iMC4zNyIvPjxyZWN0IHg9IjgyIiB5PSIxNCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjQ4Ii8+PHJlY3QgeD0iMTA0IiB5PSIxNCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjU5Ii8+PHJlY3QgeD0iMTI2IiB5PSIxNCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjcwIi8+PHJlY3QgeD0iMTYiIHk9IjM2IiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiM1ZDUyOTQiIG9wYWNpdHk9IjAuNTkiLz48cmVjdCB4PSIzOCIgeT0iMzYiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzVkNTI5NCIgb3BhY2l0eT0iMC43MCIvPjxyZWN0IHg9IjYwIiB5PSIzNiIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjgxIi8+PHJlY3QgeD0iODIiIHk9IjM2IiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiM1ZDUyOTQiIG9wYWNpdHk9IjAuOTIiLz48cmVjdCB4PSIxMDQiIHk9IjM2IiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiM1ZDUyOTQiIG9wYWNpdHk9IjAuMTUiLz48cmVjdCB4PSIxMjYiIHk9IjM2IiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiM1ZDUyOTQiIG9wYWNpdHk9IjAuMjYiLz48cmVjdCB4PSIxNiIgeT0iNTgiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzVkNTI5NCIgb3BhY2l0eT0iMC4xNSIvPjxyZWN0IHg9IjM4IiB5PSI1OCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjI2Ii8+PHJlY3QgeD0iNjAiIHk9IjU4IiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiM1ZDUyOTQiIG9wYWNpdHk9IjAuMzciLz48cmVjdCB4PSI4MiIgeT0iNTgiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzVkNTI5NCIgb3BhY2l0eT0iMC40OCIvPjxyZWN0IHg9IjEwNCIgeT0iNTgiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzVkNTI5NCIgb3BhY2l0eT0iMC41OSIvPjxyZWN0IHg9IjEyNiIgeT0iNTgiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzVkNTI5NCIgb3BhY2l0eT0iMC43MCIvPjxyZWN0IHg9IjE2IiB5PSI4MCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjU5Ii8+PHJlY3QgeD0iMzgiIHk9IjgwIiB3aWR0aD0iMjAiIGhlaWdodD0iMjAiIGZpbGw9IiM1ZDUyOTQiIG9wYWNpdHk9IjAuNzAiLz48cmVjdCB4PSI2MCIgeT0iODAiIHdpZHRoPSIyMCIgaGVpZ2h0PSIyMCIgZmlsbD0iIzVkNTI5NCIgb3BhY2l0eT0iMC44MSIvPjxyZWN0IHg9IjgyIiB5PSI4MCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjkyIi8+PHJlY3QgeD0iMTA0IiB5PSI4MCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjE1Ii8+PHJlY3QgeD0iMTI2IiB5PSI4MCIgd2lkdGg9IjIwIiBoZWlnaHQ9IjIwIiBmaWxsPSIjNWQ1Mjk0IiBvcGFjaXR5PSIwLjI2Ii8+PC9zdmc+" alt="A four-by-six grid of squares shaded by value" width="220" loading="lazy" decoding="async"><span class="optlabel">Heat map of the same data</span></label>
+</div>
+<div class="results-slot" id="results-q-figure"></div>
+</section>
+<section class="question">
 <h2>The pace of the course so far is right.</h2>
-<div class="scale" role="radiogroup">
+<div class="opts across">
+<div class="scale" role="radiogroup" style="--points:5">
 <label class="point"><input type="radio" name="q_pace" value="1"> Strongly disagree</label>
 <label class="point"><input type="radio" name="q_pace" value="2"> Disagree</label>
 <label class="point"><input type="radio" name="q_pace" value="3"> Neutral</label>
 <label class="point"><input type="radio" name="q_pace" value="4" checked> Agree</label>
 <label class="point"><input type="radio" name="q_pace" value="5"> Strongly agree</label>
 </div>
+</div>
 <div class="results-slot" id="results-q-pace"></div>
 </section>
 <section class="question">
 <h2>How confident do you feel about the material right now?</h2>
-<p class="vas"><span class="anchor">0 — Not at all confident</span> <input type="number" name="q_confidence" min="0" max="100" inputmode="numeric" value=""> <span class="anchor">100 — Completely confident</span></p>
+<div class="opts across">
+<p class="vas"><span class="anchor anchor-min">0 — Not at all confident</span><span class="anchor anchor-max">100 — Completely confident</span><input type="number" name="q_confidence" min="0" max="100" inputmode="numeric" value=""></p>
+</div>
 <div class="results-slot" id="results-q-confidence"></div>
 </section>
 <section class="question">
 <h2>What is working that we should keep doing?</h2>
+<div class="opts">
 <textarea name="q_keep" maxlength="300" rows="4"></textarea>
 <p class="cap">Up to 300 characters.</p>
+</div>
 <div class="results-slot" id="results-q-keep"></div>
 </section>
 <p class="zone" id="results-when">Results will appear here after you answer.</p>
