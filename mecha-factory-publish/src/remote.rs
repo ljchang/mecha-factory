@@ -442,6 +442,35 @@ impl Remote {
         self.request("GET", "/v1/types", None)
     }
 
+    /// Send a profile or a board as its own source text.
+    ///
+    /// TOML on the wire for the same reason a request type is: the box parses
+    /// it with the `mecha_manifest` code this side used to check it, so one
+    /// text is what both validators see. It also means the box can store the
+    /// file byte for byte when nothing needed merging, which is what keeps a
+    /// person's comments alive across a round trip.
+    pub fn record_push(&self, path: &str, source: &str) -> Result<serde_json::Value> {
+        self.send(
+            "PUT",
+            path,
+            Some(source.as_bytes()),
+            "text/plain; charset=utf-8",
+        )
+        .with_context(|| format!("uploading {path}"))
+    }
+
+    /// Read a record back — the box's copy, which may carry edits made in a
+    /// browser that this machine has never seen.
+    pub fn record_get(&self, path: &str) -> Result<serde_json::Value> {
+        self.request("GET", path, None)
+    }
+
+    /// What boards exist remotely. A machine cannot pull a file it has never
+    /// heard of, which is every board created in the cockpit.
+    pub fn board_list(&self) -> Result<serde_json::Value> {
+        self.request("GET", "/v1/boards", None)
+    }
+
     /// Create a poll on the box; the reply carries the capability URLs.
     pub fn poll_create(
         &self,

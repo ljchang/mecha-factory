@@ -449,6 +449,70 @@ fn tools() -> Vec<ToolSpec> {
             },
         },
         ToolSpec {
+            name: "surface_push",
+            description:
+                "Send a profile, the hangar, or one switchboard from its local TOML file to the \
+                 box. A publication: it changes what a stranger sees at your public pages. The \
+                 reply names any field this file overwrote that had been edited in the cockpit.",
+            read_only: false,
+            open_world: true,
+            schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "what": {
+                            "type": "string",
+                            "enum": ["profile", "hangar", "switchboard"],
+                            "description": "Which record."
+                        },
+                        "slug": {
+                            "type": "string",
+                            "description": "Required when `what` is `switchboard`; it is the URL segment."
+                        },
+                        "file": {
+                            "type": "string",
+                            "description": "Path to the TOML. Defaults to the standard location for this record."
+                        }
+                    },
+                    "required": ["what"],
+                    "additionalProperties": false
+                })
+            },
+        },
+        ToolSpec {
+            name: "surface_pull",
+            description:
+                "Write the box's copy of a record back over the local file. Use it before \
+                 editing: the cockpit can edit these too, and a push from a stale file \
+                 overwrites whatever was changed there.",
+            read_only: false,
+            open_world: true,
+            schema: || {
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "what": {
+                            "type": "string",
+                            "enum": ["profile", "hangar", "switchboard"]
+                        },
+                        "slug": {"type": "string"},
+                        "file": {"type": "string"}
+                    },
+                    "required": ["what"],
+                    "additionalProperties": false
+                })
+            },
+        },
+        ToolSpec {
+            name: "surface_list",
+            description: "Every board the box holds, and which of them have been edited in the \
+                          cockpit since their last push. The only way to learn about a board \
+                          created in a browser that this machine has never seen.",
+            read_only: true,
+            open_world: true,
+            schema: || json!({"type": "object", "properties": {}, "additionalProperties": false}),
+        },
+        ToolSpec {
             name: "type_list",
             description: "Every request type the box is currently serving a public form for, \
                           by id and title. Use it to check whether a type_push landed.",
@@ -1068,6 +1132,90 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                     .unwrap_or(parsed.fields.len() as i64),
                 local.display()
             ))
+        }
+        "surface_push" | "surface_pull" => {
+            let what = string("what")?;
+            let slug = args.get("slug").and_then(Value::as_str).unwrap_or_default();
+            let record = crate::records::record_of(&what, slug)?;
+            let path = match args.get("file").and_then(Value::as_str) {
+                Some(given) => confined(root, given)?,
+                None => record.default_path()?,
+            };
+            let Some(remote) =
+                crate::remote::Remote::configured_for(crate::remote::Scope::Release)?
+            else {
+                anyhow::bail!(
+                    "no factory is configured, or there is no release key — a public page \
+                     is a publication, so it needs one"
+                );
+            };
+            if name == "surface_pull" {
+                let answer = remote.record_get(&record.route())?;
+                let source = answer["source"].as_str().unwrap_or_default();
+                if source.trim().is_empty() {
+                    return Ok(format!("The box holds no {} yet.", record.what()));
+                }
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, source)?;
+                return Ok(format!("Pulled {} into {}.", record.what(), path.display()));
+            }
+            let text = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?;
+            // Checked here as well as at the box: a round trip is a slow way
+            // to learn about a typo.
+            record.check(&text)?;
+            let answer = remote.record_push(&record.route(), &text)?;
+            let overwritten: Vec<&str> = answer["overwritten"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                .unwrap_or_default();
+            // Said plainly rather than buried, because the model may be about
+            // to report success to a person whose cockpit edit just vanished.
+            if overwritten.is_empty() {
+                Ok(format!("Pushed {} from {}.", record.what(), path.display()))
+            } else {
+                Ok(format!(
+                    "Pushed {} from {}.\n\nThis file OVERWROTE fields that had been edited in \
+                     the cockpit: {}. Those edits are gone. Tell the user, and run surface_pull \
+                     before editing next time.",
+                    record.what(),
+                    path.display(),
+                    overwritten.join(", ")
+                ))
+            }
+        }
+        "surface_list" => {
+            let Some(remote) =
+                crate::remote::Remote::configured_for(crate::remote::Scope::Release)?
+            else {
+                return Ok("No factory is configured, or there is no release key.".into());
+            };
+            let answer = remote.board_list()?;
+            let boards = answer["boards"].as_array().cloned().unwrap_or_default();
+            if boards.is_empty() {
+                return Ok("The box holds no boards yet.".into());
+            }
+            let mut out = String::new();
+            for board in &boards {
+                let slug = board["slug"].as_str().unwrap_or_default();
+                let name = if slug.is_empty() {
+                    "(the hangar)"
+                } else {
+                    slug
+                };
+                let drift = if board["drifted"].as_bool().unwrap_or(false) {
+                    "  — edited in the cockpit since its last push"
+                } else {
+                    ""
+                };
+                out.push_str(&format!(
+                    "{name} — updated {}{drift}\n",
+                    board["updated_at"].as_str().unwrap_or("?")
+                ));
+            }
+            Ok(out)
         }
         "type_list" => {
             let Some(remote) = crate::remote::Remote::configured()? else {
