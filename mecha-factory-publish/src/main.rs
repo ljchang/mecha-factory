@@ -543,7 +543,10 @@ fn main() -> Result<()> {
                     &id,
                     published.version,
                     (!no_alias).then_some(published.version),
-                    visibility,
+                    // `requested`, not the local fallback above: the store
+                    // needs a concrete value and the box must be told only
+                    // what somebody actually asked for.
+                    requested,
                 ) {
                     Ok(Some(at)) => {
                         println!("{}", at.columns());
@@ -577,17 +580,13 @@ fn main() -> Result<()> {
                     .or_else(|| store.versions(&id).ok().and_then(|v| v.last().copied()))
                     .ok_or_else(|| anyhow::anyhow!("{id} has no versions locally"))?,
             };
-            let visibility = store
-                .alias(&id)?
-                .map(|a| a.visibility)
-                .unwrap_or(Visibility::Private);
-            match remote::mirror(
-                &store,
-                &id,
-                version,
-                (!no_alias).then_some(version),
-                visibility,
-            )? {
+            // `push` has no `--visibility`, so it asserts none. It used to
+            // read one out of the local store and send it, which is how a
+            // bundle released publicly from the account page — a change the
+            // local store never hears about — was silently taken down again
+            // by the next push. Omitting the field is the box's own spelling
+            // of "leave who may read it alone".
+            match remote::mirror(&store, &id, version, (!no_alias).then_some(version), None)? {
                 Some(at) => {
                     println!("{id} v{version}");
                     println!("{}", at.columns());
@@ -784,7 +783,8 @@ fn main() -> Result<()> {
             version,
             visibility,
         } => {
-            let visibility = parse_visibility(visibility.as_deref())?.unwrap_or_else(|| {
+            let requested = parse_visibility(visibility.as_deref())?;
+            let visibility = requested.unwrap_or_else(|| {
                 store
                     .alias(&id)
                     .ok()
@@ -794,7 +794,10 @@ fn main() -> Result<()> {
             });
             store.set_alias(&id, Some(version), visibility, &now)?;
             println!("{id} → v{version}");
-            let mirrored = remote::mirror_alias(&id, Some(version), visibility)?;
+            // `requested`: omitting `--visibility` means "move the alias and
+            // leave who reads it alone", which is what the box does with an
+            // absent field and what this command's own help promises.
+            let mirrored = remote::mirror_alias(&id, Some(version), requested)?;
             if let Some(at) = &mirrored {
                 println!("{}", at.columns());
             }
@@ -819,7 +822,10 @@ fn main() -> Result<()> {
             // half way, the state to be left in is "locally down, remotely up",
             // which the next `unpublish` fixes — not "locally up, remotely
             // down", which reads as done and is not.
-            remote::mirror_alias(&id, None, visibility)?;
+            // `None`, which is precisely "keep who may read it" — the rule
+            // the comment above states, now said to the box in its own terms
+            // rather than by echoing a locally-read value back at it.
+            remote::mirror_alias(&id, None, None)?;
             match before {
                 Some(v) => println!("{id}: the share URL no longer resolves (was v{v})"),
                 None => println!("{id}: already unpublished"),
@@ -983,10 +989,12 @@ fn reach(store: &BundleStore, id: &str, at: Option<&remote::Mirrored>) -> Result
             "  reach  nobody: the share URL points at nothing. Every version is \
              still on the box."
         ),
-        // Either this command did not touch the alias, or it is a read-only
-        // one that never asked. Both mean the same thing here: the origin's
-        // answer is whatever it already was, and the local record cannot say.
-        Some(remote::Serves::Unchanged) | None => println!(
+        // Three ways to arrive at the same honest answer: the alias was not
+        // touched, or it moved without anybody naming a visibility, or this
+        // is a read-only command that never asked. In all three the origin
+        // holds the answer and the local record is not evidence about it —
+        // so it is offered as a parenthesis, never as the claim.
+        Some(remote::Serves::AsBefore | remote::Serves::Unchanged) | None => println!(
             "  reach  whatever the alias on the box already said — this did not \
              change it{}",
             match visibility {
