@@ -74,8 +74,52 @@ pub struct PollQuestion {
     pub prompt: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub required: bool,
+    /// An image the whole question is about — the figure everyone is looking
+    /// at while they answer. Per-option pictures live on [`PollOption`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<Media>,
+    /// Whether the choices run down the page or across it.
+    ///
+    /// Presentation, deliberately kept out of [`QuestionKind`]: the kind is
+    /// what a question *means* and therefore what an answer may be, and a
+    /// tally must never change because someone rearranged a page. Five points
+    /// in a row is the conventional Likert item and reads as a scale; five
+    /// options down the page reads as a list of things to pick between. The
+    /// default is whatever each kind already rendered, so no existing spec
+    /// changes meaning by upgrading.
+    #[serde(default, skip_serializing_if = "Layout::is_default")]
+    pub layout: Layout,
     #[serde(flatten)]
     pub kind: QuestionKind,
+}
+
+/// Which way a question's controls run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Layout {
+    /// Each kind's existing rendering: scales across, everything else down.
+    #[default]
+    Auto,
+    /// One control per line.
+    Vertical,
+    /// Controls on one line, wrapping when they must.
+    Horizontal,
+}
+
+impl Layout {
+    fn is_default(&self) -> bool {
+        matches!(self, Layout::Auto)
+    }
+
+    /// Whether this question's controls should run across the page, given what
+    /// the kind renders as when nobody says.
+    pub fn is_horizontal(&self, default_horizontal: bool) -> bool {
+        match self {
+            Layout::Auto => default_horizontal,
+            Layout::Horizontal => true,
+            Layout::Vertical => false,
+        }
+    }
 }
 
 /// What a question asks, and therefore what an answer may be.
@@ -142,6 +186,95 @@ pub struct PollOption {
     pub detail: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// A picture of the thing being chosen between. `link` is a URL to show;
+    /// this is an image to render.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<Media>,
+}
+
+/// An image rendered into a poll page.
+///
+/// **Where the bytes may come from is decided by the Content-Security-Policy,
+/// not by taste.** Every class this project serves sends `img-src 'self'
+/// data:`, so exactly two sources render: something the origin itself serves,
+/// and an image carried inline. A `https://…` URL to anywhere else — including
+/// this deployment's own artifact subdomain, which is a different origin — is
+/// refused at parse time rather than accepted and silently blocked by the
+/// browser. A poll that renders a broken image to sixty people is worse than
+/// one that refuses to be created.
+///
+/// `alt` is required, and not as a formality: a question that asks people to
+/// choose between pictures is unanswerable without it for anyone using a screen
+/// reader, and a poll is a thing you send to a group whose eyesight you do not
+/// know.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Media {
+    /// A `data:image/…;base64,…` URI, or a path the origin serves.
+    pub src: String,
+    /// What the image shows, for anyone who cannot see it.
+    pub alt: String,
+    /// Rendered width in CSS pixels. Height follows the aspect ratio; the
+    /// page caps it either way so one large figure cannot push a five-option
+    /// question off the screen.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+}
+
+/// The ceiling on one inline image, before base64 expansion.
+///
+/// A spec travels as one JSON body through `poll_create` and is stored whole,
+/// so an unbounded `data:` URI is an unbounded request and an unbounded row.
+/// 512 KB is a generous figure or photograph and a poor way to smuggle a video.
+pub const MAX_INLINE_MEDIA_BYTES: usize = 512 * 1024;
+
+impl Media {
+    /// Refuse anything the page could not actually render.
+    pub fn check(&self, where_: &str) -> Result<()> {
+        let invalid = |message: String| Err(ManifestError::invalid(message));
+        if self.alt.trim().is_empty() {
+            return invalid(format!("{where_}: an image needs `alt` text"));
+        }
+        if let Some(rest) = self.src.strip_prefix("data:") {
+            let Some((meta, payload)) = rest.split_once(',') else {
+                return invalid(format!("{where_}: `src` is not a usable data URI"));
+            };
+            if !meta.starts_with("image/") {
+                return invalid(format!(
+                    "{where_}: `src` is a data URI of type `{}`, and only images render here",
+                    meta.split(';').next().unwrap_or(meta)
+                ));
+            }
+            // base64 is 4 characters per 3 bytes; compare before decoding so a
+            // huge string is refused without being expanded in memory first.
+            let bytes = payload.len() / 4 * 3;
+            if bytes > MAX_INLINE_MEDIA_BYTES {
+                return invalid(format!(
+                    "{where_}: an inline image is about {} KB, over the {} KB limit — \
+                     shrink it, or serve it from the origin and reference the path",
+                    bytes / 1024,
+                    MAX_INLINE_MEDIA_BYTES / 1024
+                ));
+            }
+            return Ok(());
+        }
+        if self.src.contains("://") || self.src.starts_with("//") {
+            return invalid(format!(
+                "{where_}: `{}` is on another origin, and these pages send \
+                 `img-src 'self' data:` — the browser would refuse it and the \
+                 question would render with a hole in it. Inline it as a \
+                 data: URI, or serve it from this origin and use its path",
+                self.src
+            ));
+        }
+        if self.src.contains("..") {
+            return invalid(format!("{where_}: `{}` contains `..`", self.src));
+        }
+        if self.src.trim().is_empty() {
+            return invalid(format!("{where_}: an image needs a `src`"));
+        }
+        Ok(())
+    }
 }
 
 /// When a voter sees results, and whose names ride them. Both are promises
@@ -327,6 +460,9 @@ impl PollSpec {
 impl PollQuestion {
     fn check(&self) -> Result<()> {
         let id = &self.id;
+        if let Some(media) = &self.media {
+            media.check(&format!("question `{id}`"))?;
+        }
         match &self.kind {
             QuestionKind::Choice {
                 min_choices,
@@ -443,6 +579,9 @@ fn check_options(question: &str, options: &[PollOption]) -> Result<()> {
                 option.id
             )));
         }
+        if let Some(media) = &option.media {
+            media.check(&format!("question `{question}`, option `{}`", option.id))?;
+        }
         if let Some(link) = &option.link {
             if !link.starts_with("https://") && !link.starts_with("http://") {
                 return Err(ManifestError::invalid(format!(
@@ -460,7 +599,7 @@ fn check_options(question: &str, options: &[PollOption]) -> Result<()> {
 /// TOML because serde's `flatten` forfeits `deny_unknown_fields` — a typo'd
 /// key in a schema format silently doing nothing is not acceptable. The
 /// same arrangement as `check_field_keys` in request.rs.
-const COMMON_QUESTION_KEYS: &[&str] = &["id", "prompt", "required", "kind"];
+const COMMON_QUESTION_KEYS: &[&str] = &["id", "prompt", "required", "kind", "layout", "media"];
 
 fn allowed_question_keys(kind: &str) -> Option<&'static [&'static str]> {
     Some(match kind {
@@ -996,6 +1135,7 @@ mod tests {
                 label: id.to_uppercase(),
                 detail: None,
                 link: None,
+                media: None,
             })
             .collect()
     }
@@ -1161,6 +1301,8 @@ mod tests {
             id: "q".into(),
             prompt: None,
             required: false,
+            layout: Layout::Auto,
+            media: None,
             kind,
         }
     }

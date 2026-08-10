@@ -85,21 +85,38 @@ impl BookingPage {
     }
 }
 
+/// Everything `booking.css` is, for one theme.
+///
+/// **One builder, because there used to be several and they disagreed.** Every
+/// page in this family — booking, poll, survey, projector — links a stylesheet
+/// called `booking.css`, so whichever page writes it decides what all the
+/// others get. The booking builders omitted `SURVEY_STRUCTURE`; the survey
+/// builders included it; the gallery wrote the booking one first and marked the
+/// job done. The result was a documentation gallery whose survey page had *no*
+/// survey CSS at all: list markers where `list-style:none` was meant to be, and
+/// rank buttons falling back to the full-size accent pill that `button` is. The
+/// live server was fine, because it happened to build its assets down the other
+/// path — which is the part that makes this the dangerous kind of bug, since
+/// the surface people learn the component from was the broken one.
+///
+/// A shared asset name needs a single definition. `assert_the_stylesheet_has_one_definition`
+/// holds the two paths together.
+pub fn page_style(theme: &crate::Theme) -> String {
+    format!(
+        "{}{}{}{}",
+        theme.css(),
+        crate::form::FORM_STRUCTURE,
+        BOOKING_STRUCTURE,
+        crate::poll_render::SURVEY_STRUCTURE
+    )
+}
+
 /// The page's assets for a theme, independent of any render — what a server
 /// answers asset requests from, where [`BookingPage::assets`] serves whoever
 /// is writing a rendered bundle to disk.
 pub fn booking_assets(theme: &crate::Theme) -> [(&'static str, String); 6] {
     [
-        (
-            "booking.css",
-            format!(
-                "{}{}{}{}",
-                theme.css(),
-                crate::form::FORM_STRUCTURE,
-                BOOKING_STRUCTURE,
-                crate::poll_render::SURVEY_STRUCTURE
-            ),
-        ),
+        ("booking.css", page_style(theme)),
         ("form.js", FORM_JS.to_string()),
         ("booking.js", BOOKING_JS.to_string()),
         ("poll.js", POLL_JS.to_string()),
@@ -315,12 +332,7 @@ pub fn poll_page(candidates: &[PollCandidate], options: &PollPageOptions) -> Boo
     );
     BookingPage {
         html,
-        style: format!(
-            "{}{}{}",
-            options.theme.css(),
-            crate::form::FORM_STRUCTURE,
-            BOOKING_STRUCTURE
-        ),
+        style: page_style(&options.theme),
     }
 }
 
@@ -710,12 +722,7 @@ impl RequestType {
 
         Ok(BookingPage {
             html,
-            style: format!(
-                "{}{}{}",
-                options.theme.css(),
-                crate::form::FORM_STRUCTURE,
-                BOOKING_STRUCTURE
-            ),
+            style: page_style(&options.theme),
         })
     }
 }
@@ -1477,5 +1484,71 @@ mod tests {
         let ranked = rank_poll(&candidates, &answers, 2);
         assert!(ranked[0].feasible);
         assert_eq!(ranked[0].if_needed, 1, "the cheaper feasible slot leads");
+    }
+
+    /// Every page in this family links one `booking.css`, so every path that
+    /// produces it has to produce the same bytes. Two of them did not: the
+    /// booking builders left `SURVEY_STRUCTURE` out, and because the gallery
+    /// writes the first `booking.css` it meets and marks the job done, the
+    /// documentation gallery's survey page shipped with no survey CSS at all —
+    /// visible rank buttons wearing the full-size accent pill, and list markers
+    /// where `list-style:none` was meant to be. The live server built its
+    /// assets down the other path and looked fine, which is exactly why nobody
+    /// noticed.
+    ///
+    /// Asserting on the *presence* of a rule rather than only on equality,
+    /// because two paths agreeing on the wrong thing is the other way to fail.
+    #[test]
+    fn assert_the_stylesheet_has_one_definition() {
+        for theme in crate::theme::BUILT_IN {
+            let shared = page_style(&theme);
+
+            let served = booking_assets(&theme)
+                .into_iter()
+                .find(|(name, _)| *name == "booking.css")
+                .map(|(_, css)| css)
+                .expect("booking.css is among the assets");
+            assert_eq!(served, shared, "what a server answers with has drifted");
+
+            // A really rendered page, not a second call to the same helper:
+            // the drift was a page builder inlining its own `format!`, and
+            // only a real page catches that.
+            let candidates = vec![PollCandidate {
+                start: "2026-03-03T14:00:00Z".parse().unwrap(),
+                end: "2026-03-03T14:30:00Z".parse().unwrap(),
+                duration_minutes: 30,
+                mine: None,
+                yes_count: 0,
+            }];
+            let rendered = poll_page(
+                &candidates,
+                &PollPageOptions {
+                    title: "Lab meeting".into(),
+                    participant: "Tal".into(),
+                    timezone: chrono_tz::America::New_York,
+                    action: String::new(),
+                    assets: "/p/a/".into(),
+                    theme,
+                    deadline_local: None,
+                    responded: 0,
+                    total: 1,
+                    open: true,
+                    notice: None,
+                },
+            );
+            assert_eq!(
+                rendered.style, shared,
+                "a rendered poll page builds a different booking.css"
+            );
+
+            // The rules the gallery was missing, named so a future reshuffle
+            // of the concatenation cannot quietly drop them again.
+            for needle in [".survey .rank-list", ".survey .cloud-w", ".vas-range"] {
+                assert!(
+                    shared.contains(needle),
+                    "`{needle}` is missing from booking.css"
+                );
+            }
+        }
     }
 }

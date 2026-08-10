@@ -428,12 +428,37 @@ pub fn survey_page(
     );
     BookingPage {
         html,
-        style: format!(
-            "{}{}{}{}",
-            options.theme.css(),
-            crate::form::FORM_STRUCTURE,
-            crate::booking::BOOKING_STRUCTURE,
-            SURVEY_STRUCTURE
+        style: crate::booking::page_style(&options.theme),
+    }
+}
+
+/// How a kind lays its controls out when the spec does not say.
+///
+/// A scale is read as one thing running from low to high, so it goes across;
+/// a list of options is read as a list, so it goes down. `layout` in the spec
+/// overrides either, and `Auto` reproduces exactly what shipped before it
+/// existed.
+fn defaults_horizontal(kind: &QuestionKind) -> bool {
+    matches!(kind, QuestionKind::Likert { .. } | QuestionKind::Vas { .. })
+}
+
+/// An `<img>` for a checked [`Media`], or nothing.
+///
+/// `Media::check` has already refused every source a browser would block, so
+/// nothing here has to decide policy — it escapes and emits. `loading=lazy`
+/// because a twelve-option picture question is twelve images, and `decoding`
+/// keeps a large one from blocking the rest of the form appearing.
+fn media_img(media: Option<&crate::poll::Media>, class: &str) -> String {
+    match media {
+        None => String::new(),
+        Some(media) => format!(
+            "<img class=\"{class}\" src=\"{}\" alt=\"{}\"{} loading=\"lazy\" decoding=\"async\">",
+            escape_text(&media.src),
+            escape_text(&media.alt),
+            media
+                .width
+                .map(|w| format!(" width=\"{w}\""))
+                .unwrap_or_default(),
         ),
     }
 }
@@ -441,6 +466,22 @@ pub fn survey_page(
 fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, open: bool) {
     let disabled = if open { "" } else { " disabled" };
     let qid = escape_text(&question.id);
+    // The question's own figure, above the controls: it is what the question
+    // is about, so it comes before what the question asks you to do with it.
+    let figure = media_img(question.media.as_ref(), "qmedia");
+    if !figure.is_empty() {
+        body.push_str(&format!("{figure}\n"));
+    }
+    let across = question
+        .layout
+        .is_horizontal(defaults_horizontal(&question.kind));
+    // One wrapper, one class: the layout is presentation, so it never reaches
+    // the input names, the answer parsing, or the tally.
+    body.push_str(if across {
+        "<div class=\"opts across\">\n"
+    } else {
+        "<div class=\"opts\">\n"
+    });
     match &question.kind {
         QuestionKind::Choice {
             min_choices,
@@ -477,7 +518,9 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
                     )
                 };
                 body.push_str(&format!(
-                    "<label class=\"opt\">{control} <span class=\"optlabel\">{}</span>{}{}</label>\n",
+                    "<label class=\"opt{}\">{control} {}<span class=\"optlabel\">{}</span>{}{}</label>\n",
+                    if option.media.is_some() { " has-media" } else { "" },
+                    media_img(option.media.as_ref(), "optmedia"),
                     escape_text(&option.label),
                     option
                         .detail
@@ -522,7 +565,8 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
                     ));
                 }
                 body.push_str(&format!(
-                    "</select> <span class=\"optlabel\">{}</span></label>\n",
+                    "</select> {}<span class=\"optlabel\">{}</span></label>\n",
+                    media_img(option.media.as_ref(), "optmedia"),
                     escape_text(&option.label)
                 ));
             }
@@ -537,7 +581,12 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
                 Some(Answer::Likert(v)) => Some(*v),
                 _ => None,
             };
-            body.push_str("<div class=\"scale\" role=\"radiogroup\">\n");
+            // The point count reaches CSS so the scale can be a grid of equal
+            // columns. As a wrapping flex row, five long labels broke across
+            // two lines and stopped reading as one scale.
+            body.push_str(&format!(
+                "<div class=\"scale\" role=\"radiogroup\" style=\"--points:{points}\">\n"
+            ));
             for point in 1..=*points {
                 let label = match labels {
                     Some(labels) => labels[usize::from(point) - 1].clone(),
@@ -576,14 +625,18 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
             // "untouched", and an untouched control submitting its resting
             // place would invent a midpoint. The enhanced thumbless track
             // is a later step; the meaning ships first.
+            // The two anchors are told apart in the markup so each can be
+            // pinned to its own end of the track. As one undifferentiated
+            // `.anchor` pair they could only ever flow inline, which put
+            // "100 — …" on the line below the slider.
             body.push_str(&format!(
-                "<p class=\"vas\"><span class=\"anchor\">0 — {}</span> \
+                "<p class=\"vas\"><span class=\"anchor anchor-min\">0 — {}</span>\
+                 <span class=\"anchor anchor-max\">100 — {}</span>\
                  <input type=\"number\" name=\"q_{qid}\" min=\"0\" max=\"100\" \
-                 inputmode=\"numeric\" value=\"{}\"{disabled}> \
-                 <span class=\"anchor\">100 — {}</span></p>\n",
+                 inputmode=\"numeric\" value=\"{}\"{disabled}></p>\n",
                 escape_text(anchor_min),
-                escape_text(&value),
                 escape_text(anchor_max),
+                escape_text(&value),
             ));
         }
         QuestionKind::Text { max_length } => {
@@ -603,6 +656,7 @@ fn widget(body: &mut String, question: &PollQuestion, mine: Option<&Answer>, ope
             // of it. The spec checker keeps them apart.
         }
     }
+    body.push_str("</div>\n");
 }
 
 /// Every question's results as (question id, HTML fragment) — what
@@ -935,13 +989,7 @@ pub fn screen_page(
     );
     BookingPage {
         html,
-        style: format!(
-            "{}{}{}{}",
-            options.theme.css(),
-            crate::form::FORM_STRUCTURE,
-            crate::booking::BOOKING_STRUCTURE,
-            SURVEY_STRUCTURE
-        ),
+        style: crate::booking::page_style(&options.theme),
     }
 }
 
@@ -1108,9 +1156,14 @@ pub(crate) const SURVEY_JS: &str = r#"// Generated by mecha-manifest. Enhancemen
       if (!labels.length) return;
       var rows = Array.prototype.map.call(labels, function (label, index) {
         var sel = label.querySelector("select");
+        var img = label.querySelector(".optmedia");
         return {
           sel: sel,
           name: label.querySelector(".optlabel").textContent,
+          // The picture is part of the option, so it has to survive the swap
+          // to a buttoned list — otherwise ranking pictures becomes ranking
+          // their captions.
+          img: img ? img.cloneNode(true) : null,
           rank: sel.value === "" ? null : parseInt(sel.value, 10),
           declared: index
         };
@@ -1137,10 +1190,87 @@ pub(crate) const SURVEY_JS: &str = r#"// Generated by mecha-manifest. Enhancemen
         });
         queueSave();
       };
-      var announce = function (row) {
+      // `rows` is only resorted when a drag ends, so mid-drag the truth is
+      // the DOM. Passing the element says "ask where it actually is".
+      var announce = function (row, li) {
+        var at =
+          li && li.parentNode === list
+            ? Array.prototype.indexOf.call(list.children, li)
+            : rows.indexOf(row);
         live.textContent =
-          row.name + " is now " + (rows.indexOf(row) + 1) + " of " + rows.length + ".";
+          row.name + " is now " + (at + 1) + " of " + rows.length + ".";
       };
+      // --- the drag, owned by the list rather than by a row ---------------
+      // Pointer capture lives on the *list*, and that is the whole fix for a
+      // drag that used to move exactly one row and then die. Capturing on the
+      // grip looks natural and is wrong: the first reorder moves the row's
+      // `li`, an `insertBefore` on an attached node is a remove and an insert,
+      // and removing the capturing element releases the capture — so every
+      // pointermove after the first went nowhere. The list is the one node in
+      // this widget that never moves.
+      var drag = null;
+
+      var endDrag = function () {
+        if (!drag) return;
+        drag.item.classList.remove("dragging");
+        drag.item.style.transform = "";
+        // The DOM is where the drag happened; make it the order.
+        var order = Array.prototype.map.call(list.children, function (li) {
+          return li.rowRef;
+        });
+        rows.length = 0;
+        Array.prototype.push.apply(rows, order);
+        var row = drag.row;
+        drag = null;
+        announce(row);
+        sync();
+        render(null);
+      };
+
+      list.addEventListener("pointermove", function (event) {
+        if (!drag || event.pointerId !== drag.id) return;
+        var item = drag.item;
+        // The row tracks the pointer between swaps. Without this nothing
+        // appears to move until the order changes, which reads as a dead drag.
+        item.style.transform =
+          "translateY(" + (event.clientY - drag.startY) + "px)";
+
+        // Swap on midpoints rather than on "whatever is under the cursor":
+        // once a row moves under the pointer, hit-testing returns the dragged
+        // row itself and the gesture stalls against its own result.
+        var others = Array.prototype.filter.call(list.children, function (li) {
+          return li !== item;
+        });
+        var before = null;
+        for (var i = 0; i < others.length; i++) {
+          var box = others[i].getBoundingClientRect();
+          if (event.clientY < box.top + box.height / 2) {
+            before = others[i];
+            break;
+          }
+        }
+        var moved = false;
+        if (before === null) {
+          if (item !== list.lastChild) {
+            list.appendChild(item);
+            moved = true;
+          }
+        } else if (before !== item.nextSibling) {
+          list.insertBefore(item, before);
+          moved = true;
+        }
+        if (moved) {
+          // Re-baseline so the row sits in its new slot and keeps following
+          // from there, instead of jumping by the distance already travelled.
+          drag.startY = event.clientY;
+          item.style.transform = "";
+          announce(drag.row, item);
+        }
+      });
+      list.addEventListener("pointerup", endDrag);
+      list.addEventListener("pointercancel", endDrag);
+      list.addEventListener("lostpointercapture", endDrag);
+
       var render = function (focus) {
         list.textContent = "";
         rows.forEach(function (row, index) {
@@ -1178,42 +1308,19 @@ pub(crate) const SURVEY_JS: &str = r#"// Generated by mecha-manifest. Enhancemen
           up.addEventListener("click", function () { move(-1); });
           down.addEventListener("click", function () { move(1); });
 
+          // Starting a drag is all a row does; the list owns the rest. See
+          // the handlers above for why the capture cannot live here.
           grip.addEventListener("pointerdown", function (event) {
             event.preventDefault();
-            try { grip.setPointerCapture(event.pointerId); } catch (e) {}
+            try { list.setPointerCapture(event.pointerId); } catch (e) {}
+            drag = { id: event.pointerId, item: item, row: row, startY: event.clientY };
             item.classList.add("dragging");
           });
-          grip.addEventListener("pointermove", function (event) {
-            if (!item.classList.contains("dragging")) return;
-            var el = document.elementFromPoint(event.clientX, event.clientY);
-            var over = el && el.closest ? el.closest(".rank-list li") : null;
-            if (!over || over === item || over.parentNode !== list) return;
-            var kids = Array.prototype.slice.call(list.children);
-            if (kids.indexOf(over) < kids.indexOf(item)) {
-              list.insertBefore(item, over);
-            } else {
-              list.insertBefore(item, over.nextSibling);
-            }
-          });
-          var drop = function () {
-            if (!item.classList.contains("dragging")) return;
-            item.classList.remove("dragging");
-            // The DOM is where the drag happened; make it the order.
-            var order = Array.prototype.map.call(list.children, function (li) {
-              return li.rowRef;
-            });
-            rows.length = 0;
-            Array.prototype.push.apply(rows, order);
-            announce(row);
-            sync();
-            render(null);
-          };
-          grip.addEventListener("pointerup", drop);
-          grip.addEventListener("pointercancel", drop);
 
           item.appendChild(grip);
           item.appendChild(up);
           item.appendChild(down);
+          if (row.img) item.appendChild(row.img.cloneNode(true));
           item.appendChild(name);
           list.appendChild(item);
           // Focus follows the moved row, so arrows keep working from the
@@ -1275,13 +1382,75 @@ pub(crate) const SURVEY_STRUCTURE: &str = r#"
 .survey .question { margin:1.5rem 0; padding:1rem 0; border-top:1px solid var(--line, #8884); }
 .survey .question h2 { font-size:1.05rem; margin:0 0 .5rem; }
 .survey .req { color:var(--accent, inherit); }
-.survey .opt { display:block; margin:.35rem 0; }
+/* A choice is a card you press, not a dot you aim at.
+   The radio stays in the markup and in the tab order — it is what a form
+   posts, what a screen reader announces, and what works with the script
+   blocked — but it is not what anyone looks at. `:has(:checked)` moves the
+   selected state onto the whole card, which is a target the size of the thing
+   being chosen rather than a 16-pixel circle beside it. That matters most in
+   the case this arrived with: an option that *is* a picture, where the dot sat
+   outside the image it referred to and the image itself was not clickable.
+   The scale keeps its dots (`.point`), because five cards in a row stop
+   reading as a scale. */
+.survey .opt:not(.rank) { display:flex; align-items:center; gap:.5rem;
+  margin:.35rem 0; padding:.5rem .65rem; border:1px solid var(--rule, #8883);
+  border-radius:var(--radius); cursor:pointer; position:relative;
+  transition:border-color .12s ease, background-color .12s ease; }
+.survey .opt:not(.rank):hover { border-color:var(--accent); }
+/* Visually gone, functionally present: still focusable, still announced,
+   still the thing that posts. `display:none` would take all three away. */
+.survey .opt:not(.rank) > input { position:absolute; width:1px; height:1px;
+  opacity:0; margin:0; pointer-events:none; }
+.survey .opt:not(.rank):has(:checked) { border-color:var(--accent);
+  background:color-mix(in srgb, var(--accent) 12%, transparent); }
+/* The keyboard has to be able to see where it is, and the input it would
+   normally ring is invisible now. */
+.survey .opt:not(.rank):has(:focus-visible) { outline:2px solid var(--accent);
+  outline-offset:2px; }
+.survey .opt:not(.rank):has(:checked)::after { content:"✓"; margin-left:auto;
+  padding-left:.5rem; color:var(--accent); font-weight:700; }
+.survey .opt:not(.rank):has(:disabled) { cursor:default; opacity:.7; }
+.survey .opt:not(.rank):has(:disabled):hover { border-color:var(--rule, #8883); }
 .survey .opt .detail, .survey .cap { opacity:.75; font-size:.9rem; }
 .survey .cap { margin:.25rem 0; }
-.survey .scale { display:flex; flex-wrap:wrap; gap:.75rem; }
-.survey .scale .point { display:flex; align-items:center; gap:.3rem; }
-.survey .vas { display:flex; align-items:center; gap:.75rem; flex-wrap:wrap; }
-.survey .vas input { width:5.5rem; }
+/* A scale is one row of equal columns, each point's label under its control.
+   It was a wrapping flex row of radio-and-label pairs, which put the fifth
+   point of a five-point Likert on a second line — at which point it stops
+   reading as a scale and starts reading as a list. Equal columns also stop
+   "Neutral" from getting less room than "Strongly disagree". */
+.survey .scale { display:grid; gap:.4rem .5rem; align-items:start;
+  grid-template-columns:repeat(var(--points, 5), minmax(0, 1fr)); }
+.survey .scale .point { display:flex; flex-direction:column; align-items:center;
+  text-align:center; gap:.3rem; font-size:.9rem; line-height:1.25; }
+/* Asked to stack, or too narrow to be a row: back to one point per line,
+   control beside label. Five columns on a phone is five columns of one word. */
+.survey .opts:not(.across) .scale { grid-template-columns:1fr; }
+.survey .opts:not(.across) .scale .point { flex-direction:row; align-items:center;
+  text-align:left; }
+@media (max-width:32rem) {
+  .survey .scale { grid-template-columns:1fr; }
+  .survey .scale .point { flex-direction:row; align-items:center; text-align:left; }
+}
+
+/* The VAS: anchors at the two ends of the track they anchor, the track its
+   full width, the number beside it. Inline anchors could only wrap, which
+   left "100 — …" on the line below the slider describing nothing. */
+/* Two half-width columns under the track, not one column with both anchors
+   justified to its ends: at the ends of a *shared* cell, "0 — Not at all
+   confident" and "100 — Completely confident" simply overlap in the middle,
+   which is what they did. A half each means each can wrap into its own space
+   and the two can never collide. */
+.survey .vas { display:grid; grid-template-columns:1fr 1fr auto; align-items:end;
+  column-gap:.75rem; row-gap:.35rem; }
+.survey .vas .anchor { grid-row:1; font-size:.85rem; opacity:.75; line-height:1.25; }
+.survey .vas .anchor-min { grid-column:1; justify-self:start; }
+.survey .vas .anchor-max { grid-column:2; justify-self:end; text-align:right; }
+.survey .vas .vas-range { grid-row:2; grid-column:1 / span 2; align-self:center; }
+.survey .vas input[type=number] { grid-row:2; grid-column:3; width:4.5rem;
+  align-self:center; }
+/* Script off: there is no track, so the number takes the row rather than
+   sitting alone against the right margin. */
+.survey .vas:not(:has(.vas-range)) input[type=number] { grid-column:1; justify-self:start; }
 .survey textarea { width:100%; max-width:36rem; }
 .survey .results { margin:.75rem 0 0; }
 .survey .tallybar { display:flex; align-items:center; gap:.5rem; margin:.2rem 0; }
@@ -1303,14 +1472,66 @@ pub(crate) const SURVEY_STRUCTURE: &str = r#"
 /* survey.js swaps the rank selects for a buttoned list, and lays a
    thumbless track over the VAS number field. Both are enhancement-only:
    the classes below exist for pages where the script ran. */
-.survey .vas-range { flex:1; min-width:12rem; max-width:24rem; }
+.survey .vas-range { width:100%; min-width:0; }
 .survey .vas-range.untouched::-webkit-slider-thumb { opacity:0; }
 .survey .vas-range.untouched::-moz-range-thumb { opacity:0; }
 .survey .vas-number { width:4.5rem; }
-.survey .rank-list { margin:.35rem 0; padding-left:0; list-style:none; }
-.survey .rank-list li { display:flex; align-items:center; gap:.45rem; margin:.3rem 0; }
-.survey .rank-list li.dragging { opacity:.65; }
-.survey .rank-list button { min-width:2.2rem; }
+/* Pictures in a question. Capped rather than trusted: a figure whose natural
+   size is 3000px would otherwise decide the page, and a question people have
+   to scroll past to reach its options is one they answer without looking. */
+.survey .qmedia { display:block; max-width:100%; height:auto; border-radius:var(--radius);
+  margin:.35rem 0 .6rem; }
+.survey .optmedia { max-width:100%; height:auto; border-radius:var(--radius); }
+/* A picture option is a card with the picture in it: the image first, its
+   label under it, and the whole thing the target. Choosing between figures
+   should mean clicking the figure. */
+.survey .opt.has-media { flex-direction:column; align-items:stretch; gap:.45rem;
+  max-width:22rem; padding:.5rem; }
+.survey .opt.has-media .optmedia { max-height:14rem; object-fit:contain;
+  border-radius:calc(var(--radius) - 2px); background:#0000000a; }
+.survey .opt.has-media .optlabel { font-size:.95rem; }
+/* The tick belongs on the image, not trailing under the caption. */
+.survey .opt.has-media:has(:checked)::after { position:absolute; top:.75rem;
+  right:.75rem; margin:0; padding:0; width:1.5rem; height:1.5rem;
+  display:flex; align-items:center; justify-content:center; border-radius:50%;
+  background:var(--accent); color:var(--on-accent); font-size:.85rem; }
+/* Side by side when there is room: comparing figures means seeing them at
+   once, and a column of two puts the second one below the fold. */
+.survey .opts:has(.opt.has-media) { display:flex; flex-wrap:wrap; gap:.6rem;
+  align-items:flex-start; }
+.survey .rank-list .optmedia { max-height:2.5rem; width:auto; margin-right:.4rem; }
+
+/* `layout` in the spec, as one class on one wrapper. Horizontal wraps
+   rather than scrolls: a row of options that runs off the side of a phone
+   is a row of options nobody answers. */
+.survey .opts.across { display:flex; flex-wrap:wrap; gap:.4rem .9rem; align-items:center; }
+.survey .opts.across .opt { margin:0; }
+
+/* The rank row reads left to right: position, grip, nudges, label. The
+   buttons deliberately do NOT inherit the page's accent-filled `button` —
+   at .6875rem/1.5rem padding two of them per row is a wall of colour with
+   the option text pushed off to one side, which is what shipped. They are
+   quiet controls next to the thing they move. */
+.survey .rank-list { margin:.35rem 0; padding-left:0; list-style:none;
+  counter-reset:rank; }
+.survey .rank-list li { display:flex; align-items:center; gap:.4rem;
+  margin:.25rem 0; padding:.3rem .45rem; border:1px solid var(--rule, #8883);
+  border-radius:var(--radius); background:var(--surface, transparent); }
+/* The position is the whole point of a ranking, and `list-style:none` took
+   the browser's numbering away. Put it back deliberately, sized and aligned. */
+.survey .rank-list li::before { counter-increment:rank; content:counter(rank);
+  min-width:1.35rem; text-align:right; opacity:.55; font-variant-numeric:tabular-nums; }
+/* The dragged row lifts off the list, so the thing following the pointer is
+   obviously the thing being moved. Opacity alone read as "nothing happened". */
+.survey .rank-list li.dragging { position:relative; z-index:2;
+  background:var(--bg, #fff); border-color:var(--accent);
+  box-shadow:0 2px 10px #0003; cursor:grabbing; }
+.survey .rank-list button { min-width:1.9rem; padding:.2rem .35rem; font-size:.85rem;
+  line-height:1; background:transparent; color:inherit; border:1px solid var(--rule, #8883); }
+.survey .rank-list button:hover:not(:disabled) { background:var(--accent); color:var(--on-accent);
+  border-color:transparent; opacity:1; }
+.survey .rank-list button:disabled { opacity:.3; cursor:default; }
+.survey .rank-list .optlabel { flex:1; }
 .survey .rank-list .grip { cursor:grab; touch-action:none; user-select:none;
   -webkit-user-select:none; padding:0 .3rem; opacity:.6; }
 .survey .rank-list li.dragging .grip { cursor:grabbing; }
@@ -1352,6 +1573,156 @@ mod tests {
         "#,
         )
         .expect("a valid spec")
+    }
+
+    /// `layout` is presentation and nothing else: it changes one class on one
+    /// wrapper, and never an input name, so a tally cannot move because
+    /// somebody rearranged a page. `auto` reproduces what each kind rendered
+    /// before the field existed — a scale across, a list of options down.
+    #[test]
+    fn layout_changes_the_wrapper_and_nothing_that_is_answered() {
+        let spec = PollSpec::from_toml(
+            r#"
+            title = "Layout"
+            [[questions]]
+            id = "down"
+            kind = "choice"
+            options = [{ id = "a", label = "A" }, { id = "b", label = "B" }]
+            [[questions]]
+            id = "across"
+            layout = "horizontal"
+            kind = "choice"
+            options = [{ id = "a", label = "A" }, { id = "b", label = "B" }]
+            [[questions]]
+            id = "scale"
+            kind = "likert"
+            points = 5
+            [[questions]]
+            id = "stacked"
+            layout = "vertical"
+            kind = "likert"
+            points = 5
+        "#,
+        )
+        .expect("a valid spec");
+
+        let html = survey_page(&spec, &Ballot::new(), None, &options()).html;
+        let wrappers: Vec<&str> = html
+            .match_indices("<div class=\"opts")
+            .map(|(i, _)| {
+                let rest = &html[i..];
+                &rest[..rest.find('>').unwrap_or(0) + 1]
+            })
+            .collect();
+        assert_eq!(
+            wrappers,
+            vec![
+                "<div class=\"opts\">",        // choice, auto → down
+                "<div class=\"opts across\">", // choice, asked to run across
+                "<div class=\"opts across\">", // likert, auto → across
+                "<div class=\"opts\">",        // likert, asked to stack
+            ],
+            "layout did not reach the wrapper as expected"
+        );
+
+        // The names an answer is parsed from are untouched by any of it.
+        for name in ["q_down", "q_across", "q_scale", "q_stacked"] {
+            assert!(
+                html.contains(name),
+                "`{name}` should still be the field name"
+            );
+        }
+    }
+
+    /// A picture question renders its figure and its per-option images, with
+    /// the alt text every one of them is required to carry.
+    #[test]
+    fn a_question_can_be_about_a_picture() {
+        let spec = PollSpec::from_toml(
+            r#"
+            title = "Figures"
+            [[questions]]
+            id = "which"
+            prompt = "Which reads best?"
+            media = { src = "/f/fig-all.png", alt = "All three panels side by side" }
+            kind = "choice"
+            [[questions.options]]
+            id = "a"
+            label = "Panel A"
+            media = { src = "/f/a.png", alt = "A scatter plot with a fitted line" }
+            [[questions.options]]
+            id = "b"
+            label = "Panel B"
+            media = { src = "/f/b.png", alt = "The same data as a heat map" }
+        "#,
+        )
+        .expect("a valid spec");
+
+        let html = survey_page(&spec, &Ballot::new(), None, &options()).html;
+        assert!(
+            html.contains("class=\"qmedia\" src=\"/f/fig-all.png\""),
+            "{html}"
+        );
+        assert!(html.contains("alt=\"A scatter plot with a fitted line\""));
+        assert!(html.contains("class=\"opt has-media\""));
+        // Still a choice question: the picture changed nothing about answering.
+        assert!(html.contains("name=\"q_which\" value=\"a\""));
+    }
+
+    /// The refusals are the feature. Every page here sends `img-src 'self'
+    /// data:`, so an image from anywhere else renders as a hole — and a poll
+    /// that goes out to sixty people with a hole in it cannot be recalled.
+    #[test]
+    fn an_image_a_browser_would_block_is_refused_at_authoring_time() {
+        let spec = |media: &str| {
+            format!(
+                r#"
+                title = "Figures"
+                [[questions]]
+                id = "q"
+                kind = "choice"
+                [[questions.options]]
+                id = "a"
+                label = "A"
+                media = {media}
+                [[questions.options]]
+                id = "b"
+                label = "B"
+            "#
+            )
+        };
+
+        let err = |media: &str| {
+            PollSpec::from_toml(&spec(media))
+                .expect_err("should be refused")
+                .to_string()
+        };
+
+        // Another origin — including this deployment's own artifact host,
+        // which is a different origin and therefore just as blocked.
+        assert!(
+            err(r#"{ src = "https://example.org/a.png", alt = "x" }"#).contains("another origin")
+        );
+        assert!(
+            err(r#"{ src = "https://ljchang.art.mecha-factory.ai/f/a.png", alt = "x" }"#)
+                .contains("another origin"),
+            "the artifact host is not `self` either"
+        );
+        // A data URI that is not an image.
+        assert!(
+            err(r#"{ src = "data:text/html;base64,PGgxPmhp", alt = "x" }"#)
+                .contains("only images render")
+        );
+        // Alt text is not optional.
+        assert!(err(r#"{ src = "/f/a.png", alt = "  " }"#).contains("alt"));
+
+        // And the two that do work.
+        for ok in [
+            r#"{ src = "/f/a.png", alt = "A figure" }"#,
+            r#"{ src = "data:image/png;base64,iVBORw0KGgo=", alt = "A figure" }"#,
+        ] {
+            PollSpec::from_toml(&spec(ok)).expect("should be accepted");
+        }
     }
 
     fn options() -> SurveyPageOptions {
