@@ -40,7 +40,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use std::collections::HashMap;
 
-use super::intake::{account_dropdown, form_values, page, shell};
+use super::intake::{account_dropdown, form_values, page, shell, shell_with, Chrome};
 use super::{account, artifacts, v1, Failure, Shared};
 use crate::config::{Origin, Role};
 use crate::db::UserRow;
@@ -97,11 +97,23 @@ fn safe_return(path: &str) -> Option<&str> {
 /// The sign-in page a session-less visitor gets on any private-or-absent
 /// viewer URL. One page for every such URL — the only thing that varies is
 /// the return path, which is the URL the visitor themselves asked for.
-fn reader_gate(return_to: &str) -> Response {
+///
+/// **It wears the tenant sign-in corner as well as the reader form**, and the
+/// two are not interchangeable: the form in the body mails a link to an
+/// address a *share* names, and answers a tenant identically to a stranger
+/// because the owner of a bundle has no share to themselves. So an owner
+/// arriving here signed out — which is now the ordinary way to arrive, since
+/// a publish reports this URL and a private bundle is what a publish key can
+/// produce — would fill the form in, be told a link was on its way, and
+/// receive nothing. The corner is the door they actually need.
+///
+/// It costs the oracle nothing: the corner is the same on every refusal, so
+/// private, unshared and never-published still answer identically.
+fn reader_gate(app: &Shared, return_to: &str) -> Response {
     let esc = mecha_manifest::escape_text;
     page(
         StatusCode::OK,
-        shell(
+        shell_with(
             "Sign in to view",
             &format!(
                 "<h1>Sign in to view</h1>\
@@ -113,10 +125,17 @@ fn reader_gate(return_to: &str) -> Response {
                  <input type=\"hidden\" name=\"return\" value=\"{return_to}\">\
                  <label for=\"reader-email\">Email</label>\
                  <input id=\"reader-email\" name=\"email\" type=\"email\" required>\
-                 <button type=\"submit\">Send the link</button></form>",
+                 <button type=\"submit\">Send the link</button></form>\
+                 <p>Published this yourself? Sign in to your account from the \
+                 corner instead &mdash; a bundle you own is not shared with \
+                 you.</p>",
                 return_to = esc(return_to),
             ),
             "/account/a/",
+            &Chrome::Public {
+                docs_url: app.config.docs_url.clone(),
+                sign_in: true,
+            },
         ),
     )
 }
@@ -367,7 +386,7 @@ pub async fn two_seg(
     // one who has proved an identity that does not open this.
     let refused = || {
         if anonymous {
-            reader_gate(&here)
+            reader_gate(&app, &here)
         } else {
             missing()
         }
@@ -475,7 +494,7 @@ pub async fn view(
     let anonymous = session.is_none() && reader.is_none();
     let refused = || {
         if anonymous {
-            reader_gate(&here)
+            reader_gate(&app, &here)
         } else {
             missing()
         }
