@@ -434,6 +434,99 @@ fn check_slug(slug: &str) -> Result<()> {
     Ok(())
 }
 
+// ---- the merge ----------------------------------------------------------
+
+/// What a push did to a record that the browser had also been editing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Merge {
+    /// The record to store, as TOML.
+    pub merged: String,
+    /// Fields where both sides had changed and the pushed file won. Named so
+    /// the push can say what it overwrote — a silent clobber is the failure
+    /// this whole mechanism exists to avoid.
+    pub overwritten: Vec<String>,
+    /// True when the incoming text was stored byte for byte, comments and
+    /// all. See [`merge_push`].
+    pub verbatim: bool,
+}
+
+/// Fold a pushed file into a record the browser may also have edited.
+///
+/// Three texts, which is what makes this a merge rather than a replace:
+///
+/// ```text
+///   baseline    the TOML exactly as last received from a push
+///   effective   what the page renders now (baseline + browser edits)
+///   incoming    the file being pushed
+/// ```
+///
+/// A field that changed in `incoming` is applied. If the browser had changed
+/// that same field since `baseline`, the pushed value wins and the field is
+/// named in [`Merge::overwritten`] — "TOML wins" means *TOML wins conflicts*,
+/// not "the last push clobbers", and the difference is what makes editing in
+/// a browser worth doing at all.
+///
+/// **The common case is byte-for-byte.** When the browser has changed
+/// nothing (`effective == baseline`), the incoming text is stored exactly as
+/// it arrived — comments, ordering and spacing intact. Re-serialising is
+/// lossy, so it is confined to the case where a merge genuinely happened;
+/// somebody who never opens the cockpit never loses a comment.
+pub fn merge_push(baseline: &str, effective: &str, incoming: &str) -> Result<Merge> {
+    if baseline.trim() == effective.trim() {
+        return Ok(Merge {
+            merged: incoming.to_string(),
+            overwritten: Vec::new(),
+            verbatim: true,
+        });
+    }
+
+    let table = |text: &str, what: &str| -> Result<toml::value::Table> {
+        match toml::from_str::<toml::Value>(text) {
+            Ok(toml::Value::Table(t)) => Ok(t),
+            Ok(_) => Err(ManifestError::invalid(format!(
+                "{what} is not a TOML table"
+            ))),
+            Err(e) => Err(ManifestError::invalid(format!("{what}: {e}"))),
+        }
+    };
+    let base = table(baseline, "the stored baseline")?;
+    let mut eff = table(effective, "the stored record")?;
+    let inc = table(incoming, "the pushed file")?;
+
+    let mut overwritten = Vec::new();
+    // Changed or added in the pushed file.
+    for (key, value) in &inc {
+        if base.get(key) == Some(value) {
+            continue;
+        }
+        if eff.get(key) != base.get(key) {
+            overwritten.push(key.clone());
+        }
+        eff.insert(key.clone(), value.clone());
+    }
+    // Removed from the pushed file. A deletion is an edit like any other, or
+    // a field could never be taken out of a file once the browser had touched
+    // the record.
+    for key in base.keys() {
+        if inc.contains_key(key) {
+            continue;
+        }
+        if eff.get(key) != base.get(key) {
+            overwritten.push(key.clone());
+        }
+        eff.remove(key);
+    }
+    overwritten.sort();
+
+    let merged = toml::to_string_pretty(&toml::Value::Table(eff))
+        .map_err(|e| ManifestError::invalid(format!("serialising the merged record: {e}")))?;
+    Ok(Merge {
+        merged,
+        overwritten,
+        verbatim: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -588,5 +681,96 @@ mod tests {
         // missing the thing its author wrote.
         assert!(Profile::from_toml("taglin = \"typo\"\n").is_err());
         assert!(Board::from_toml("slug = \"x\"\nheadng = \"typo\"\n").is_err());
+    }
+}
+
+#[cfg(test)]
+mod merge_tests {
+    use super::*;
+
+    const BASE: &str =
+        "# my profile\nenabled = true\ntagline = \"Neuroscience\"\nlocation = \"Hanover\"\n";
+
+    /// The overwhelmingly common case: nobody has opened the cockpit, so the
+    /// file arrives and is stored as it was written. Comments survive.
+    #[test]
+    fn an_unedited_record_takes_the_push_verbatim() {
+        let pushed = "# my profile\nenabled = true\ntagline = \"Computational neuroscience\"\n";
+        let merge = merge_push(BASE, BASE, pushed).unwrap();
+        assert!(merge.verbatim);
+        assert_eq!(merge.merged, pushed, "comments and spacing must survive");
+        assert!(merge.overwritten.is_empty());
+    }
+
+    /// The reason the merge exists: a tagline fixed on a phone must not be
+    /// reverted by tonight's push of an unchanged file.
+    #[test]
+    fn a_browser_edit_survives_a_push_that_did_not_touch_it() {
+        let edited = "enabled = true\ntagline = \"Fixed on my phone\"\nlocation = \"Hanover\"\n";
+        let pushed =
+            "# my profile\nenabled = true\ntagline = \"Neuroscience\"\nlocation = \"Lebanon\"\n";
+        let merge = merge_push(BASE, edited, pushed).unwrap();
+        assert!(!merge.verbatim);
+        let out = Profile::from_toml(&merge.merged).unwrap();
+        assert_eq!(out.tagline.as_deref(), Some("Fixed on my phone"));
+        // The field the file *did* change still lands.
+        assert_eq!(out.location.as_deref(), Some("Lebanon"));
+        assert!(merge.overwritten.is_empty(), "nothing was in conflict");
+    }
+
+    /// Both sides changed the same field. The file wins, and says so.
+    #[test]
+    fn a_conflict_goes_to_the_file_and_is_named() {
+        let edited = "enabled = true\ntagline = \"From the browser\"\nlocation = \"Hanover\"\n";
+        let pushed = "enabled = true\ntagline = \"From the file\"\nlocation = \"Hanover\"\n";
+        let merge = merge_push(BASE, edited, pushed).unwrap();
+        assert_eq!(merge.overwritten, vec!["tagline".to_string()]);
+        let out = Profile::from_toml(&merge.merged).unwrap();
+        assert_eq!(out.tagline.as_deref(), Some("From the file"));
+    }
+
+    /// A field taken out of the file is taken out of the record. Otherwise a
+    /// line could never be deleted once the browser had touched anything.
+    #[test]
+    fn a_field_removed_from_the_file_is_removed() {
+        let edited = "enabled = true\ntagline = \"Neuroscience\"\nlocation = \"Hanover\"\nbio = \"Added here\"\n";
+        let pushed = "enabled = true\ntagline = \"Neuroscience\"\n";
+        let merge = merge_push(BASE, edited, pushed).unwrap();
+        let out = Profile::from_toml(&merge.merged).unwrap();
+        assert!(out.location.is_none(), "location was dropped from the file");
+        assert_eq!(
+            out.bio.as_deref(),
+            Some("Added here"),
+            "the browser's own field stays"
+        );
+    }
+
+    /// Boards go through the same function — the merge knows nothing about
+    /// which record it is folding, which is why there is one of it.
+    #[test]
+    fn a_board_merges_by_the_same_rules() {
+        let base = "slug = \"hello\"\nheading = \"Get in touch\"\n";
+        let edited = "slug = \"hello\"\nheading = \"Say hello\"\n";
+        let pushed = "slug = \"hello\"\nheading = \"Get in touch\"\nintro = \"Pick one.\"\n";
+        let merge = merge_push(base, edited, pushed).unwrap();
+        let board = Board::from_toml(&merge.merged).unwrap();
+        assert_eq!(board.heading.as_deref(), Some("Say hello"));
+        assert_eq!(board.intro.as_deref(), Some("Pick one."));
+        assert_eq!(board.kind(), BoardKind::Switchboard);
+    }
+
+    /// An array is one value, so a line added in the browser and a line added
+    /// in the file do not silently interleave into an order neither of them
+    /// wrote. The file wins the whole list and says it did.
+    #[test]
+    fn a_list_is_one_field_and_never_half_merged() {
+        let base = "slug = \"hello\"\n";
+        let edited = "slug = \"hello\"\n[[entry]]\nkind = \"link\"\nurl = \"https://a.example\"\nlabel = \"A\"\n";
+        let pushed = "slug = \"hello\"\n[[entry]]\nkind = \"link\"\nurl = \"https://b.example\"\nlabel = \"B\"\n";
+        let merge = merge_push(base, edited, pushed).unwrap();
+        assert_eq!(merge.overwritten, vec!["entry".to_string()]);
+        let board = Board::from_toml(&merge.merged).unwrap();
+        assert_eq!(board.entries.len(), 1);
+        assert_eq!(board.entries[0].label, "B");
     }
 }
