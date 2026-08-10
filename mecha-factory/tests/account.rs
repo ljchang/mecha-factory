@@ -172,6 +172,68 @@ fn a_session_releases_and_a_stale_form_does_not() {
     assert_eq!(alias.visibility, mecha_manifest::Visibility::Private);
 }
 
+/// The page links its own bundles at the viewer, and a notebook is why that
+/// is a fix rather than a preference.
+///
+/// These links were built with `Role::Artifacts` unconditionally, because
+/// `BundleSummary` carries no class — so a compute bundle was linked at an
+/// origin it does not live on and rescued by a redirect. A viewer URL is
+/// class-independent, and it is also what a person clicking their own row
+/// wants: it carries the version menu and the release controls, and for a
+/// private bundle the artifact origin serves them nothing at all.
+#[test]
+fn the_account_page_links_bundles_at_the_viewer_whatever_their_class() {
+    let server = common::start();
+    let session = signed_in(&server);
+    for (id, class) in [
+        ("brief", mecha_manifest::ContentClass::Static),
+        ("notes", mecha_manifest::ContentClass::Compute),
+    ] {
+        server
+            .db
+            .bundle_insert(&mecha_factory::db::BundleRow {
+                user_id: server.user.id.clone(),
+                id: id.into(),
+                version: 1,
+                digest: format!("d-{id}"),
+                class,
+                title: id.into(),
+                description: None,
+                template: "report".into(),
+                published_at: None,
+                received_at: mecha_factory::db::now(),
+                withheld_at: None,
+                withheld_reason: None,
+            })
+            .unwrap();
+    }
+
+    let page = get(&server, "/account", Some(&session));
+    assert_eq!(page.status, 200, "{}", page.body);
+    let gate = server.gate;
+    for id in ["brief", "notes"] {
+        assert!(
+            page.body
+                .contains(&format!("href=\"http://{gate}/view/alice/{id}\"")),
+            "{id} is not linked at the viewer: {}",
+            page.body
+        );
+        assert!(
+            page.body
+                .contains(&format!("href=\"http://{gate}/view/alice/{id}/1\"")),
+            "{id}'s version is not linked at the viewer: {}",
+            page.body
+        );
+    }
+    // And the wrong-origin link the page used to emit for a notebook is gone,
+    // rather than merely joined by a right one.
+    assert!(
+        !page.body.contains(&format!("alice.{}", server.artifacts)),
+        "an artifact-origin link survived: {}",
+        page.body
+    );
+}
+
 /// The machine list is live: a used key shows life, revoking from the page
 /// kills it, and somebody else's key id kills nothing.
 #[test]
