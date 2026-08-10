@@ -66,6 +66,7 @@ mod form;
 mod media;
 mod poll;
 mod poll_render;
+mod profile;
 mod request;
 mod schema;
 pub mod theme;
@@ -93,6 +94,7 @@ pub use poll_render::{
     screen_count_line, screen_page, survey_page, PageMode, QuestionDisplay, QuestionResults,
     ScreenPageOptions, SurveyPageOptions,
 };
+pub use profile::{Board, BoardKind, Entry, EntryKind, Link, LinkKind, Profile, RESERVED_SLUGS};
 pub use request::{
     reminder_minutes, valid_id, Acknowledgment, BookingPolicy, Field, FieldKind, RequestKind,
     RequestType, Step, MAX_FILE_BYTES_PER_FIELD, MAX_FILE_BYTES_PER_TYPE,
