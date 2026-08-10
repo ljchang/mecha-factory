@@ -22,6 +22,7 @@ pub mod account;
 pub mod admin;
 pub mod artifacts;
 pub mod booking;
+pub mod editor;
 pub mod hangar;
 pub mod intake;
 pub mod poll;
@@ -290,6 +291,12 @@ pub fn router(app: Shared) -> Router {
         // on the same session and CSRF as every other account verb.
         .route("/account/share", post(account::share))
         .route("/account/share-revoke", post(account::share_revoke))
+        // Writing a record from the cockpit. Same validator as the push
+        // endpoint; see http/editor.rs.
+        .route("/account/edit", post(editor::save))
+        .route("/account/edit/{what}", get(editor::edit_record))
+        .route("/account/edit/{what}/{slug}", get(editor::edit_board))
+        .route("/account/boards", post(editor::create))
         .route("/account/a/{name}", get(account::asset))
         // The hangar, and the assets it shares with every other gate page.
         // `a` is a reserved slug, so `/@{handle}/a/…` can never collide with
