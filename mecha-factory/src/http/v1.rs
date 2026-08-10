@@ -1858,3 +1858,297 @@ pub async fn admin_withhold(
         }
     }
 }
+
+// ---- the personal public surface ----------------------------------------
+
+/// `Scope::Release`, not `Scope::Publish`, for every route below.
+///
+/// The split is "write versions nobody can read" against "the acts that
+/// change what the world can see", and a board is squarely the second: it
+/// puts a page at a URL with buttons on it. `put_type` is `Release` for the
+/// same reason — serving a form is publishing a door.
+fn record_author(app: &Shared, headers: &HeaderMap) -> Result<UserRow, Box<Response>> {
+    authorised(app, headers, Scope::Release).map(|(_, user)| user)
+}
+
+/// The answer a push gives, including what it overwrote.
+///
+/// `overwritten` is the point of saying anything at all: a push that quietly
+/// reverted a field somebody fixed in the cockpit is the failure the merge
+/// exists to prevent, and a merge that prevented it silently would leave
+/// nobody any wiser about the near miss.
+fn pushed(overwritten: Vec<String>, what: &str) -> Response {
+    let note = if overwritten.is_empty() {
+        format!("{what} stored")
+    } else {
+        format!(
+            "{what} stored — the file overwrote {} edited here: {}. Run `pull` \
+             to keep this machine's copy current.",
+            if overwritten.len() == 1 {
+                "a field"
+            } else {
+                "fields"
+            },
+            overwritten.join(", ")
+        )
+    };
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "stored": true, "overwritten": overwritten, "note": note })),
+    )
+        .into_response()
+}
+
+fn record_store(
+    app: &Shared,
+    user: &UserRow,
+    kind: &str,
+    slug: &str,
+    body: String,
+    what: &str,
+    validate: impl Fn(&str) -> anyhow::Result<()>,
+) -> Response {
+    // Checked before the lock as well as inside it: a caller deserves the
+    // error about *their* file rather than about the merge of it.
+    if let Err(e) = validate(&body) {
+        return Failure::json(StatusCode::BAD_REQUEST, format!("{what}: {e}")).into_response();
+    }
+    match app
+        .db
+        .record_push(&user.id, kind, slug, &body, &crate::db::now(), validate)
+    {
+        Ok(overwritten) => pushed(overwritten, what),
+        // A merge that will not validate is the caller's to fix, not a
+        // server fault: their file is fine and the combination is not, and
+        // the message says which fields collided.
+        Err(e) => Failure::json(StatusCode::CONFLICT, format!("{what}: {e}")).into_response(),
+    }
+}
+
+fn record_read(app: &Shared, user: &UserRow, kind: &str, slug: &str) -> Response {
+    match app.db.record_get(&user.id, kind, slug) {
+        Ok(Some(row)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "source": row.effective,
+                "drifted": row.drifted(),
+                "updated_at": row.updated_at,
+            })),
+        )
+            .into_response(),
+        // Nothing stored is not an error: `pull` on a machine that has never
+        // pushed is the ordinary way to start.
+        Ok(None) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "source": "", "drifted": false })),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!(kind, slug, error = %e, "reading a record");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+fn validate_profile(text: &str) -> anyhow::Result<()> {
+    mecha_manifest::Profile::from_toml(text)?;
+    Ok(())
+}
+
+/// A board's validator, closed over the slug the URL named.
+///
+/// The slug has to agree with the body for the same reason a type's id does:
+/// it is a path segment and a filename, so it cannot be two things. A hangar
+/// carries no slug at all, which is what makes it the hangar.
+fn board_validator(slug: Option<String>) -> impl Fn(&str) -> anyhow::Result<()> {
+    move |text: &str| {
+        let board = mecha_manifest::Board::from_toml(text)?;
+        if board.slug.as_deref() != slug.as_deref() {
+            anyhow::bail!(
+                "the board calls itself {} and the URL says {}",
+                board
+                    .slug
+                    .as_deref()
+                    .map(|s| format!("`{s}`"))
+                    .unwrap_or_else(|| "the hangar".into()),
+                slug.as_deref()
+                    .map(|s| format!("`{s}`"))
+                    .unwrap_or_else(|| "the hangar".into()),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// `PUT /v1/profile` — who somebody is, as TOML.
+pub async fn put_profile(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match record_author(&app, &headers) {
+        Ok(user) => user,
+        Err(refusal) => return *refusal,
+    };
+    record_store(
+        &app,
+        &user,
+        crate::db::RECORD_PROFILE,
+        "",
+        body,
+        "profile",
+        validate_profile,
+    )
+}
+
+/// `GET /v1/profile` — the record as it stands, for `pull`.
+pub async fn get_profile(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match record_author(&app, &headers) {
+        Ok(user) => user,
+        Err(refusal) => return *refusal,
+    };
+    record_read(&app, &user, crate::db::RECORD_PROFILE, "")
+}
+
+/// `PUT /v1/hangar` — the generated index's own heading and intro.
+pub async fn put_hangar(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match record_author(&app, &headers) {
+        Ok(user) => user,
+        Err(refusal) => return *refusal,
+    };
+    record_store(
+        &app,
+        &user,
+        crate::db::RECORD_BOARD,
+        "",
+        body,
+        "hangar",
+        board_validator(None),
+    )
+}
+
+/// `GET /v1/hangar`.
+pub async fn get_hangar(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match record_author(&app, &headers) {
+        Ok(user) => user,
+        Err(refusal) => return *refusal,
+    };
+    record_read(&app, &user, crate::db::RECORD_BOARD, "")
+}
+
+/// `PUT /v1/boards/{slug}` — one switchboard.
+pub async fn put_board(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match record_author(&app, &headers) {
+        Ok(user) => user,
+        Err(refusal) => return *refusal,
+    };
+    // The slug is checked here as well as in the body, because a URL naming a
+    // reserved word must be refused even when the body agrees with it.
+    if let Err(e) = mecha_manifest::Board::from_toml(&format!("slug = {slug:?}\n")) {
+        return Failure::json(StatusCode::BAD_REQUEST, format!("slug: {e}")).into_response();
+    }
+    record_store(
+        &app,
+        &user,
+        crate::db::RECORD_BOARD,
+        &slug,
+        body,
+        "board",
+        board_validator(Some(slug.clone())),
+    )
+}
+
+/// `GET /v1/boards/{slug}`.
+pub async fn get_board(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(slug): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match record_author(&app, &headers) {
+        Ok(user) => user,
+        Err(refusal) => return *refusal,
+    };
+    record_read(&app, &user, crate::db::RECORD_BOARD, &slug)
+}
+
+/// `GET /v1/boards` — what exists remotely.
+///
+/// The half of `pull` that matters once a board can be created in a browser:
+/// a machine cannot pull a file it has never heard of, so it has to be able
+/// to ask.
+pub async fn list_boards(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match record_author(&app, &headers) {
+        Ok(user) => user,
+        Err(refusal) => return *refusal,
+    };
+    match app.db.records(&user.id, crate::db::RECORD_BOARD) {
+        Ok(rows) => {
+            let boards: Vec<_> = rows
+                .iter()
+                .map(|(slug, row)| {
+                    serde_json::json!({
+                        "slug": slug,
+                        "hangar": slug.is_empty(),
+                        "drifted": row.drifted(),
+                        "updated_at": row.updated_at,
+                    })
+                })
+                .collect();
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({ "boards": boards })),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "listing boards");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}

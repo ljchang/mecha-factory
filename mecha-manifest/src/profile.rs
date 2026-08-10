@@ -518,6 +518,24 @@ pub fn merge_push(baseline: &str, effective: &str, incoming: &str) -> Result<Mer
     }
     overwritten.sort();
 
+    // The merge landed exactly on the file: every browser edit was either
+    // overwritten or was a field the file also carries unchanged. Store the
+    // file as written rather than a re-serialisation of the same values.
+    //
+    // Two things depend on this. Comments and ordering survive whenever the
+    // result is the file, not only when there was nothing to merge. And
+    // `drifted` is a text comparison — without this, a push that won every
+    // conflict would leave `baseline` and `effective` differing only in
+    // formatting, so the cockpit would report unpulled edits that do not
+    // exist and every later push would take the merge path for nothing.
+    if eff == inc {
+        return Ok(Merge {
+            merged: incoming.to_string(),
+            overwritten,
+            verbatim: true,
+        });
+    }
+
     let merged = toml::to_string_pretty(&toml::Value::Table(eff))
         .map_err(|e| ManifestError::invalid(format!("serialising the merged record: {e}")))?;
     Ok(Merge {
@@ -772,5 +790,38 @@ mod merge_tests {
         let board = Board::from_toml(&merge.merged).unwrap();
         assert_eq!(board.entries.len(), 1);
         assert_eq!(board.entries[0].label, "B");
+    }
+}
+
+#[cfg(test)]
+mod merge_settling_tests {
+    use super::*;
+
+    /// A push that wins every conflict lands *on* the file, so the file is
+    /// what gets stored — comments and all — and the record is not left
+    /// looking drifted by a formatting difference alone.
+    #[test]
+    fn a_push_that_wins_everything_settles_back_to_the_file() {
+        let base = "# mine\ntagline = \"Neuroscience\"\n";
+        let edited = "tagline = \"From the browser\"\n";
+        let pushed = "# mine\ntagline = \"From the file\"\n";
+        let merge = merge_push(base, edited, pushed).unwrap();
+        assert_eq!(merge.overwritten, vec!["tagline".to_string()]);
+        assert!(merge.verbatim, "the result is the file, so store the file");
+        assert_eq!(merge.merged, pushed);
+    }
+
+    /// And when a browser edit genuinely survives, it is not verbatim — the
+    /// record really is something neither text is.
+    #[test]
+    fn a_surviving_edit_leaves_the_record_off_the_file() {
+        let base = "tagline = \"a\"\nlocation = \"x\"\n";
+        let edited = "tagline = \"kept\"\nlocation = \"x\"\n";
+        let pushed = "tagline = \"a\"\nlocation = \"y\"\n";
+        let merge = merge_push(base, edited, pushed).unwrap();
+        assert!(!merge.verbatim);
+        let out = Profile::from_toml(&merge.merged).unwrap();
+        assert_eq!(out.tagline.as_deref(), Some("kept"));
+        assert_eq!(out.location.as_deref(), Some("y"));
     }
 }
