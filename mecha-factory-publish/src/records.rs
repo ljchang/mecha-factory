@@ -35,10 +35,20 @@ pub fn record_of(what: &str, slug: &str) -> Result<Record> {
         "profile" => Ok(Record::Profile),
         "hangar" => Ok(Record::Hangar),
         "switchboard" => {
-            if slug.trim().is_empty() {
+            let slug = slug.trim();
+            if slug.is_empty() {
                 anyhow::bail!("a switchboard is named by its slug — say which one");
             }
-            Ok(Record::Board(slug.trim().to_string()))
+            // **The slug becomes a filename**, so it is validated here rather
+            // than only at the box. `default_path` interpolates it into
+            // `~/.mecha/factory/switchboards/{slug}.toml`, and the MCP tool
+            // reaches that path *without* the `confined()` jail its explicit
+            // `file` argument goes through — so an unchecked slug of
+            // `../../../secrets` read and wrote outside the factory directory
+            // entirely. That is the one finding on this surface an injected
+            // instruction could reach, rather than the account's owner.
+            mecha_manifest::Board::from_toml(&format!("slug = {slug:?}\n"))?;
+            Ok(Record::Board(slug.to_string()))
         }
         other => anyhow::bail!("`{other}` is not a record: profile, hangar or switchboard"),
     }
@@ -95,6 +105,29 @@ mod tests {
         assert!(record_of("switchboard", "").is_err());
         assert!(record_of("switchboard", "  ").is_err());
         assert!(record_of("switchboard", "teaching").is_ok());
+    }
+
+    /// The slug becomes a filename, and the MCP tool reaches that path
+    /// without the jail its explicit `file` argument gets. So traversal has
+    /// to die here, at the only place both callers pass through.
+    #[test]
+    fn a_slug_can_never_walk_out_of_the_factory_directory() {
+        for bad in [
+            "../../../../home/luke/private/notes",
+            "..",
+            "a/b",
+            "a\\b",
+            "TEACHING",
+            "hello world",
+            "account",
+        ] {
+            assert!(record_of("switchboard", bad).is_err(), "`{bad}` accepted");
+        }
+        let path = record_of("switchboard", "teaching")
+            .unwrap()
+            .default_path()
+            .unwrap();
+        assert!(path.ends_with("switchboards/teaching.toml"), "{path:?}");
     }
 
     #[test]

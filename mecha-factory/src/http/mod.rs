@@ -298,12 +298,17 @@ pub fn router(app: Shared) -> Router {
         .route("/account/edit/{what}/{slug}", get(editor::edit_board))
         .route("/account/boards", post(editor::create))
         .route("/account/a/{name}", get(account::asset))
-        // The hangar, and the assets it shares with every other gate page.
-        // `a` is a reserved slug, so `/@{handle}/a/…` can never collide with
-        // a switchboard somebody named.
+        // The hangar and its switchboards. **Nothing static lives under
+        // `/@`**: `/@a/{name}` shadowed `/@{handle}/{slug}` for the handle
+        // `a`, which is legal — only the *slug* `a` is reserved, and
+        // RESERVED_SLUGS governs the second segment. matchit prefers a static
+        // segment, so that user's every switchboard 404'd, at a URL their own
+        // account page printed. Reserving the handle would have fixed the one
+        // case and left the trap for the next static segment; taking the
+        // assets out of the namespace closes it for good.
         .route("/@{handle}", get(hangar::show))
-        .route("/@a/{name}", get(hangar::asset))
         .route("/@{handle}/{slug}", get(hangar::switchboard))
+        .route("/a/{name}", get(hangar::asset))
         .route("/b/{id}", get(artifacts::share))
         .route("/b/{id}/", get(artifacts::share))
         // The version switcher sits at the bare `v/`, a path the version

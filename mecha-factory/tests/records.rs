@@ -280,3 +280,79 @@ fn a_merge_that_would_not_validate_is_refused_rather_than_stored() {
         "the store was mutated: {source}"
     );
 }
+
+/// A record written in the cockpit has no baseline, so a first push has
+/// nothing to reconcile against: the file becomes the record and the reply
+/// names every field it displaced. That is what makes `pull` the obvious
+/// first move, and what makes a later deletion apply at all.
+#[test]
+fn a_first_push_over_a_cockpit_record_replaces_it_and_says_what_it_displaced() {
+    let server = common::start();
+    server
+        .db
+        .record_edit(
+            &server.user.id,
+            mecha_factory::db::RECORD_PROFILE,
+            "",
+            "enabled = true\nbio = \"written in the browser\"\ndisplay_name = \"Alice\"\n",
+            &mecha_factory::db::now(),
+        )
+        .unwrap();
+
+    let file = "enabled = true\ndisplay_name = \"Alice\"\n";
+    let reply = put(&server, "/v1/profile", file, Scope::Release);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.json()["overwritten"], serde_json::json!(["bio"]));
+
+    let source = get(&server, "/v1/profile", Scope::Release).json()["source"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(!source.contains("written in the browser"), "{source}");
+
+    // And now a deletion from the file applies, which it never could while
+    // every stored key counted as an addition the file had not seen.
+    let reply = put(&server, "/v1/profile", "enabled = true\n", Scope::Release);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    let source = get(&server, "/v1/profile", Scope::Release).json()["source"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let profile = mecha_manifest::Profile::from_toml(&source).unwrap();
+    assert!(profile.display_name.is_none(), "a deletion did not apply");
+}
+
+/// The workflow the docs recommend must not announce a loss that did not
+/// happen: after a pull the file carries what the browser wrote.
+#[test]
+fn pull_then_push_does_not_claim_it_overwrote_anything() {
+    let server = common::start();
+    assert_eq!(
+        put(&server, "/v1/profile", PROFILE, Scope::Release).status,
+        200
+    );
+    server
+        .db
+        .record_edit(
+            &server.user.id,
+            mecha_factory::db::RECORD_PROFILE,
+            "",
+            "enabled = true\ntagline = \"Fixed here\"\nlocation = \"Hanover\"\n",
+            &mecha_factory::db::now(),
+        )
+        .unwrap();
+
+    // `pull` hands the machine exactly the stored record; pushing it back is
+    // the recommended order.
+    let pulled = get(&server, "/v1/profile", Scope::Release).json()["source"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reply = put(&server, "/v1/profile", &pulled, Scope::Release);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(
+        reply.json()["overwritten"].as_array().unwrap().is_empty(),
+        "a pull-then-push announced a loss that did not happen: {}",
+        reply.body
+    );
+}

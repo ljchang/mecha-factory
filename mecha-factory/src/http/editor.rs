@@ -256,11 +256,37 @@ async fn show(app: Shared, headers: HeaderMap, origin: Origin, target: Target) -
     let Some((token, user)) = account::session(&app, &headers) else {
         return account::signin_form();
     };
-    let stored = app
-        .db
-        .record_get(&user.id, target.kind(), target.slug())
-        .ok()
-        .flatten();
+    // A read *failure* must not look like "nothing written yet". It did:
+    // `.ok().flatten()` turned a locked database into `None`, the starter
+    // filled the box, and saving that replaced a real record with a template
+    // — taking the hangar down with it, since the starter defaults `enabled`
+    // to false. An editor opened over a record we could not read has nothing
+    // safe to offer.
+    let stored = match app.db.record_get(&user.id, target.kind(), target.slug()) {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::error!(error = %e, "reading a record for the editor");
+            return page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                shell_with(
+                    "Not now",
+                    "<h1>Not now</h1><p>That record could not be read, so there is nothing \
+                     safe to edit. Nothing has changed. Try again in a moment.</p>\
+                     <p><a href=\"/account\">Back to your account</a></p>",
+                    "/account/a/",
+                    &Chrome::Public {
+                        docs_url: app.config.docs_url.clone(),
+                        sign_in: false,
+                    },
+                ),
+            );
+        }
+    };
+    // A board nobody claimed is not an editor to open — see `save`, where a
+    // record that does not exist is refused rather than created.
+    if matches!(target, Target::Board(_)) && stored.is_none() {
+        return account::nothing_here();
+    }
     // A record nobody has written yet opens as its starter rather than as an
     // empty box.
     let source = match &stored {
@@ -330,6 +356,31 @@ pub async fn save(
     let source = field("source");
     let csrf = account::csrf(&token);
 
+    // **Saving never claims a name.** `record_edit` is an upsert, so a save
+    // against an unclaimed board slug inserted one — with none of `create`'s
+    // guards: no confirmation, no duplicate check, and no warning that a slug
+    // is permanent. Somebody following a link to /account/edit/board/teaching
+    // and pressing Save would have burned that name, which is the exact side
+    // effect this module's doc says must never happen.
+    if matches!(target, Target::Board(_)) {
+        match app.db.record_get(&user.id, target.kind(), target.slug()) {
+            Ok(Some(_)) => {}
+            Ok(None) => return account::nothing_here(),
+            Err(e) => {
+                tracing::error!(error = %e, "checking a board before saving");
+                return editor_page(
+                    &app,
+                    &user,
+                    &csrf,
+                    &target,
+                    &source,
+                    Some("that could not be checked"),
+                    false,
+                    &[],
+                );
+            }
+        }
+    }
     if let Err(message) = target.check(&source) {
         // The submitted text goes back into the textarea. Losing it here is
         // how this editor would stop being used.
