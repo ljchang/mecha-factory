@@ -115,5 +115,10 @@ jobs:
             `confirmed: true`) for specific code issues.
             Only post GitHub comments — do not return review text as a message.
 
+          # Pinned rather than left to the action's default, which is
+          # `claude-sonnet-5` — verified in a real run log
+          # (`"model": "claude-sonnet-5"` in the init event). A review that
+          # silently changes model changes what it catches.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(cargo check:*),Bash(cargo clippy:*),Bash(cargo test:*)"
