@@ -52,7 +52,7 @@ use crate::db::UserRow;
 /// one onto the gate — see the module doc.
 const COOKIE: &str = "__Host-factory-session";
 
-fn nothing_here() -> Response {
+pub(crate) fn nothing_here() -> Response {
     page(
         StatusCode::NOT_FOUND,
         shell("Not found", "<h1>Not found</h1>", ""),
@@ -91,7 +91,7 @@ pub(crate) fn csrf(token: &str) -> String {
 /// One mutating request's preamble: on the gate, signed in, and carrying the
 /// session's CSRF value. Everything failing answers 404 or the sign-in page
 /// rather than naming what was wrong.
-fn mutating(
+pub(crate) fn mutating(
     app: &Shared,
     origin: &Origin,
     headers: &HeaderMap,
@@ -122,7 +122,7 @@ fn mutating(
     Ok((token, user, values))
 }
 
-fn signin_form() -> Response {
+pub(crate) fn signin_form() -> Response {
     page(
         StatusCode::OK,
         shell_with(
@@ -399,7 +399,7 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
          machine that is alive.</p>{machines}",
         handle = esc(&user.handle),
         instruments = instrument_sections(&inv, &gate),
-        boards = board_section(app, user, &gate),
+        boards = board_section(app, user, &gate, &csrf),
     );
     let chrome = crate::http::intake::Chrome::Account {
         handle: user.handle.clone(),
@@ -893,32 +893,35 @@ pub async fn asset(
 /// `hangar::dark_lines`, which resolves against the same inventory the page
 /// renders from — a second opinion here would let the cockpit say a line is
 /// fine while the page quietly drops it.
-fn board_section(app: &Shared, user: &UserRow, gate: &str) -> String {
+fn board_section(app: &Shared, user: &UserRow, gate: &str, csrf: &str) -> String {
     let esc = mecha_manifest::escape_text;
     let boards = app
         .db
         .records(&user.id, crate::db::RECORD_BOARD)
         .unwrap_or_default();
     let dark = crate::http::hangar::dark_lines(app, user);
-    if boards.is_empty() && dark.is_empty() {
-        return String::new();
-    }
 
     let mut out = String::from(
         "<h2 id=\"boards\">Pages</h2>\
          <p>Your hangar lists what is public. A switchboard is a page of \
          lines you patch by hand and name yourself.</p>\
-         <table><tr><th>page</th><th>where</th><th></th></tr>",
+         <table><tr><th>page</th><th>where</th><th></th><th></th></tr>",
     );
+    // The profile and the hangar always have a row, whether or not anything
+    // has been written: "where do I turn this on" must not be answered by an
+    // absent line.
+    out.push_str(&format!(
+        "<tr><td>your profile</td><td class=\"muted\">name, links, and the toggle</td>\
+         <td></td><td><a href=\"/account/edit/profile\">Edit</a></td></tr>\
+         <tr><td>the hangar</td><td><a href=\"{gate}/@{handle}\">{gate}/@{handle}</a></td>\
+         <td></td><td><a href=\"/account/edit/hangar\">Edit</a></td></tr>",
+        handle = esc(&user.handle),
+    ));
     for (slug, row) in &boards {
-        let (name, url) = if slug.is_empty() {
-            ("the hangar".to_string(), format!("{gate}/@{}", user.handle))
-        } else {
-            (
-                slug.clone(),
-                format!("{gate}/@{}/{}", user.handle, esc(slug)),
-            )
-        };
+        if slug.is_empty() {
+            continue; // the hangar already has its row above
+        }
+        let url = format!("{gate}/@{}/{}", esc(&user.handle), esc(slug));
         // Drift is the actionable column: the box holds something this
         // user's machine does not, and a later push would overwrite it.
         let note = if row.drifted() {
@@ -927,11 +930,25 @@ fn board_section(app: &Shared, user: &UserRow, gate: &str) -> String {
             ""
         };
         out.push_str(&format!(
-            "<tr><td>{}</td><td><a href=\"{url}\">{url}</a></td><td>{note}</td></tr>",
-            esc(&name),
+            "<tr><td>{name}</td><td><a href=\"{url}\">{url}</a></td><td>{note}</td>\
+             <td><a href=\"/account/edit/board/{name}\">Edit</a></td></tr>",
+            name = esc(slug),
         ));
     }
     out.push_str("</table>");
+
+    // Creating one claims a name that can never be reissued, so the form
+    // says so and the confirmation is required rather than implied.
+    out.push_str(&format!(
+        "<form method=\"post\" action=\"/account/boards\">\
+         <input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">\
+         <label for=\"new-slug\">A new page</label>\
+         <input id=\"new-slug\" name=\"slug\" placeholder=\"teaching\" required>\
+         <label><input type=\"checkbox\" name=\"confirm\" value=\"yes\" required> \
+         I understand this name is permanent — it goes in links other people \
+         keep, so it can never be given to a different page later.</label>\
+         <button type=\"submit\">Create</button></form>"
+    ));
 
     if !dark.is_empty() {
         out.push_str(
