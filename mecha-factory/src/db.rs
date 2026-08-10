@@ -155,6 +155,14 @@ pub struct BundleSummary {
     /// What the share URL resolves to, if anything.
     pub aliased: Option<u32>,
     pub visibility: mecha_manifest::Visibility,
+    /// Whether the version the alias points at has been withheld.
+    ///
+    /// Withholding is per *version* and is enforced where the bytes are
+    /// served (`http/artifacts.rs`), so a summary that omitted it reported a
+    /// taken-down bundle as reachable. Harmless on a page that only offers
+    /// controls; a leak on one that lists what the world can see. Read here
+    /// so every surface asking "can a stranger open this" gets one answer.
+    pub withheld: bool,
 }
 
 /// What became of a machine's attempt to redeem a pairing code.
@@ -893,8 +901,14 @@ impl Db {
     /// share URL points at, and who may read it.
     pub fn bundles_overview(&self, user_id: &str) -> Result<Vec<BundleSummary>> {
         self.with(|conn| {
+            // The withheld column is read from the *aliased* version's own
+            // row rather than from the grouped one: `MAX(b.version)` is the
+            // newest and the alias may point anywhere behind it, so grouping
+            // would answer a question about a version nobody is serving.
             let mut stmt = conn.prepare(
-                "SELECT b.id, MAX(b.version), MAX(b.title), a.version, a.visibility \
+                "SELECT b.id, MAX(b.version), MAX(b.title), a.version, a.visibility, \
+                 (SELECT w.withheld_at FROM bundles w \
+                  WHERE w.user_id = b.user_id AND w.id = b.id AND w.version = a.version) \
                  FROM bundles b LEFT JOIN aliases a \
                  ON a.user_id = b.user_id AND a.id = b.id \
                  WHERE b.user_id = ?1 GROUP BY b.id ORDER BY b.id",
@@ -909,6 +923,7 @@ impl Db {
                         Some("public") => mecha_manifest::Visibility::Public,
                         _ => mecha_manifest::Visibility::Private,
                     },
+                    withheld: r.get::<_, Option<String>>(5)?.is_some(),
                 })
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -2090,6 +2105,25 @@ impl Db {
                     poll_row,
                 )
                 .optional()?)
+        })
+    }
+
+    /// Every poll this user has, newest first.
+    ///
+    /// Newest first rather than by id, unlike bundles and types: a poll has a
+    /// life measured in days and the one somebody is asking about is nearly
+    /// always the last one made, where a bundle id is a name a person chose
+    /// and looks up alphabetically.
+    pub fn polls(&self, user_id: &str) -> Result<Vec<PollRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT user_id, id, title, timezone, duration_minutes, deadline, \
+                 candidates, spec, resolution, screen_token_hash, state, created_at, \
+                 closed_at FROM polls \
+                 WHERE user_id = ?1 ORDER BY created_at DESC, id",
+            )?;
+            let rows = stmt.query_map(params![user_id], poll_row)?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })
     }
 
