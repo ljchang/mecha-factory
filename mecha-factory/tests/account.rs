@@ -234,6 +234,67 @@ fn the_account_page_links_bundles_at_the_viewer_whatever_their_class() {
     );
 }
 
+/// Moving the account page's links to the viewer took away the last surface
+/// offering a **per-version** artifact URL — the immutable one a citation
+/// names. The viewer carries it now, and only where it serves.
+///
+/// Only where it serves is the load-bearing half: a private bundle's version
+/// URL answers 404 to its owner too, because the gate mints a capability
+/// instead. Linking it while private would be the same "here is a URL that
+/// opens" mistake this whole branch removes.
+#[test]
+fn the_viewer_offers_this_versions_bytes_once_the_bundle_is_public() {
+    let server = common::start();
+    let session = signed_in(&server);
+    server
+        .db
+        .bundle_insert(&mecha_factory::db::BundleRow {
+            user_id: server.user.id.clone(),
+            id: "brief".into(),
+            version: 1,
+            digest: "d".into(),
+            class: mecha_manifest::ContentClass::Static,
+            title: "A briefing".into(),
+            description: None,
+            template: "report".into(),
+            published_at: None,
+            received_at: mecha_factory::db::now(),
+            withheld_at: None,
+            withheld_reason: None,
+        })
+        .unwrap();
+
+    let bytes = format!("http://alice.{}/b/brief/v/1/", server.artifacts);
+
+    // Private: no bytes link, because that URL serves nobody — not even here.
+    let private = get(&server, "/view/alice/brief/1", Some(&session));
+    assert_eq!(private.status, 200, "{}", private.body);
+    assert!(
+        !private.body.contains(&bytes),
+        "a private version URL was offered as a link: {}",
+        private.body
+    );
+
+    // Released: it is the citable URL, and the page says so.
+    server
+        .db
+        .alias_set(
+            &server.user.id,
+            "brief",
+            Some(1),
+            mecha_manifest::Visibility::Public,
+            &mecha_factory::db::now(),
+        )
+        .unwrap();
+    let public = get(&server, "/view/alice/brief/1", Some(&session));
+    assert_eq!(public.status, 200, "{}", public.body);
+    assert!(
+        public.body.contains(&bytes),
+        "the immutable version URL is not reachable from anywhere: {}",
+        public.body
+    );
+}
+
 /// The machine list is live: a used key shows life, revoking from the page
 /// kills it, and somebody else's key id kills nothing.
 #[test]
