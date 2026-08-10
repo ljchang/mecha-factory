@@ -199,20 +199,32 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
                 Some(version) => format!("v{version}"),
                 None => "nothing".to_string(),
             };
+            // Every link on this page goes to the **viewer**, not to the
+            // artifact origin. Two reasons, and the second is a bug this
+            // removes rather than a preference: a person clicking a row in
+            // their own account wants the chrome — the version menu and the
+            // release controls — and, for a private bundle, the artifact URL
+            // serves them nothing at all. And `Role::Artifacts` here was a
+            // guess: the class decides the origin, [`db::BundleSummary`]
+            // carries no class, so every published notebook was linked at the
+            // wrong origin and rescued by a redirect. A viewer URL is
+            // class-independent, and the viewer — which does read the class —
+            // is what prints the bare share URL.
             let url = format!(
-                "{}/b/{}/",
-                app.config.user_url(Role::Artifacts, &user.handle),
+                "{}/view/{}/{}",
+                app.config.base_url(Role::Gate),
+                user.handle,
                 bundle.id
             );
-            // Every stored version, viewable at its immutable URL, with a pin
-            // for whichever the share URL should follow.
+            // Every stored version, with a pin for whichever the share URL
+            // should follow.
             let versions = app
                 .db
                 .bundle_versions(&user.id, &bundle.id)
                 .unwrap_or_default();
             let mut versions_cell = String::new();
             for v in &versions {
-                versions_cell.push_str(&format!("<a href=\"{url}v/{v}/\">v{v}</a> "));
+                versions_cell.push_str(&format!("<a href=\"{url}/{v}\">v{v}</a> "));
                 if bundle.aliased == Some(*v) {
                     versions_cell.push_str("(live) ");
                 } else {
