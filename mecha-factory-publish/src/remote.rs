@@ -144,11 +144,16 @@ pub struct Pushed {
 /// Who the box will serve a mirrored bundle to, as far as *this* operation
 /// actually decided it.
 ///
-/// Four states rather than a `Visibility`, because two of them are not
+/// Who the box will serve a mirrored bundle to, as far as *this* operation
+/// actually decided it.
+///
+/// Five states rather than a `Visibility`, because three of them are not
 /// visibilities at all and collapsing them is how a report comes to assert
 /// something nobody established. A push that could not move the alias, and a
 /// `--no-alias` push, both leave the question exactly as they found it; a
-/// takedown answers it in a way neither "public" nor "private" says.
+/// takedown answers it in a way neither "public" nor "private" says; and a
+/// caller who was never told a visibility moves the alias without deciding
+/// who reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Serves {
     /// The alias names a version and this operation made it readable.
@@ -157,8 +162,15 @@ pub enum Serves {
     OwnerOnly,
     /// The alias now points at nothing: a takedown.
     Nothing,
-    /// The alias was not touched, so who may read it is whatever it already
-    /// said — and guessing is the same lie in whichever direction.
+    /// The alias now names a version and who may read it was **left alone**,
+    /// because nobody asked for a visibility.
+    ///
+    /// Distinct from [`Serves::Unchanged`] on purpose: there the alias itself
+    /// never moved, here it did. Both refuse to name a reader, and that is
+    /// the point — the box holds the answer and this side was not told it.
+    AsBefore,
+    /// The alias was not touched at all, so who may read it is whatever it
+    /// already said — and guessing is the same lie in whichever direction.
     Unchanged,
 }
 
@@ -231,6 +243,18 @@ impl Mirrored {
                 "Its share URL now resolves to nothing, so {bare} serves nobody. \
                  Every version is still on the box."
             ),
+            // The alias moved but nobody asked who may read it, so the box
+            // holds that answer and this side was not told it. The bare URL
+            // stays unnamed for the same reason: whether it serves anyone is
+            // exactly the thing not established.
+            (Serves::AsBefore, Some(page)) => format!(
+                "Its share URL now names this version, and the page is {page}. \
+                 Who may read it is whatever it already was — this did not \
+                 change it."
+            ),
+            (Serves::AsBefore, None) => "Its share URL now names this version. Who may read it \
+                 is whatever it already was — this did not change it."
+                .to_string(),
             // The bare URL is deliberately absent from both: this arm is
             // reached when the alias was never moved, which for an agent's
             // first publish means it names no version and that URL 404s.
@@ -356,7 +380,17 @@ impl Remote {
         })
     }
 
-    /// Move the share URL on the box, and set who may read it.
+    /// Move the share URL on the box, and optionally set who may read it.
+    ///
+    /// **`None` omits the field, which is the box's spelling of "leave who
+    /// may read it exactly as it was".** The server has always worked that
+    /// way — its own comment calls moving the alias and changing visibility
+    /// "separate acts, and neither does the other by accident" — and this
+    /// client defeated it by always sending a value, derived from the *local*
+    /// store. The local store learns nothing when a bundle is released from
+    /// the account page in a browser, so a later push read a stale `private`
+    /// and quietly took a public bundle down. Only a caller who was actually
+    /// told a visibility may assert one.
     ///
     /// Answers with the bare share URL and the viewer page, in that order —
     /// the second is `None` against a box older than the field.
@@ -364,15 +398,15 @@ impl Remote {
         &self,
         id: &str,
         version: Option<u32>,
-        visibility: Visibility,
+        visibility: Option<Visibility>,
     ) -> Result<(String, Option<String>)> {
-        let payload = serde_json::json!({
-            "version": version,
-            "visibility": match visibility {
+        let mut payload = serde_json::json!({ "version": version });
+        if let Some(visibility) = visibility {
+            payload["visibility"] = serde_json::json!(match visibility {
                 Visibility::Public => "public",
                 Visibility::Private => "private",
-            },
-        });
+            });
+        }
         let body = self
             .request(
                 "POST",
@@ -660,12 +694,15 @@ pub fn release_command(id: &str, version: u32) -> String {
 /// a failure: publishing is a local act that works on a laptop with no server.
 /// Every caller — the CLI, the MCP tool — goes through this, so "does the world
 /// see it?" has one answer rather than three.
+/// `visibility` is what the caller was *told*, never what it inferred:
+/// `None` moves the alias and leaves who may read it alone. See
+/// [`Remote::alias`] for the bug that rule exists to prevent.
 pub fn mirror(
     store: &BundleStore,
     id: &str,
     version: u32,
     alias_to: Option<u32>,
-    visibility: Visibility,
+    visibility: Option<Visibility>,
 ) -> Result<Option<Mirrored>> {
     let Some(remote) = Remote::configured()? else {
         return Ok(None);
@@ -696,8 +733,11 @@ pub fn mirror(
                 let (_, aliased) = releaser.alias(id, Some(target), visibility)?;
                 viewer = aliased.or(viewer);
                 serves = match visibility {
-                    Visibility::Public => Serves::Everyone,
-                    Visibility::Private => Serves::OwnerOnly,
+                    Some(Visibility::Public) => Serves::Everyone,
+                    Some(Visibility::Private) => Serves::OwnerOnly,
+                    // The alias moved; who reads it is the box's answer and
+                    // nobody here asked to change it.
+                    None => Serves::AsBefore,
                 };
             }
             None => {
@@ -729,7 +769,7 @@ pub fn mirror(
 pub fn mirror_alias(
     id: &str,
     version: Option<u32>,
-    visibility: Visibility,
+    visibility: Option<Visibility>,
 ) -> Result<Option<Mirrored>> {
     let Some(remote) = Remote::installed(Scope::Release)? else {
         return Ok(None);
@@ -741,8 +781,9 @@ pub fn mirror_alias(
     let serves = match version {
         None => Serves::Nothing,
         Some(_) => match visibility {
-            Visibility::Public => Serves::Everyone,
-            Visibility::Private => Serves::OwnerOnly,
+            Some(Visibility::Public) => Serves::Everyone,
+            Some(Visibility::Private) => Serves::OwnerOnly,
+            None => Serves::AsBefore,
         },
     };
     Ok(Some(Mirrored {
@@ -981,6 +1022,68 @@ mod tests {
         assert!(columns.contains(&format!("bytes  {BYTES}")), "{columns:?}");
     }
 
+    /// An unasked-for visibility must never reach the box, because the box
+    /// treats a value as an instruction.
+    ///
+    /// This is the whole of the silent-unpublish bug: `push` has no
+    /// `--visibility`, read one out of the *local* store, and sent it. The
+    /// local store never hears about a release made from the account page in
+    /// a browser, so it kept saying `private` and the next push handed that
+    /// to the box as a decision — taking a public bundle down with no prompt
+    /// and no output saying so. Asserted on the wire body, because that is
+    /// where the difference between "leave it" and "make it private" lives.
+    #[test]
+    fn a_visibility_nobody_asked_for_is_not_sent() {
+        let answer = serde_json::json!({
+            "id": "brief", "version": 3, "visibility": "public",
+            "url": BYTES, "viewer_url": PAGE,
+        });
+        // What `alias` actually put on the wire, not a re-derivation of it:
+        // the difference between "leave it" and "make it private" is a field
+        // in a request body, so that is what has to be looked at.
+        let sent = |visibility: Option<Visibility>| {
+            let (gate, body) = capturing_gate(answer.clone());
+            let remote = Remote {
+                gate,
+                key: "mk_rel_test".into(),
+                scope: Scope::Release,
+            };
+            remote.alias("brief", Some(3), visibility).unwrap();
+            serde_json::from_str::<serde_json::Value>(&body.recv().unwrap()).unwrap()
+        };
+
+        // Nobody asked: the field is absent, which is how the box is told to
+        // keep whatever it already decided.
+        let quiet = sent(None);
+        assert_eq!(quiet["version"], 3);
+        assert!(
+            quiet.get("visibility").is_none(),
+            "an unasked visibility went on the wire: {quiet}"
+        );
+        // Somebody asked: it travels, because that is a decision.
+        assert_eq!(sent(Some(Visibility::Private))["visibility"], "private");
+        assert_eq!(sent(Some(Visibility::Public))["visibility"], "public");
+    }
+
+    /// Moving the alias without being told a visibility is its own state, and
+    /// it must not borrow either visibility's words.
+    ///
+    /// `Unchanged` would be wrong too — there the alias never moved — so a
+    /// report that collapsed them would tell somebody their share URL had not
+    /// moved when it had.
+    #[test]
+    fn moving_an_alias_without_a_visibility_claims_no_reader() {
+        let said = reach(Serves::AsBefore, Some(PAGE), "").sentence();
+        assert!(said.contains("now names this version"), "{said}");
+        assert!(said.contains("whatever it already was"), "{said}");
+        assert!(!said.contains("Anyone"), "{said}");
+        assert!(!said.contains("private"), "{said}");
+        assert!(
+            !said.contains(BYTES),
+            "unestablished reach was named: {said}"
+        );
+    }
+
     /// The one instruction that gets a publish-key-only bundle released has
     /// to be a command that runs. `main.rs`'s test module parses it through
     /// the real `Cli`; this pins the shape that clap rejected — the version
@@ -990,6 +1093,52 @@ mod tests {
         let command = release_command("brief", 3);
         assert!(command.contains(" brief 3"), "{command}");
         assert!(!command.contains("--version"), "clap rejects it: {command}");
+    }
+
+    /// A one-shot gate that hands back the request body it was sent.
+    ///
+    /// `one_shot_gate` reads the request and discards it, which is right for
+    /// the tests that only care about the answer. Asserting what this client
+    /// *asks for* needs the body kept.
+    fn capturing_gate(answer: serde_json::Value) -> (String, std::sync::mpsc::Receiver<String>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            // Read to the end of the declared body, like `one_shot_gate` —
+            // answering after one read races the client's write.
+            loop {
+                match stream.read(&mut buffer) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => request.extend_from_slice(&buffer[..n]),
+                }
+                if let Some(split) = request.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&request[..split]).to_lowercase();
+                    let expected: usize = head
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if request.len() >= split + 4 + expected {
+                        let _ =
+                            tx.send(String::from_utf8_lossy(&request[split + 4..]).into_owned());
+                        break;
+                    }
+                }
+            }
+            let text = answer.to_string();
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 X\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{text}",
+                text.len()
+            );
+        });
+        (format!("http://{address}"), rx)
     }
 
     /// A store with one pushable version in it, rooted in a tempdir.

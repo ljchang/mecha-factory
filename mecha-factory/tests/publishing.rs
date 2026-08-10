@@ -69,6 +69,64 @@ fn a_bundle_published_and_then_aliased_is_a_page_on_the_internet() {
         .contains("script-src 'none'"));
 }
 
+/// An alias request with no `visibility` moves the alias and leaves who may
+/// read it exactly as it was.
+///
+/// The server has always worked this way — "move the alias" and "make it
+/// public" are separate acts — but nothing pinned it, and the publisher now
+/// *depends* on it: `factory-publish push` has no `--visibility`, so it sends
+/// no field rather than a value read out of its local store. That local value
+/// goes stale the moment a bundle is released from the account page, and
+/// sending it took public bundles down. If this contract ever changed, the
+/// silent unpublish would come back through the front door.
+#[test]
+fn an_alias_without_a_visibility_leaves_who_may_read_it_alone() {
+    let server = start();
+    let gate = server.gate.to_string();
+    let release = server.key(Scope::Release);
+
+    Request::new("POST", "/v1/bundles", &gate)
+        .auth(&server.key(Scope::Publish))
+        .body(bundle_archive("brief", 1, ContentClass::Static, "Monday"))
+        .send(server.gate);
+
+    // Released to the world.
+    let reply = Request::new("POST", "/v1/bundles/brief/alias", &gate)
+        .auth(&release)
+        .body(r#"{"version":1,"visibility":"public"}"#)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(reply.json()["visibility"], "public");
+    assert_eq!(server.get(server.artifacts, "/b/brief/").status, 302);
+
+    // A second version, aliased with no visibility named at all: it must
+    // still be public afterwards.
+    Request::new("POST", "/v1/bundles", &gate)
+        .auth(&server.key(Scope::Publish))
+        .body(bundle_archive("brief", 2, ContentClass::Static, "Tuesday"))
+        .send(server.gate);
+    let reply = Request::new("POST", "/v1/bundles/brief/alias", &gate)
+        .auth(&release)
+        .body(r#"{"version":2}"#)
+        .send(server.gate);
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert_eq!(
+        reply.json()["visibility"],
+        "public",
+        "omitting the field made a decision: {}",
+        reply.body
+    );
+
+    let reply = server.get(server.artifacts, "/b/brief/");
+    assert_eq!(
+        reply.status, 302,
+        "a public bundle was taken down by an alias move that named no \
+         visibility: {}",
+        reply.body
+    );
+    assert_eq!(reply.header("location").unwrap(), "/b/brief/v/2/");
+}
+
 /// The link a publish reports has to be one that opens, and for most of a
 /// bundle's life the artifact URL is not.
 ///

@@ -709,7 +709,13 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 sources,
                 &now,
             )?;
-            let visibility = visibility_arg(args)?.unwrap_or_else(|| {
+            // What the caller actually asked for, kept apart from what the
+            // local store has to be given. The local record needs a concrete
+            // visibility because its schema has no absence; the *box* must be
+            // told only what somebody decided, or a stale local `private`
+            // silently takes a released bundle down.
+            let requested = visibility_arg(args)?;
+            let visibility = requested.unwrap_or_else(|| {
                 store
                     .alias(&id)
                     .ok()
@@ -728,7 +734,7 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 &id,
                 published.version,
                 Some(published.version),
-                visibility,
+                requested,
             ) {
                 Ok(Some(reach)) => format!("\n{}", reach.sentence()),
                 Ok(None) => String::new(),
@@ -765,7 +771,8 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 .ok_or_else(|| anyhow::anyhow!("`version` is required"))?
                 as u32;
             let store = store()?;
-            let visibility = visibility_arg(args)?.unwrap_or_else(|| {
+            let requested = visibility_arg(args)?;
+            let visibility = requested.unwrap_or_else(|| {
                 store
                     .alias(&id)
                     .ok()
@@ -774,7 +781,7 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                     .unwrap_or(mecha_manifest::Visibility::Private)
             });
             store.set_alias(&id, Some(version), visibility, &now)?;
-            let reach = match crate::remote::mirror_alias(&id, Some(version), visibility)? {
+            let reach = match crate::remote::mirror_alias(&id, Some(version), requested)? {
                 Some(reach) => format!(" {}", reach.sentence()),
                 None => String::new(),
             };
@@ -794,7 +801,11 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 .map(|a| a.visibility)
                 .unwrap_or(mecha_manifest::Visibility::Private);
             store.set_alias(&id, None, visibility, &now)?;
-            crate::remote::mirror_alias(&id, None, visibility)?;
+            // `None` rather than the visibility read back locally, and it
+            // says the same thing more honestly: a takedown moves the alias
+            // to nothing and *keeps* who may read it, which is exactly what
+            // omitting the field means to the box.
+            crate::remote::mirror_alias(&id, None, None)?;
             Ok(format!(
                 "{id}'s share URL no longer resolves{}. {} version(s) remain on disk — \
                  nothing was deleted, and it can be aliased again.",
