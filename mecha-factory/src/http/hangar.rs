@@ -44,7 +44,7 @@ use super::intake::{page, shell, shell_with, Chrome};
 use super::{account, v1, Shared};
 use crate::config::{Origin, Role};
 use crate::db::UserRow;
-use crate::inventory::Inventory;
+use crate::inventory::{host_of, Inventory, Line};
 
 /// The one refusal. See the module doc: every way of not having a page here
 /// answers identically.
@@ -150,18 +150,6 @@ pub(crate) fn masthead(profile: &mecha_manifest::Profile, user: &UserRow) -> Str
         out.push_str("</nav>");
     }
     out
-}
-
-/// The host out of a URL, for showing where an off-origin link goes.
-///
-/// String work rather than a URL parser: the value already passed the
-/// manifest's `http(s)`-only check, so what is left is display, and a
-/// dependency for one `split` would be the wrong trade.
-pub(crate) fn host_of(url: &str) -> String {
-    url.split_once("://")
-        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(rest))
-        .unwrap_or(url)
-        .to_string()
 }
 
 /// One group of lines.
@@ -317,4 +305,139 @@ pub async fn artifact_root(
         "",
     )
         .into_response()
+}
+
+/// `GET /@{handle}/{slug}` — a switchboard.
+///
+/// The same page as the hangar with its lines patched by hand instead of
+/// wired from the inventory. Two differences that are both deliberate:
+///
+/// **It is not governed by `enabled`.** That toggle is the hangar's. A
+/// switchboard's URL is in somebody's email signature, and hiding an index
+/// must not silently break a link a stranger is holding — separate
+/// publications, separate audiences.
+///
+/// **A dark line is omitted, not rendered dead.** A button that answers 404
+/// in the page in your email signature is worse than an absent one, because
+/// the person who clicks it concludes something about you. The owner is told
+/// in the cockpit instead.
+pub async fn switchboard(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    Path((handle, slug)): Path<(String, String)>,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let Some((user, profile)) = owner(&app, &handle) else {
+        return nothing_here();
+    };
+    // A slug the manifest would refuse can never have been stored, so this
+    // is a cheap way to answer before touching the database — and it keeps
+    // the reserved names answering exactly what an unclaimed one answers.
+    if mecha_manifest::Board::from_toml(&format!("slug = {slug:?}\n")).is_err() {
+        return nothing_here();
+    }
+    let Some(board) = read_board(&app, &user, &slug) else {
+        return nothing_here();
+    };
+
+    let inv = Inventory::read(&app.db, &user);
+    let gate = app.config.base_url(Role::Gate);
+
+    let heading = board
+        .heading
+        .clone()
+        .or_else(|| profile.display_name.clone())
+        .unwrap_or_else(|| user.handle.clone());
+    let mut body = format!("<h1>{}</h1>", esc(&heading));
+    if let Some(intro) = &board.intro {
+        body.push_str(&format!("<p class=\"intro\">{}</p>", esc(intro)));
+    }
+
+    let lit: Vec<String> = inv
+        .resolve_all(&board)
+        .into_iter()
+        .filter_map(|line| match line {
+            Line::Dark { .. } => None,
+            Line::Lit {
+                href,
+                label,
+                blurb,
+                external_host,
+            } => {
+                // A reference is gate-relative and an external link is
+                // absolute, which is also the difference the reader is shown:
+                // the host, always, for anything that leaves our origin.
+                let (target, note) = match &external_host {
+                    Some(host) => (href.clone(), Some(host.clone())),
+                    None => (format!("{gate}{href}"), None),
+                };
+                let mut cell = format!(
+                    "<li><a class=\"line\" href=\"{}\">{}</a>",
+                    esc(&target),
+                    esc(&label)
+                );
+                if let Some(blurb) = &blurb {
+                    cell.push_str(&format!("<span class=\"blurb\">{}</span>", esc(blurb)));
+                }
+                if let Some(host) = note {
+                    cell.push_str(&format!("<span class=\"muted\"> {}</span>", esc(&host)));
+                }
+                cell.push_str("</li>");
+                Some(cell)
+            }
+        })
+        .collect();
+
+    if lit.is_empty() {
+        // Honest rather than blank. Every line being dark is a real state and
+        // the owner needs to see the page say so when they open their own.
+        body.push_str("<p class=\"muted\">Nothing here right now.</p>");
+    } else {
+        body.push_str(&format!("<ul class=\"lines\">{}</ul>", lit.join("")));
+    }
+
+    // A footer back to the hangar, but only when there is one to go to.
+    if profile.enabled {
+        body.push_str(&format!(
+            "<p class=\"muted\"><a href=\"{gate}/@{}\">Everything else</a></p>",
+            esc(&user.handle)
+        ));
+    }
+
+    let chrome = chrome_for(&app, &headers, &user);
+    page(StatusCode::OK, shell_with(&heading, &body, "/@a/", &chrome))
+}
+
+/// Every dark line a user has, across all their boards — for the cockpit.
+///
+/// The other half of "omitted, not rendered dead": the page stays clean and
+/// the owner is the one who finds out. Reported here rather than computed in
+/// the account page, so the page and the report can never disagree about
+/// which lines are lit.
+pub(crate) fn dark_lines(app: &Shared, user: &UserRow) -> Vec<(String, String, String)> {
+    let inv = Inventory::read(&app.db, user);
+    let mut out = Vec::new();
+    for (slug, row) in app
+        .db
+        .records(&user.id, crate::db::RECORD_BOARD)
+        .unwrap_or_default()
+    {
+        let Ok(board) = mecha_manifest::Board::from_toml(&row.effective) else {
+            continue;
+        };
+        for line in inv.resolve_all(&board) {
+            if let Line::Dark { label, why } = line {
+                let name = if slug.is_empty() {
+                    "the hangar".to_string()
+                } else {
+                    slug.clone()
+                };
+                out.push((name, label, why));
+            }
+        }
+    }
+    out
 }

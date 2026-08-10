@@ -236,3 +236,141 @@ impl Inventory {
             + self.polls.iter().filter(|p| p.reach.is_public()).count()
     }
 }
+
+// ---- resolving a board's declared lines ---------------------------------
+
+/// What became of one declared line.
+///
+/// A switchboard names artifacts by `kind` + `id`, and the server resolves
+/// them — which is the whole reason an entry is a reference rather than a
+/// URL. Resolution has exactly two outcomes, and both matter: a **lit** line
+/// is rendered, and a **dark** one is omitted from the page and reported to
+/// its owner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    Lit {
+        /// Gate-relative for a reference; absolute for an external link.
+        href: String,
+        label: String,
+        blurb: Option<String>,
+        /// The host, for a line that leaves our origin. Shown always: a page
+        /// that made an off-origin link indistinguishable from a first-party
+        /// one would be a phishing kit with a nice theme.
+        external_host: Option<String>,
+    },
+    Dark {
+        label: String,
+        /// For the owner's eyes only. A stranger never learns that a line
+        /// was here — the omission is the whole point.
+        why: String,
+    },
+}
+
+impl Line {
+    pub fn is_lit(&self) -> bool {
+        matches!(self, Line::Lit { .. })
+    }
+}
+
+impl Inventory {
+    /// Resolve one declared line against what actually exists.
+    ///
+    /// **A dark line is omitted, never rendered dead.** A button in the page
+    /// somebody put in their email signature that answers 404 is worse than
+    /// an absent one, because the person who clicks it concludes something
+    /// about its owner rather than about the software.
+    ///
+    /// The two ways a line goes dark are kept apart in the message, because
+    /// they need different fixes: the artifact is *gone* (delete the line) or
+    /// it is *there and not public* (release it).
+    pub fn resolve(&self, entry: &mecha_manifest::Entry) -> Line {
+        use mecha_manifest::EntryKind;
+
+        let label = entry.label.clone();
+        let dark = |why: String| Line::Dark {
+            label: label.clone(),
+            why,
+        };
+
+        if entry.kind == EntryKind::Link {
+            let Some(url) = entry.url.as_deref() else {
+                return dark("a link line with no url".into());
+            };
+            return Line::Lit {
+                href: url.to_string(),
+                label,
+                blurb: entry.blurb.clone(),
+                external_host: Some(host_of(url)),
+            };
+        }
+
+        let Some(id) = entry.id.as_deref() else {
+            return dark(format!("a {:?} line with no id", entry.kind));
+        };
+        // One lookup shape for all four kinds: find it by id, then ask the
+        // same `Reach` every other surface asks.
+        let found: Option<(&Reach, &str)> = match entry.kind {
+            EntryKind::Booking => self
+                .bookings
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| (&t.reach, "booking page")),
+            EntryKind::Form => self
+                .forms
+                .iter()
+                .find(|t| t.id == id)
+                .map(|t| (&t.reach, "form")),
+            EntryKind::Bundle => self
+                .bundles
+                .iter()
+                .find(|b| b.id == id)
+                .map(|b| (&b.reach, "bundle")),
+            EntryKind::Poll => self
+                .polls
+                .iter()
+                .find(|p| p.id == id)
+                .map(|p| (&p.reach, "poll")),
+            EntryKind::Link => unreachable!("handled above"),
+        };
+
+        match found {
+            None => dark(format!("no {} called `{id}`", kind_word(entry.kind))),
+            Some((Reach::Closed(why), what)) => {
+                dark(format!("the {what} `{id}` is not public: {why}"))
+            }
+            Some((Reach::Public(path), _)) => Line::Lit {
+                href: path.clone(),
+                label,
+                blurb: entry.blurb.clone(),
+                external_host: None,
+            },
+        }
+    }
+
+    /// Every line of a board, in the order it was written.
+    pub fn resolve_all(&self, board: &mecha_manifest::Board) -> Vec<Line> {
+        board.entries.iter().map(|e| self.resolve(e)).collect()
+    }
+}
+
+fn kind_word(kind: mecha_manifest::EntryKind) -> &'static str {
+    use mecha_manifest::EntryKind;
+    match kind {
+        EntryKind::Booking => "booking page",
+        EntryKind::Form => "form",
+        EntryKind::Bundle => "bundle",
+        EntryKind::Poll => "poll",
+        EntryKind::Link => "link",
+    }
+}
+
+/// The host out of a URL, for showing where an off-origin line goes.
+///
+/// String work rather than a URL parser: the value already passed the
+/// manifest's `http(s)`-only check, so what is left is display.
+pub fn host_of(url: &str) -> String {
+    url.split_once("://")
+        .map(|(_, rest)| rest.split(['/', '?', '#']).next().unwrap_or(rest))
+        .unwrap_or(url)
+        .to_string()
+}
