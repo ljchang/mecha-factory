@@ -37,5 +37,10 @@ jobs:
         with:
           # Same credential as the review workflow — see the note there.
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Pinned rather than left to the action's default, which is
+          # `claude-sonnet-5` — verified in a real run log
+          # (`"model": "claude-sonnet-5"` in the init event). A review that
+          # silently changes model changes what it catches.
           claude_args: |
+            --model claude-opus-5
             --allowedTools "Bash(cargo check:*),Bash(cargo test:*),Bash(cargo clippy:*),Bash(cargo fmt:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh issue comment:*),Bash(gh issue view:*)"
