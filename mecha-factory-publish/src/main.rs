@@ -7,7 +7,9 @@
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use mecha_factory_publish::{notebook, remote, render, store::BundleStore, vendor};
+use mecha_factory_publish::{
+    notebook, records::Record, remote, render, store::BundleStore, vendor,
+};
 use mecha_manifest::Visibility;
 use std::path::PathBuf;
 
@@ -254,6 +256,21 @@ enum Command {
     /// Group polls: seeded candidates out, tri-state answers back.
     #[command(subcommand)]
     Polls(PollsAction),
+    /// Who you are, at the top of your public pages.
+    ///
+    /// The record lives as TOML on this machine and is pushed to the box. It
+    /// can also be edited in the cockpit, so `pull` is not optional
+    /// bookkeeping: an edit made in a browser that nobody pulls is an edit a
+    /// later push may overwrite.
+    #[command(subcommand)]
+    Profile(RecordAction),
+    /// The hangar's own heading and intro. Its lines are wired from what is
+    /// public, so it declares none.
+    #[command(subcommand)]
+    Hangar(RecordAction),
+    /// A switchboard: a page of hand-patched lines, named by you.
+    #[command(subcommand)]
+    Switchboard(SwitchboardAction),
 }
 
 #[derive(Subcommand)]
@@ -425,6 +442,41 @@ enum TypeAction {
         #[arg(long)]
         handle: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum RecordAction {
+    /// Send the local file to the box.
+    Push {
+        /// Defaults to the standard path for this record.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Write the box's copy back over the local file.
+    Pull {
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SwitchboardAction {
+    /// Send one switchboard.
+    Push {
+        /// The slug: the URL segment, and the filename.
+        slug: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// Write one back over its local file, creating it if this machine has
+    /// never seen it.
+    Pull {
+        slug: String,
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
+    /// What boards the box holds, and which have drifted from their files.
+    List,
 }
 
 fn main() -> Result<()> {
@@ -633,6 +685,9 @@ fn main() -> Result<()> {
             dry_run,
         }) => slots_push_command(&id, &policy, dry_run)?,
         Command::Polls(action) => polls_command(action)?,
+        Command::Profile(action) => record_command(Record::Profile, action)?,
+        Command::Hangar(action) => record_command(Record::Hangar, action)?,
+        Command::Switchboard(action) => switchboard_command(action)?,
 
         Command::Remote => match remote::Remote::configured()? {
             Some(remote) => {
@@ -2100,6 +2155,21 @@ mod surface {
         ("type push", Tools(&["type_push"])),
         ("type list", Tools(&["type_list"])),
         ("type check", Tools(&["type_check"])),
+        // The personal public surface. An agent reaches all of it: writing
+        // somebody's own pages from their own files is the errand worth
+        // delegating, and the release scope is what bounds it. One
+        // `surface_push` covers every record, because the difference between
+        // a profile and a switchboard is an argument rather than a capability.
+        ("profile", Descend),
+        ("profile push", Tools(&["surface_push"])),
+        ("profile pull", Tools(&["surface_pull"])),
+        ("hangar", Descend),
+        ("hangar push", Tools(&["surface_push"])),
+        ("hangar pull", Tools(&["surface_pull"])),
+        ("switchboard", Descend),
+        ("switchboard push", Tools(&["surface_push"])),
+        ("switchboard pull", Tools(&["surface_pull"])),
+        ("switchboard list", Tools(&["surface_list"])),
         ("polls", Descend),
         (
             "polls create",
@@ -2322,6 +2392,124 @@ mod tests {
                     "`{path}` is excluded without a reason anyone can act on"
                 );
             }
+        }
+    }
+}
+
+// ---- the personal public surface ----------------------------------------
+
+/// The remote, presenting the release credential.
+///
+/// `Scope::Release` rather than `Publish`, matching the box: a board is a
+/// page with buttons at a URL, which is "what the world can see" rather than
+/// "versions nobody can read".
+fn surface_remote() -> Result<remote::Remote> {
+    remote::Remote::configured_for(remote::Scope::Release)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "no release credential is installed. `factory-publish connect` pairs this \
+             machine, or write ~/.mecha/factory/release.key"
+        )
+    })
+}
+
+fn surface_push(what: Record, file: Option<PathBuf>) -> Result<()> {
+    let path = match file {
+        Some(path) => path,
+        None => what.default_path()?,
+    };
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    what.check(&text)?;
+    let answer = surface_remote()?.record_push(&what.route(), &text)?;
+
+    // The overwritten list is the part worth printing loudly. A push that
+    // silently reverted something somebody fixed in the cockpit is the
+    // failure the merge exists to prevent, and a near miss nobody hears
+    // about is how the next one becomes a real one.
+    let overwritten: Vec<&str> = answer["overwritten"]
+        .as_array()
+        .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+        .unwrap_or_default();
+    if overwritten.is_empty() {
+        println!("pushed {} from {}", what.what(), path.display());
+    } else {
+        println!("pushed {} from {}", what.what(), path.display());
+        println!();
+        println!(
+            "  This file overwrote {} edited in the cockpit: {}",
+            if overwritten.len() == 1 {
+                "a field"
+            } else {
+                "fields"
+            },
+            overwritten.join(", ")
+        );
+        println!("  Those edits are gone. `pull` first next time to keep them.");
+    }
+    Ok(())
+}
+
+fn surface_pull(what: Record, file: Option<PathBuf>) -> Result<()> {
+    let path = match file {
+        Some(path) => path,
+        None => what.default_path()?,
+    };
+    let answer = surface_remote()?.record_get(&what.route())?;
+    let source = answer["source"].as_str().unwrap_or_default();
+    if source.trim().is_empty() {
+        println!("the box holds no {} yet — nothing to pull", what.what());
+        return Ok(());
+    }
+    // Parent directories are created, because `pull` on a board made in the
+    // cockpit is the case this verb exists for and that machine has no
+    // `switchboards/` yet.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    std::fs::write(&path, source).with_context(|| format!("writing {}", path.display()))?;
+    println!("pulled {} into {}", what.what(), path.display());
+    Ok(())
+}
+
+fn record_command(what: Record, action: RecordAction) -> Result<()> {
+    match action {
+        RecordAction::Push { file } => surface_push(what, file),
+        RecordAction::Pull { file } => surface_pull(what, file),
+    }
+}
+
+fn switchboard_command(action: SwitchboardAction) -> Result<()> {
+    match action {
+        SwitchboardAction::Push { slug, file } => surface_push(Record::Board(slug), file),
+        SwitchboardAction::Pull { slug, file } => surface_pull(Record::Board(slug), file),
+        SwitchboardAction::List => {
+            let answer = surface_remote()?.board_list()?;
+            let boards = answer["boards"].as_array().cloned().unwrap_or_default();
+            if boards.is_empty() {
+                println!("no boards on the box yet");
+                return Ok(());
+            }
+            for board in &boards {
+                let slug = board["slug"].as_str().unwrap_or_default();
+                let name = if slug.is_empty() {
+                    "(the hangar)".to_string()
+                } else {
+                    slug.to_string()
+                };
+                // Drift is the actionable column: it means the cockpit holds
+                // something this machine's file does not.
+                let drift = if board["drifted"].as_bool().unwrap_or(false) {
+                    "  edited in the cockpit — `pull` to keep it"
+                } else {
+                    ""
+                };
+                println!(
+                    "{name:<24}{}{drift}",
+                    board["updated_at"].as_str().unwrap_or_default()
+                );
+            }
+            Ok(())
         }
     }
 }
