@@ -45,7 +45,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use mecha_manifest::escape_text as esc;
 
-use super::intake::{page, shell_with, Chrome};
+use super::intake::{session_page, shell_with, Chrome};
 use super::{account, v1, Shared};
 use crate::config::Origin;
 use crate::db::UserRow;
@@ -242,7 +242,7 @@ fn editor_page(
     } else {
         StatusCode::OK
     };
-    page(
+    session_page(
         status,
         shell_with(&target.title(), &body, "/account/a/", &chrome),
     )
@@ -266,7 +266,7 @@ async fn show(app: Shared, headers: HeaderMap, origin: Origin, target: Target) -
         Ok(stored) => stored,
         Err(e) => {
             tracing::error!(error = %e, "reading a record for the editor");
-            return page(
+            return session_page(
                 StatusCode::SERVICE_UNAVAILABLE,
                 shell_with(
                     "Not now",
@@ -440,7 +440,7 @@ pub async fn create(
     let confirmed = values.get("confirm").and_then(|v| v.as_str()).is_some();
 
     let refuse = |message: &str| {
-        page(
+        session_page(
             StatusCode::UNPROCESSABLE_ENTITY,
             shell_with(
                 "Not created",

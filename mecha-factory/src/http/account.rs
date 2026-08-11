@@ -43,7 +43,7 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 
-use super::intake::{form_values, page, shell, shell_with};
+use super::intake::{form_values, page, session_page, shell, shell_with};
 use super::{v1, Shared};
 use crate::config::{Origin, Role};
 use crate::db::UserRow;
@@ -123,7 +123,9 @@ pub(crate) fn mutating(
 }
 
 pub(crate) fn signin_form() -> Response {
-    page(
+    // Same URL, two bodies, chosen by the cookie: `/account` is the sign-in
+    // form to a stranger and the overview to its owner.
+    session_page(
         StatusCode::OK,
         shell_with(
             "Sign in",
@@ -407,7 +409,7 @@ fn render_overview(app: &Shared, token: &str, user: &UserRow) -> Response {
         csrf: csrf.clone(),
         docs_url: app.config.docs_url.clone(),
     };
-    page(
+    session_page(
         StatusCode::OK,
         shell_with(&user.handle, &body, "/account/a/", &chrome),
     )

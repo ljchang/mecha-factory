@@ -40,8 +40,8 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use mecha_manifest::escape_text as esc;
 
-use super::intake::{page, shell, shell_with, Chrome};
-use super::{account, v1, Shared};
+use super::intake::{chrome_for, page, session_page, shell, shell_with};
+use super::{v1, Shared};
 use crate::config::{Origin, Role};
 use crate::db::UserRow;
 use crate::inventory::{host_of, Inventory, Line};
@@ -91,23 +91,6 @@ pub(crate) fn read_board(
         .ok()
         .flatten()
         .and_then(|row| mecha_manifest::Board::from_toml(&row.effective).ok())
-}
-
-/// The chrome for whoever is looking: the owner gets their dropdown, and a
-/// stranger gets the mark and nothing to sign into.
-pub(crate) fn chrome_for(app: &Shared, headers: &HeaderMap, user: &UserRow) -> Chrome {
-    match account::session(app, headers) {
-        Some((token, viewer)) if viewer.id == user.id => Chrome::Account {
-            handle: viewer.handle.clone(),
-            email: viewer.email.clone(),
-            csrf: account::csrf(&token),
-            docs_url: app.config.docs_url.clone(),
-        },
-        _ => Chrome::Public {
-            docs_url: app.config.docs_url.clone(),
-            sign_in: false,
-        },
-    }
 }
 
 /// The identity block: who this is, and where else they are.
@@ -270,7 +253,7 @@ pub async fn show(
     }
 
     let chrome = chrome_for(&app, &headers, &user);
-    page(
+    session_page(
         StatusCode::OK,
         shell_with(
             profile.display_name.as_deref().unwrap_or(&user.handle),
@@ -419,7 +402,7 @@ pub async fn switchboard(
     }
 
     let chrome = chrome_for(&app, &headers, &user);
-    page(StatusCode::OK, shell_with(&heading, &body, "/a/", &chrome))
+    session_page(StatusCode::OK, shell_with(&heading, &body, "/a/", &chrome))
 }
 
 /// Every dark line a user has, across all their boards — for the cockpit.

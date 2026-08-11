@@ -486,7 +486,9 @@ async fn root(
          </ul>",
         repo = env!("CARGO_PKG_REPOSITORY"),
     );
-    intake::page(
+    // The splash shows the account dropdown to a session and the sign-in
+    // form to everybody else, so it varies on the cookie like the rest.
+    intake::session_page(
         StatusCode::OK,
         intake::shell_with("mecha factory", &body, "/account/a/", &chrome),
     )
