@@ -130,6 +130,49 @@ pub enum EntryKind {
     Link,
 }
 
+impl LinkKind {
+    /// The host this kind is *supposed* to point at, when there is one.
+    ///
+    /// This is what turns `kind` from decoration into a claim the renderer
+    /// can check. `kind` is author-declared and verified against nothing, so
+    /// `kind = "github"` on `evil.example` is a lie told in the label — and
+    /// that is exactly the case where the destination host must be shown.
+    /// Matching the expected host is the only case where showing it is
+    /// redundant noise.
+    ///
+    /// [`LinkKind::Website`], [`LinkKind::Mastodon`] and [`LinkKind::Other`]
+    /// have none on purpose. "Website" names no destination, and Mastodon is
+    /// federated — there is no host it *should* be, so the host is always
+    /// worth showing.
+    pub fn expected_host(&self) -> Option<&'static str> {
+        match self {
+            LinkKind::Github => Some("github.com"),
+            LinkKind::Scholar => Some("scholar.google.com"),
+            LinkKind::Orcid => Some("orcid.org"),
+            LinkKind::Bluesky => Some("bsky.app"),
+            LinkKind::Linkedin => Some("linkedin.com"),
+            LinkKind::Website | LinkKind::Mastodon | LinkKind::Other => None,
+        }
+    }
+
+    /// Whether a link of this kind pointing at `host` needs its destination
+    /// spelled out beside it.
+    ///
+    /// Suffix-matched on a dot so `www.github.com` passes and
+    /// `github.evil.com` does not — a bare `contains` would let an attacker
+    /// put the trusted name anywhere in a hostname and suppress the very
+    /// warning it should trigger.
+    pub fn host_is_surprising(&self, host: &str) -> bool {
+        match self.expected_host() {
+            None => true,
+            Some(expected) => {
+                let host = host.trim_start_matches("www.");
+                host != expected && !host.ends_with(&format!(".{expected}"))
+            }
+        }
+    }
+}
+
 impl EntryKind {
     /// Whether this kind names something the server can resolve.
     pub fn is_reference(&self) -> bool {
@@ -875,5 +918,39 @@ mod merge_review_tests {
         let base = "tagline = \"a\"\n";
         let merge = merge_push(base, "tagline = \"browser\"\n", "tagline = \"file\"\n").unwrap();
         assert_eq!(merge.overwritten, vec!["tagline".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod link_kind_tests {
+    use super::*;
+
+    /// The whole point: a kind that matches its host is quiet, and a kind
+    /// that lies about where it goes is loud.
+    #[test]
+    fn a_kind_pointing_where_it_claims_needs_no_host_shown() {
+        assert!(!LinkKind::Github.host_is_surprising("github.com"));
+        assert!(!LinkKind::Github.host_is_surprising("www.github.com"));
+        assert!(!LinkKind::Orcid.host_is_surprising("orcid.org"));
+    }
+
+    #[test]
+    fn a_kind_that_lies_about_its_destination_is_always_shown() {
+        assert!(LinkKind::Github.host_is_surprising("evil.example"));
+        // The one a `contains` check would wave through: the trusted name is
+        // in the hostname, and the site is not the trusted site.
+        assert!(LinkKind::Github.host_is_surprising("github.evil.com"));
+        assert!(LinkKind::Linkedin.host_is_surprising("linkedin.evil.com"));
+    }
+
+    /// A kind that names no destination cannot vouch for one, so the host is
+    /// always worth showing — Mastodon is federated and "website" says
+    /// nothing at all.
+    #[test]
+    fn a_kind_with_no_canonical_host_always_shows_it() {
+        for kind in [LinkKind::Website, LinkKind::Mastodon, LinkKind::Other] {
+            assert!(kind.host_is_surprising("anywhere.example"), "{kind:?}");
+            assert_eq!(kind.expected_host(), None);
+        }
     }
 }

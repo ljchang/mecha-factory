@@ -573,3 +573,52 @@ fn a_stranger_only_page_does_not_claim_to_vary() {
         "a shared asset claims to vary on the session"
     );
 }
+
+/// A stranger's page must not print the owner's bookkeeping. The internal id
+/// is how *you* address a thing from a command line; to a visitor it is a
+/// primary key leaking onto a page that is supposed to be for them.
+#[test]
+fn a_generated_line_shows_a_title_and_not_an_id() {
+    let server = common::start();
+    assert_eq!(push(&server, "/v1/profile", ENABLED).status, 200);
+    a_public_bundle(&server, "eshin-resources");
+
+    let page = get(&server, "/@alice");
+    assert!(page.body.contains("The eshin-resources"), "{}", page.body);
+    assert!(
+        !page.body.contains("— eshin-resources"),
+        "the internal id was printed beside the title: {}",
+        page.body
+    );
+}
+
+/// A kind that points where it claims is quiet; one that lies is loud. The
+/// old exact-match rule printed "Github github.com" as noise and would have
+/// gone silent for a label somebody happened to write as the host.
+#[test]
+fn a_links_host_is_shown_only_when_the_kind_does_not_account_for_it() {
+    let server = common::start();
+    let profile = "enabled = true\ndisplay_name = \"Alice\"\n\
+                   [[link]]\nkind = \"github\"\nurl = \"https://github.com/alice\"\n\
+                   [[link]]\nkind = \"website\"\nurl = \"https://lab.example/x\"\n";
+    assert_eq!(push(&server, "/v1/profile", profile).status, 200);
+    let page = get(&server, "/@alice");
+    assert!(
+        !page.body.contains("> github.com<"),
+        "a matching kind still printed its host: {}",
+        page.body
+    );
+    // A kind that names no destination cannot vouch for one.
+    assert!(page.body.contains("lab.example"), "{}", page.body);
+
+    // And the case the rule exists for: the kind lies about where it goes.
+    let lying = "enabled = true\n[[link]]\nkind = \"github\"\n\
+                 url = \"https://github.evil.example/login\"\n";
+    assert_eq!(push(&server, "/v1/profile", lying).status, 200);
+    let page = get(&server, "/@alice");
+    assert!(
+        page.body.contains("github.evil.example"),
+        "a lying kind hid its destination: {}",
+        page.body
+    );
+}

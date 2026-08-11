@@ -121,19 +121,25 @@ pub(crate) fn masthead(profile: &mecha_manifest::Profile, user: &UserRow) -> Str
                 (None, mecha_manifest::LinkKind::Other) => host_of(&link.url),
                 (None, kind) => format!("{kind:?}"),
             };
-            // **The host is shown beside every link, always** — including a
-            // labelled one, which is what this used to omit. A label is the
-            // author's own words and can say anything: `label = "Sign in to
-            // the factory"` on `https://evil.example/login`, rendered on the
-            // gate origin where the real sign-in and the `__Host-` cookie
-            // live, is a credential-harvesting link wearing our chrome. The
-            // switchboard renderer already did this; the two disagreed while
-            // a comment here claimed they matched.
+            // **The host is shown whenever the label does not account for
+            // it.** A label is the author's own words and can say anything:
+            // `label = "Sign in to the factory"` on `https://evil.example`,
+            // rendered on the gate origin where the real sign-in and the
+            // `__Host-` cookie live, is a credential-harvesting link wearing
+            // our chrome.
+            //
+            // What makes a *kind* able to account for it is that it names a
+            // destination we can check — `LinkKind::host_is_surprising`. So
+            // `github` pointing at github.com is quiet, and `github` pointing
+            // anywhere else is loud, which is the case the whole rule exists
+            // for. An exact `label == host` comparison was too blunt in both
+            // directions: it printed "Github github.com" as noise, and it
+            // would have gone quiet for a label somebody wrote as the host.
             let host = host_of(&link.url);
-            let shown = if label == host {
-                String::new()
-            } else {
+            let shown = if link.kind.host_is_surprising(&host) {
                 format!("<span class=\"muted\"> {}</span>", esc(&host))
+            } else {
+                String::new()
             };
             out.push_str(&format!(
                 "<a href=\"{}\">{}</a>{shown} ",
@@ -158,14 +164,15 @@ fn group(title: &str, lines: Vec<String>) -> String {
     )
 }
 
-fn line(gate: &str, path: &str, label: &str, note: &str) -> String {
-    let note = if note.is_empty() {
-        String::new()
-    } else {
-        format!("<span class=\"muted\"> — {}</span>", esc(note))
-    };
+/// One generated line.
+///
+/// **No id.** These used to trail the artifact's internal id — "Book a
+/// meeting — book" — which is bookkeeping the owner uses to address a thing
+/// from a command line, and means nothing to the visitor the page is for. A
+/// public page that prints its own primary keys reads as a debug dump.
+fn line(gate: &str, path: &str, label: &str) -> String {
     format!(
-        "<li><a href=\"{gate}{}\">{}</a>{note}</li>",
+        "<li><a href=\"{gate}{}\">{}</a></li>",
         esc(path),
         esc(label)
     )
@@ -220,29 +227,21 @@ pub async fn show(
         inv.bookings
             .iter()
             .chain(inv.forms.iter())
-            .filter_map(|t| {
-                t.reach
-                    .path()
-                    .map(|path| line(&gate, path, &t.title, &t.id))
-            })
+            .filter_map(|t| t.reach.path().map(|path| line(&gate, path, &t.title)))
             .collect(),
     ));
     body.push_str(&group(
         "Reports",
         inv.bundles
             .iter()
-            .filter_map(|b| {
-                b.reach
-                    .path()
-                    .map(|path| line(&gate, path, &b.title, &b.id))
-            })
+            .filter_map(|b| b.reach.path().map(|path| line(&gate, path, &b.title)))
             .collect(),
     ));
     body.push_str(&group(
         "Polls",
         inv.polls
             .iter()
-            .filter_map(|p| p.reach.path().map(|path| line(&gate, path, &p.title, "")))
+            .filter_map(|p| p.reach.path().map(|path| line(&gate, path, &p.title)))
             .collect(),
     ));
 
