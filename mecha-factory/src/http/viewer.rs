@@ -40,7 +40,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Extension;
 use std::collections::HashMap;
 
-use super::intake::{account_dropdown, form_values, page, shell, shell_with, Chrome};
+use super::intake::{account_dropdown, form_values, session_page, shell, shell_with, Chrome};
 use super::{account, artifacts, v1, Failure, Shared};
 use crate::config::{Origin, Role};
 use crate::db::UserRow;
@@ -111,7 +111,7 @@ fn safe_return(path: &str) -> Option<&str> {
 /// private, unshared and never-published still answer identically.
 fn reader_gate(app: &Shared, return_to: &str) -> Response {
     let esc = mecha_manifest::escape_text;
-    page(
+    session_page(
         StatusCode::OK,
         shell_with(
             "Sign in to view",
@@ -171,7 +171,7 @@ pub async fn signin(
             Err(e) => tracing::error!(error = %e, "checking an address for grants"),
         }
     }
-    page(
+    session_page(
         StatusCode::OK,
         shell(
             "Check your email",
@@ -236,7 +236,7 @@ pub async fn finish_page(Extension(origin): Extension<Origin>) -> Response {
     if v1::not_on_gate(&origin).is_some() {
         return missing();
     }
-    page(
+    session_page(
         StatusCode::OK,
         shell(
             "Sign in",
@@ -275,7 +275,7 @@ pub async fn finish(
     ) {
         Ok(Some(_)) => {}
         Ok(None) => {
-            return page(
+            return session_page(
                 StatusCode::NOT_FOUND,
                 shell(
                     "That link has expired",

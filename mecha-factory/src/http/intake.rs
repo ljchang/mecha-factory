@@ -33,7 +33,7 @@
 //!   forty people once may be a conference.
 
 use axum::extract::{Path, State};
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Extension;
 use mecha_manifest::{FormOptions, RequestType};
@@ -45,6 +45,57 @@ use crate::db::UserRow;
 /// A page, under the gate's own policy. The middleware adds the headers.
 pub(crate) fn page(status: StatusCode, body: String) -> Response {
     (status, Html(body)).into_response()
+}
+
+/// A page whose bytes depend on who asked.
+///
+/// **Any page that consults a session must go through this**, because the
+/// gate sets no `Cache-Control` at all otherwise — and absent one, HTTP
+/// permits a shared cache to store a 200 heuristically. Today the only cache
+/// is a reader's own browser: the deployment deliberately puts no CDN in
+/// front (`DEPLOY.md` §13.2). But "no CDN today" is the assumption that
+/// changes quietly, and that document says adding one later "changes nothing
+/// about the origin" — true of routing and TLS, and false of this. The day a
+/// proxy appears, a page that varies on a cookie without saying so can hand
+/// one visitor another's chrome.
+///
+/// `Vary: Cookie` states the dependency and `private, no-store` refuses the
+/// shared copy outright, which is the right strength for pages that carry an
+/// address, a CSRF token, or simply the fact that somebody is signed in.
+pub(crate) fn session_page(status: StatusCode, body: String) -> Response {
+    let mut response = page(status, body);
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(header::VARY, HeaderValue::from_static("Cookie"));
+    response
+}
+
+/// The chrome for whoever is looking at a page that belongs to `owner`.
+///
+/// The owner gets their account dropdown; everybody else gets the mark and
+/// **nothing to sign into**. That second half is the load-bearing one: a
+/// stranger booking a meeting has no account here, and offering them one is
+/// the noise `Chrome::Public`'s `sign_in` flag exists to suppress — "the
+/// splash, not a stranger's form".
+///
+/// A page rendered through this varies on the session cookie, so it belongs
+/// in [`session_page`] rather than [`page`].
+pub(crate) fn chrome_for(app: &Shared, headers: &HeaderMap, owner: &UserRow) -> Chrome {
+    match crate::http::account::session(app, headers) {
+        Some((token, viewer)) if viewer.id == owner.id => Chrome::Account {
+            handle: viewer.handle.clone(),
+            email: viewer.email.clone(),
+            csrf: crate::http::account::csrf(&token),
+            docs_url: app.config.docs_url.clone(),
+        },
+        _ => Chrome::Public {
+            docs_url: app.config.docs_url.clone(),
+            sign_in: false,
+        },
+    }
 }
 
 /// What sits above a page's content, decided per call site — typed, so a

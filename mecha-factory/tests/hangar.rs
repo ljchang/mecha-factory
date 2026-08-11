@@ -527,3 +527,49 @@ fn an_expired_poll_is_not_listed_even_though_its_state_is_open() {
         page.body
     );
 }
+
+/// A page whose bytes depend on a session must say so, or a shared cache may
+/// hand one visitor another's chrome. There is no CDN in front today — which
+/// is exactly the assumption that changes quietly, and `DEPLOY.md` says
+/// adding one "changes nothing about the origin", true of routing and TLS
+/// and false of this.
+#[test]
+fn every_session_dependent_page_refuses_a_shared_cache() {
+    let server = common::start();
+    assert_eq!(push(&server, "/v1/profile", ENABLED).status, 200);
+    assert_eq!(
+        push(&server, "/v1/boards/hello", "slug = \"hello\"\n").status,
+        200
+    );
+
+    for path in ["/", "/account", "/@alice", "/@alice/hello"] {
+        let reply = get(&server, path);
+        let cache = reply.header("cache-control").unwrap_or_default();
+        let vary = reply.header("vary").unwrap_or_default();
+        assert!(
+            cache.contains("private") && cache.contains("no-store"),
+            "{path} may be cached by a proxy: cache-control={cache:?}"
+        );
+        assert!(
+            vary.to_lowercase().contains("cookie"),
+            "{path} varies on the session and does not say so: vary={vary:?}"
+        );
+    }
+}
+
+/// And a page that does *not* depend on a session should not claim to — the
+/// header is a statement about the page, not decoration sprayed everywhere.
+#[test]
+fn a_stranger_only_page_does_not_claim_to_vary() {
+    let server = common::start();
+    let reply = get(&server, "/a/form.css");
+    assert_eq!(reply.status, 200);
+    assert!(
+        !reply
+            .header("vary")
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("cookie"),
+        "a shared asset claims to vary on the session"
+    );
+}
