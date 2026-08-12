@@ -367,14 +367,21 @@ pub async fn switchboard(
                     Some(host) => (href.clone(), Some(host.clone())),
                     None => (format!("{gate}{href}"), None),
                 };
+                // The blurb goes *inside* the anchor so the whole card is
+                // one target — a label and its explanation are one thing to
+                // click, and a blurb outside the border reads as a caption
+                // that fell off.
                 let mut cell = format!(
-                    "<li><a class=\"line\" href=\"{}\">{}</a>",
+                    "<li><a class=\"line\" href=\"{}\"><span class=\"label\">{}</span>",
                     esc(&target),
                     esc(&label)
                 );
                 if let Some(blurb) = &blurb {
                     cell.push_str(&format!("<span class=\"blurb\">{}</span>", esc(blurb)));
                 }
+                cell.push_str("</a>");
+                // The host stays outside it: where a line goes is a fact
+                // about the destination, not part of the thing you press.
                 if let Some(host) = note {
                     cell.push_str(&format!("<span class=\"muted\"> {}</span>", esc(&host)));
                 }

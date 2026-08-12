@@ -248,6 +248,32 @@ impl Profile {
             .map_err(|e| ManifestError::invalid(format!("serialising a profile: {e}")))
     }
 
+    /// The fields nobody has filled in, in the order they render.
+    ///
+    /// A push that says only "stored" leaves an author unable to tell a
+    /// half-written profile from a broken renderer — which is exactly the
+    /// wrong conclusion to invite, because one is a minute's typing and the
+    /// other is a bug report. Naming the gaps costs one line and answers the
+    /// question before it is asked.
+    ///
+    /// `enabled` is not here: false is a decision, not an omission.
+    pub fn unset(&self) -> Vec<&'static str> {
+        let mut out = Vec::new();
+        for (name, missing) in [
+            ("display_name", self.display_name.is_none()),
+            ("tagline", self.tagline.is_none()),
+            ("bio", self.bio.is_none()),
+            ("location", self.location.is_none()),
+            ("timezone", self.timezone.is_none()),
+            ("link", self.links.is_empty()),
+        ] {
+            if missing {
+                out.push(name);
+            }
+        }
+        out
+    }
+
     pub fn check(&self) -> Result<()> {
         line(&self.display_name, "display_name")?;
         line(&self.tagline, "tagline")?;
@@ -952,5 +978,42 @@ mod link_kind_tests {
             assert!(kind.host_is_surprising("anywhere.example"), "{kind:?}");
             assert_eq!(kind.expected_host(), None);
         }
+    }
+}
+
+#[cfg(test)]
+mod unset_tests {
+    use super::*;
+
+    #[test]
+    fn a_bare_profile_names_every_gap_and_a_full_one_names_none() {
+        let bare = Profile::from_toml("enabled = true\n").unwrap();
+        assert_eq!(
+            bare.unset(),
+            vec![
+                "display_name",
+                "tagline",
+                "bio",
+                "location",
+                "timezone",
+                "link"
+            ]
+        );
+
+        let full = Profile::from_toml(
+            "enabled = true\ndisplay_name = \"A\"\ntagline = \"B\"\nbio = \"C\"\n\
+             location = \"D\"\ntimezone = \"America/New_York\"\n\
+             [[link]]\nurl = \"https://e.example\"\n",
+        )
+        .unwrap();
+        assert!(full.unset().is_empty(), "{:?}", full.unset());
+    }
+
+    /// `enabled = false` is somebody deciding their page is off, not a field
+    /// they forgot, and reporting it as a gap would nag them about a choice.
+    #[test]
+    fn a_disabled_profile_is_not_reported_as_incomplete() {
+        let p = Profile::from_toml("enabled = false\ndisplay_name = \"A\"\n").unwrap();
+        assert!(!p.unset().contains(&"enabled"));
     }
 }

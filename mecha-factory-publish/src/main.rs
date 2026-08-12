@@ -2432,6 +2432,14 @@ fn surface_push(what: Record, file: Option<PathBuf>) -> Result<()> {
         .unwrap_or_default();
     if overwritten.is_empty() {
         println!("pushed {} from {}", what.what(), path.display());
+        // A page with three of eight fields set looks broken rather than
+        // unfinished, and "stored" alone invites the wrong diagnosis.
+        if let Ok(profile) = mecha_manifest::Profile::from_toml(&text) {
+            let unset = profile.unset();
+            if !unset.is_empty() {
+                println!("  not set: {}", unset.join(", "));
+            }
+        }
     } else {
         println!("pushed {} from {}", what.what(), path.display());
         println!();
