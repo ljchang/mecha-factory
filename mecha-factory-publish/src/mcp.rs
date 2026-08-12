@@ -1174,7 +1174,24 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             // Said plainly rather than buried, because the model may be about
             // to report success to a person whose cockpit edit just vanished.
             if overwritten.is_empty() {
-                Ok(format!("Pushed {} from {}.", record.what(), path.display()))
+                let gaps = mecha_manifest::Profile::from_toml(&text)
+                    .map(|p| p.unset())
+                    .unwrap_or_default();
+                if gaps.is_empty() {
+                    Ok(format!("Pushed {} from {}.", record.what(), path.display()))
+                } else {
+                    // Said plainly: a half-filled profile renders as a page
+                    // that looks broken, and the author is the only one who
+                    // can tell the difference.
+                    Ok(format!(
+                        "Pushed {} from {}.\n\nThese fields are not set, so they render as \
+                         nothing: {}. Mention them — a page missing them looks broken rather \
+                         than unfinished.",
+                        record.what(),
+                        path.display(),
+                        gaps.join(", ")
+                    ))
+                }
             } else {
                 Ok(format!(
                     "Pushed {} from {}.\n\nThis file OVERWROTE fields that had been edited in \
