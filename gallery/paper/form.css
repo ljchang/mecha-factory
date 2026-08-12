@@ -331,6 +331,79 @@ a { color: var(--accent); text-underline-offset: 2px; }
    measure and rhythm without a second stylesheet. */
 main > h1:only-of-type + p { color: var(--muted); }
 
+/* The hangar and its switchboards: a person's own pages.
+   These classes were emitted with no rules behind them at all, so the page
+   fell back to browser defaults -- bulleted lists and underlined blue links
+   -- while every test passed, because a test asserts what a page *says* and
+   none can assert that it looks designed. The person who opened it is what
+   caught it, which is the same shape as a renderer needing a real terminal
+   rather than a passing suite. */
+
+/* A person's links, under their name. Spaced rather than run together: the
+   default inline flow produced "Github Computational Social Affective
+   Neuroscience Lab cosanlab.com" as one unreadable run. */
+nav.links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.375rem 1.25rem;
+  margin: 0 0 2.5rem;
+}
+nav.links a {
+  color: var(--text);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 1px;
+}
+nav.links a:hover { border-bottom-color: var(--accent); }
+/* The host beside a link whose kind cannot vouch for it. Quiet, but never
+   invisible -- it is the one thing standing between a labelled link and a
+   phishing link. */
+nav.links .muted { font-size: 0.875rem; }
+
+/* The lines of a hangar or a switchboard. No bullets: these are destinations,
+   not prose, and a marker in front of each adds nothing a reader uses. */
+ul.lines {
+  list-style: none;
+  margin: 0 0 2.5rem;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.125rem;
+}
+ul.lines li { margin: 0; }
+ul.lines a {
+  display: inline-block;
+  color: var(--text);
+  text-decoration: none;
+  padding: 0.4375rem 0;
+  font-weight: 450;
+}
+ul.lines a:hover { color: var(--accent); }
+
+/* A switchboard's lines are the point of the page rather than an index of
+   it, so they are buttons: bigger targets, a surface, and a blurb under the
+   label when its author wrote one. */
+ul.lines a.line {
+  display: block;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 0.875rem 1rem;
+  background: var(--surface);
+}
+ul.lines a.line:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+ul.lines .label { display: block; }
+ul.lines .blurb {
+  display: block;
+  color: var(--muted);
+  font-size: 0.9375rem;
+  font-weight: 400;
+  margin-top: 0.1875rem;
+}
+
 /* The site header: mark on the left, account on the right. Present on the
    gate's own pages and on rendered forms; never on artifact origins, whose
    bytes are content-addressed and not ours to decorate. A full-width band
