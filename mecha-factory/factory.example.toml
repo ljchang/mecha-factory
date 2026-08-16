@@ -8,6 +8,19 @@
 
 data_dir = "/var/lib/mecha-factory"
 
+# Names that 301 to the gate, keeping the path: the apex and `www`, which is
+# what somebody types when they were told the name of this thing rather than
+# given a link. Empty means those names are answered by whatever else their DNS
+# points at — a parked page, or nothing.
+#
+# **DNS first, this second, and verify in between.** These names get their own
+# certificate (never the base one, so a redirect that is not ready cannot take
+# the gate down), and it is issued over HTTP-01 — which is a plain GET on port
+# 80 that has to reach *this box*. Add the record, watch it resolve here, then
+# add the name to this list. The other order costs nothing but a certificate
+# that cannot be issued and a redirect no browser will follow.
+redirect_hosts = ["example.org", "www.example.org"]
+
 # Three registrable names, one per content class. They must be three distinct
 # names: sharing one would put a notebook and a report under one policy, which
 # is the whole reason there are three.

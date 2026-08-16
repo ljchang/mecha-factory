@@ -118,6 +118,50 @@ of defence here, behind one the certificate gives for free. A wildcard
 certificate would remove that first line, which is worth knowing before
 treating DNS-01 as a pure upgrade.
 
+### The apex, and `www`
+
+None of the three names is what a person types. Told the name of this thing,
+they type `example.org` — and the origin table does not serve that name, so
+without a fourth row they land on whatever else the apex points at: a parked
+page, a marketing site, or nothing. `redirect_hosts` is that fourth row:
+
+```toml
+redirect_hosts = ["example.org", "www.example.org"]
+```
+
+Each 301s to the gate **keeping the path**, so a link to `example.org/account`
+lands on the account page and not the splash. They are not an origin — nothing
+is served under them and no bundle can be reached through one — so they get no
+role, and a handshake carrying no SNI still gets the base group's certificate
+rather than theirs.
+
+**Point the DNS at this box first, watch it resolve, and only then add the
+name to the list.** These are ordinary A records like the others:
+
+```
+example.org        A    203.0.113.10
+www.example.org    A    203.0.113.10
+```
+
+The order matters because the certificate for these names is issued over
+HTTP-01 — a plain GET on port 80 that has to arrive *here*. Add the name while
+its DNS still points somewhere else and the order simply cannot complete: the
+name has no certificate, and a browser refuses the redirect before reading it.
+
+What that failure does **not** do is take anything else down, and that is by
+construction: redirect hosts are their own certificate group, never part of the
+base one. `DirCache` keys a cached certificate by its exact domain list, so
+folding these into the base names would make adding one change what `gate`,
+`art` and `compute` are cached under — and the first restart after the config
+edit would find nothing cached, serve no certificate, and fail the handshake on
+the API until a fresh order completed. Separate groups mean a redirect host
+whose DNS has not landed yet is a redirect that does not work yet.
+
+An apex on somebody else's hosting is the case to be careful with, because the
+DNS change is what takes that site down — the config edit only decides what
+answers afterwards. Move the records when the old page is meant to stop being
+the answer, not before.
+
 ### On collapsing to one registrable domain
 
 The deployment runs all three origins under `mecha-factory.ai`, which is not

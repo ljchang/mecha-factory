@@ -359,19 +359,37 @@ impl ResolvesServerCert for Registry {
 /// decided and already tested. Restoring an account therefore costs nothing.
 pub fn groups(config: &Config, users: &[UserRow]) -> Vec<Vec<String>> {
     let mut out = vec![base_group(config)];
+    out.extend(redirect_group(config));
     for user in users.iter().filter(|user| user.active()) {
         out.push(user_group(config, &user.handle));
     }
     out
 }
 
-/// The three base origins — plus any redirect hosts, which travel on the
-/// same certificate: a redirect the browser refuses over a bad cert is a
-/// redirect that does not exist.
+/// The three base origins, and nothing else.
 fn base_group(config: &Config) -> Vec<String> {
-    let mut names = config.origins.names();
-    names.extend(config.redirect_hosts.iter().cloned());
-    names
+    config.origins.names()
+}
+
+/// The apex and `www` — their own certificate, deliberately not the base one.
+///
+/// They still need a certificate: a redirect the browser refuses over a bad
+/// cert is a redirect that does not exist. What changed is *whose* certificate,
+/// and the reason is that `DirCache` keys a cached certificate by its exact
+/// domain list. Folding these into the base group makes adding one a change to
+/// the base group's **identity**: on the next start every base name misses the
+/// cache, [`Registry::ensure`] installs a resolver holding no certificate yet,
+/// and `gate` fails at the handshake until a fresh order completes. That is an
+/// outage of the API, caused by a name that only ever served a 301 — and it
+/// arrives precisely when a redirect host's DNS is still wrong, which is the
+/// state every redirect host passes through on its way to existing.
+///
+/// Its own group makes the failure local and the fix free: the base
+/// certificate is untouched and still cached, the gate keeps serving, and a
+/// redirect whose DNS has not landed is a redirect that does not work yet.
+/// Removing a redirect host is equally free — the base names never move.
+fn redirect_group(config: &Config) -> Option<Vec<String>> {
+    (!config.redirect_hosts.is_empty()).then(|| config.redirect_hosts.clone())
 }
 
 /// A group's canonical names and its identity, or nothing for an empty group.
@@ -474,6 +492,13 @@ pub async fn migrate_combined_cache(
 /// propagates, so the caller logs it and the next pass retries the users.
 pub fn reconcile(registry: &Arc<Registry>, db: &Db, config: &Config) -> Result<usize> {
     let mut started = usize::from(registry.ensure(base_group(config), true));
+    // Ordered beside the bases and never as part of them — see
+    // `redirect_group`. `fallback` is the base group's alone: a handshake with
+    // no SNI is a monitor or a curl-by-IP, and answering it with a certificate
+    // for the apex would name a host that serves nothing but a 301.
+    if let Some(names) = redirect_group(config) {
+        started += usize::from(registry.ensure(names, false));
+    }
     let users = db.users()?;
     for user in users.iter().filter(|user| user.active()) {
         if registry.ensure(user_group(config, &user.handle), false) {
@@ -594,6 +619,41 @@ mod tests {
             !groups.iter().flatten().any(|n| n.starts_with("bob.")),
             "{groups:?}"
         );
+    }
+
+    /// A redirect host is its own certificate, and the base group does not
+    /// move when one is added.
+    ///
+    /// The assertion that matters is the second one: the base group's names are
+    /// the *same list* with and without redirect hosts, because `DirCache` keys
+    /// on that list. If adding the apex changed it, the first restart after the
+    /// config edit would find no cached certificate for `gate` — a handshake
+    /// failure on the API, caused by a name that only serves a 301, at exactly
+    /// the moment that name's DNS is most likely to be wrong.
+    #[test]
+    fn a_redirect_host_is_its_own_certificate() {
+        let db = crate::db::Db::open_in_memory().unwrap();
+        let users = db.users().unwrap();
+
+        let bare = Config::example();
+        let mut with_redirects = Config::example();
+        with_redirects.redirect_hosts = vec!["example.org".into(), "www.example.org".into()];
+
+        assert_eq!(base_group(&bare), base_group(&with_redirects));
+        assert_eq!(
+            groups(&with_redirects, &users),
+            vec![
+                vec![
+                    "art.example.org".to_string(),
+                    "compute.example.org".to_string(),
+                    "gate.example.org".to_string()
+                ],
+                vec!["example.org".to_string(), "www.example.org".to_string()],
+            ]
+        );
+        // No redirect hosts is no extra group, rather than an empty one that
+        // `group_key` would have to refuse.
+        assert_eq!(groups(&bare, &users).len(), 1);
     }
 
     /// Reconciling twice must order once. An `AcmeState` whose order failed is
