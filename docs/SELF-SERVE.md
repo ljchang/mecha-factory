@@ -41,7 +41,10 @@ Naming these first, because each is a thing somebody will reasonably propose:
   touches a browser either. The remaining win is real but narrow. Worth doing
   when `keys.rs` is being changed for another reason; not worth a rewrite of
   its own.
-- **No open signup on day one.** See "Handles are forever".
+- **No open signup on day one.** See "Handles are forever" — and note that day
+  one has passed: signup opened on 2026-08-16, bounded by the certificate
+  budget rather than by the operator's inbox. What follows is kept because it
+  is what the budget had to replace.
 - **No separate repository for the box.** Tempting, since a client has no use
   for the server's source. But `mecha-manifest` is the contract *both sides
   run* — the box derives the schema and validates submissions, home validates
@@ -246,6 +249,46 @@ Start invite-only: the operator mints an invite, the box emails it, the link
 carries the right to claim one handle. That is a flag and an extra row, not an
 architecture, and it can be relaxed the day squatting is worth handling
 properly.
+
+### What relaxing it looked like (2026-08-16)
+
+Open, and the operator is out of the middle: `GET /signup` takes an address,
+`POST /signup` mints the same invite row `factory invite create` mints, and the
+link lands on the same claim form. No new mechanism — the operator was removed
+from a path, not replaced by one.
+
+Two things had to arrive with it, and only one of them is about squatting:
+
+- **The certificate budget is the gate.** Every account is one Let's Encrypt
+  certificate, and the ceiling is 50 *new* ones per registered domain per week.
+  Invite-only was the only thing bounding that number, and uncapped signup does
+  not fail by admitting too many people — it fails by handing person 51 a
+  permanent handle whose hostnames cannot be issued, so their URLs die in the
+  TLS handshake for days with nothing in the flow to explain it. So the box
+  spends a budget of 40 a week (ten short, because the operator spends from the
+  same pool), counts it where the certificate is spent — accounts created in
+  the window plus invites still live enough to become one — and says *signups
+  are paused* when it is gone. Revoking a pending invite in `/admin` returns
+  its slot at once, since that certificate was never ordered.
+- **Three asks per address per day**, in `signup_budget`, the same day-and-hash
+  shape as `upload_budget`. Without it one host spends the week on forty
+  addresses it owns and every real person meets a paused page. It does not stop
+  somebody with a subnet, and nothing in process does; it stops the cheap
+  version, which is the honest scope of every limit here.
+
+Squatting is handled where it always was, by refusing names rather than by
+refusing people: `HELD_HANDLES` beside `RESERVED_HANDLES` in `config.rs`, one
+for names that read as the deployment speaking and one for names held back for
+a person or an organisation. Both refuse with the same words — which list a
+name is on is not a stranger's business, and saying "held" invites the
+negotiation the list exists to avoid. **Reserving is free until somebody
+claims a name, and never afterwards**, so that list is worth re-reading before
+the week's first forty rather than after.
+
+What did not change, and is the reason this was small: the claim form, the
+never-reissued handle ledger, the single-use token, the pairing code minted at
+the end, and the certificate reconciler noticing a new row within thirty
+seconds. A stranger's account is a row `user create` could have written.
 
 ## Certificates: the thing that actually gates this
 

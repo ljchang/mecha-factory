@@ -272,6 +272,11 @@ pub fn router(app: Shared) -> Router {
         )
         // Claiming a handle from an invite. Gate-only like the forms, and for
         // the same reason: server-rendered HTML that executes nothing.
+        // The bare path is the open door, and it must be declared beside the
+        // token routes rather than under them: `/signup` and `/signup/{token}`
+        // are different lengths, so nothing shadows anything — but a reader
+        // looking for "can anyone get in" should find the answer here.
+        .route("/signup", get(signup::ask_page).post(signup::ask))
         .route("/signup/{token}", get(signup::form).post(signup::submit))
         .route("/signup/{token}/{name}", get(signup::asset))
         // The tenant surface: a signed-in page carrying release authority —
@@ -481,6 +486,8 @@ async fn root(
          <li><a href=\"https://github.com/ljchang/mecha\">mecha on GitHub</a> \
          — the agent harness this is the public surface of.</li>\
          {docs}\
+         <li><a href=\"/signup\">Create an account</a> — an address, a link, \
+         and a handle of your own.</li>\
          <li><a href=\"/account\">Your page</a> — if one of the handles here \
          is yours.</li>\
          </ul>",

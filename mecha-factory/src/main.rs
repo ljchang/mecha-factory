@@ -650,6 +650,7 @@ fn sweep(cli: &Cli) -> Result<()> {
     let unuploaded = db.expire_unuploaded(&now)?;
     let orphans = store.orphan_sweep(&db)?;
     let budget_rows = db.expire_upload_budget(&now[..10.min(now.len())])?;
+    let signup_rows = db.expire_signup_budget(&now[..10.min(now.len())])?;
     let pairings = db.expire_pairings(&now)?;
     let sessions = db.expire_sessions(&now)?;
     println!("{unverified} unverified submission(s) past their link's expiry, removed");
@@ -657,9 +658,19 @@ fn sweep(cli: &Cli) -> Result<()> {
     println!("{unuploaded} verified submission(s) whose upload window closed, removed");
     println!("{orphans} attachment file(s) no ledger row claims, removed");
     println!("{budget_rows} spent upload-budget day(s), removed");
+    println!("{signup_rows} spent signup-budget day(s), removed");
     println!("{pairings} expired pairing code(s) nobody redeemed, removed");
     println!("{sessions} expired session(s) and sign-in link(s), removed");
-    if unverified + retained + unuploaded + orphans + budget_rows + pairings + sessions == 0 {
+    if unverified
+        + retained
+        + unuploaded
+        + orphans
+        + budget_rows
+        + signup_rows
+        + pairings
+        + sessions
+        == 0
+    {
         println!("(nothing was due)");
     }
     Ok(())

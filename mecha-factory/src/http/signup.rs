@@ -1,10 +1,34 @@
-//! Claiming a handle, from an invite link.
+//! Asking for an account, and claiming a handle from the link that answers.
 //!
 //! ```text
+//!   GET  /signup                    the address form: anyone may ask
+//!   POST /signup                    budget allowing, a link is mailed
 //!   GET  /signup/<token>            the claim form, if the invite is live
 //!   POST /signup/<token>            handle validated → the account exists
 //!   GET  /signup/<token>/form.css   the same stylesheet the forms use
 //! ```
+//!
+//! **Signup is open, and the thing that bounds it is certificates.** The two
+//! halves below are the operator-minted invite flow with the operator taken
+//! out of the middle: asking mints the same row `factory invite create` mints,
+//! mails the same link, and lands on the same claim form. What replaces the
+//! operator's judgement is not a smaller check — it is an arithmetic one.
+//!
+//! Every account costs a certificate. Let's Encrypt issues 50 **new**
+//! certificates per registered domain per week, refilling at one per 202
+//! minutes, and each active user's two hostnames are one of them
+//! (`certificates::user_group`). Renewals are exempt, so the ceiling is on
+//! *growth* and never on the deployment already running. Uncapped signup does
+//! not fail by letting too many people in; it fails by handing person 51 a
+//! permanent handle whose hostnames cannot be issued, so their URLs die in the
+//! TLS handshake, before the application, for days — and nothing in the flow
+//! they walked through would have said so.
+//!
+//! So the budget is the gate, and it is spent where the certificate is spent:
+//! accounts created this week, plus invites live enough to still become one.
+//! When it is gone the page says signups are paused and names the hour a slot
+//! frees. That is the failure this shape chooses — visible, temporary, and
+//! nobody's URLs broken.
 //!
 //! The signup endpoint ends by calling the same user-creation path the CLI
 //! does (`Db::invite_claim` → `create_user_in`), which is the promise `user
@@ -27,8 +51,10 @@
 //!   the link" into "this address was typed into a text field", which is the
 //!   difference between proof and claim.
 
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use std::net::SocketAddr;
+
+use axum::extract::{ConnectInfo, Path, State};
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Extension;
 
@@ -36,6 +62,346 @@ use super::intake::{form_values, page, shell};
 use super::{v1, Shared};
 use crate::config::{Origin, Role};
 use crate::db::Claim;
+
+/// New accounts a rolling week may create, out of Let's Encrypt's 50 new
+/// certificates per registered domain per week.
+///
+/// Ten short of the real ceiling on purpose. The margin is not timidity — it
+/// is what the operator spends: an invite minted by hand, a re-order after a
+/// failed validation, the base group the first time a redirect host is added.
+/// A budget set *at* the limit makes every one of those the thing that breaks
+/// somebody else's signup, and the person who finds out is the one whose
+/// handle has no certificate.
+const SIGNUPS_PER_WEEK: usize = 40;
+
+/// Days a spent slot stays spent — Let's Encrypt's window, not ours.
+const BUDGET_DAYS: i64 = 7;
+
+/// Asks one address may make in a day.
+///
+/// The week's budget is the resource worth defending, and the shape of the
+/// attack on it is one host asking forty times with forty addresses it
+/// controls: signups are then paused for a week and every real person is
+/// turned away by a page that says nothing is wrong. Three is room for a typo,
+/// a second household member, and a retry — and it makes spending the week
+/// take fourteen hosts rather than one.
+///
+/// It is not a defence against somebody with a subnet, and nothing in process
+/// can be. What it buys is that the cheap version of the attack stops working,
+/// which is the honest scope of every limit on this box (`ratelimit.rs`).
+const ASKS_PER_ADDRESS_PER_DAY: i64 = 3;
+
+/// What the week has already committed, and when the oldest of it frees.
+struct Budget {
+    spent: usize,
+    /// The earliest moment a slot comes back. `None` when nothing is spent.
+    frees_at: Option<String>,
+}
+
+impl Budget {
+    fn exhausted(&self) -> bool {
+        self.spent >= SIGNUPS_PER_WEEK
+    }
+}
+
+/// What this week has spent, counted where the certificate is spent.
+///
+/// Two things commit a certificate and they must not be double-counted: an
+/// account created in the window (its order went out when the row committed),
+/// and an invite still live enough to become one. A *claimed* invite is
+/// already counted as the user it became; an expired or revoked one never cost
+/// anything, which is what makes revoking a pending invite in `/admin` return
+/// its slot immediately rather than a week later.
+fn budget(app: &Shared, now: &str) -> anyhow::Result<Budget> {
+    let since = (chrono::Utc::now() - chrono::Duration::days(BUDGET_DAYS))
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    // Every timestamp is written by `db::now()` in the same RFC 3339 shape, to
+    // the same precision, always in UTC — so lexicographic order is
+    // chronological order, and this compares strings rather than parsing.
+    let mut spent: Vec<String> = app
+        .db
+        .users()?
+        .into_iter()
+        .map(|user| user.created_at)
+        .filter(|at| at.as_str() > since.as_str())
+        .collect();
+    spent.extend(
+        app.db
+            .invites()?
+            .into_iter()
+            .filter(|row| row.status(now) == "pending")
+            .map(|row| row.created_at)
+            .filter(|at| at.as_str() > since.as_str()),
+    );
+
+    let frees_at = spent
+        .iter()
+        .min()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| {
+            (at + chrono::Duration::days(BUDGET_DAYS))
+                .to_utc()
+                .format("%-d %B at %H:%M UTC")
+                .to_string()
+        });
+    Ok(Budget {
+        spent: spent.len(),
+        frees_at,
+    })
+}
+
+/// The page anyone who asks gets, whatever came of it.
+///
+/// **One set of bytes for every address**, exactly like the dead-invite page
+/// and for the same reason: whether an address already has an account, has
+/// already asked today, or has never been seen here is not something a form
+/// anybody can post to gets to answer. The mail is the only channel that
+/// distinguishes them, and it reaches the only person entitled to know.
+fn asked() -> Response {
+    page(
+        StatusCode::OK,
+        shell(
+            "Check your inbox",
+            "<h1>Check your inbox</h1>\
+             <p>If that address can have an account, a link to pick your \
+             handle is on its way. It works once, and it expires.</p>\
+             <p>Nothing else happens until you open it — and if no mail \
+             arrives, that address already has an account or has already \
+             asked today.</p>",
+            "/account/a/",
+        ),
+    )
+}
+
+/// The ask form. `error` is this page's whole state, as on the claim form.
+fn ask_form(attempted: &str, error: Option<&str>) -> Response {
+    let error_html = match error {
+        Some(text) => format!(
+            "<p role=\"alert\"><strong>{}</strong></p>",
+            mecha_manifest::escape_text(text)
+        ),
+        None => String::new(),
+    };
+    let body = format!(
+        "<h1>Create an account</h1>\
+         <p>Give an address and the box mails you a link. Open it, pick a \
+         handle, and your pages live at <code>&lt;handle&gt;.art.…</code> — \
+         with a certificate ordered the moment you claim it.</p>\
+         <p>The address is how you sign in afterwards, so use one you keep. \
+         There is no password to lose.</p>\
+         {error_html}\
+         <form method=\"post\" action=\"/signup\">\
+         <label for=\"email\">Email</label>\
+         <input id=\"email\" name=\"email\" type=\"email\" value=\"{attempted}\" \
+         required autocomplete=\"email\">\
+         <button type=\"submit\">Send me a link</button>\
+         </form>",
+        attempted = mecha_manifest::escape_text(attempted),
+    );
+    page(
+        if error.is_some() {
+            StatusCode::BAD_REQUEST
+        } else {
+            StatusCode::OK
+        },
+        shell("Create an account", &body, "/account/a/"),
+    )
+}
+
+/// Signups are paused, and the page says so rather than pretending.
+///
+/// A 503 with `Retry-After` because that is what this is: a temporary refusal
+/// by a box that is working. The alternative — accepting the ask and mailing a
+/// link to a handle that cannot be issued — moves the failure to the TLS
+/// handshake on somebody's permanent hostname, where no page can explain it.
+fn paused(budget: &Budget) -> Response {
+    let when = match &budget.frees_at {
+        Some(at) => format!(
+            " The next one frees on {}.",
+            mecha_manifest::escape_text(at)
+        ),
+        None => String::new(),
+    };
+    let mut response = page(
+        StatusCode::SERVICE_UNAVAILABLE,
+        shell(
+            "Signups are paused",
+            &format!(
+                "<h1>Signups are paused</h1>\
+                 <p>Every account here gets its own certificate, and the \
+                 issuing authority allows a fixed number of new ones each \
+                 week. This week's are spoken for.{when}</p>\
+                 <p>Nothing is wrong, and nothing is lost — come back and \
+                 ask again.</p>"
+            ),
+            "/account/a/",
+        ),
+    );
+    // An hour: the budget is a rolling window, so the honest answer is "later
+    // today" and never a precise second. Long enough that a retry loop is not
+    // the thing that empties the next slot.
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("3600"),
+    );
+    response
+}
+
+/// One address has asked enough for one day.
+fn too_many() -> Response {
+    let mut response = page(
+        StatusCode::TOO_MANY_REQUESTS,
+        shell(
+            "Too many requests",
+            "<h1>Too many requests</h1>\
+             <p>This connection has asked for an account several times today, \
+             so the rest of today's asks are refused. If a link was sent \
+             earlier, it is still good.</p>\
+             <p>Try again tomorrow.</p>",
+            "/account/a/",
+        ),
+    );
+    response.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        HeaderValue::from_static("3600"),
+    );
+    response
+}
+
+/// `GET /signup` — the way in for somebody who has no link.
+pub async fn ask_page(State(app): State<Shared>, Extension(origin): Extension<Origin>) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    // The budget is read here too, so a paused week is visible before anyone
+    // types an address rather than after.
+    match budget(&app, &crate::db::now()) {
+        Ok(budget) if budget.exhausted() => paused(&budget),
+        Ok(_) => ask_form("", None),
+        Err(e) => {
+            tracing::error!(error = %e, "reading the signup budget");
+            super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
+
+/// `POST /signup` — mint this address its own invite, budget allowing.
+pub async fn ask(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    body: String,
+) -> Response {
+    if v1::not_on_gate(&origin).is_some() {
+        return nothing_here();
+    }
+    let email = form_values(&body)
+        .get("email")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    // Their own typing, so this one *is* told back to them — it says nothing
+    // about any address but the one they just wrote.
+    if email.is_empty() || !email.contains('@') {
+        return ask_form(&email, Some("That does not look like an email address"));
+    }
+
+    let now = crate::db::now();
+    let budget = match budget(&app, &now) {
+        Ok(budget) => budget,
+        Err(e) => {
+            tracing::error!(error = %e, "reading the signup budget");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+    if budget.exhausted() {
+        tracing::info!(spent = budget.spent, "a signup arrived on a spent budget");
+        return paused(&budget);
+    }
+
+    // The week's budget is checked before this one so that a paused week is
+    // reported as paused and costs the visitor nothing — being turned away by
+    // an exhausted box should not also spend their own day's allowance.
+    //
+    // Hashed like the upload budget's, and for the same reason: the count is
+    // what bounds abuse, and keeping the address itself would be a log of who
+    // considered signing up.
+    let ip_hash = crate::intake::hash_token(&peer.ip().to_string());
+    let today = crate::db::today();
+    match app.db.signup_asks_today(&ip_hash, &today) {
+        // Told plainly rather than hidden behind the "check your inbox" page.
+        // This says something about the visitor's own address, which they
+        // already know — the rule that keeps the page silent is about *other*
+        // people's addresses, and a person on a shared connection deserves to
+        // know why no mail is coming.
+        Ok(asks) if asks >= ASKS_PER_ADDRESS_PER_DAY => {
+            tracing::info!(asks, "signup asks from one address hit the daily cap");
+            return too_many();
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "reading the per-address signup budget");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    }
+    if let Err(e) = app.db.signup_ask_add(&ip_hash, &today) {
+        // Counted before the outcome is known, and a failure to count is a
+        // refusal rather than a free ask: an uncountable budget is not a
+        // budget, and the visitor can try again.
+        tracing::error!(error = %e, "counting a signup ask");
+        return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+            .into_response();
+    }
+
+    // Everything past here answers with the same page, so the order of these
+    // checks is invisible from outside — which is the point. Both are refusals
+    // about *this address*, and an address is exactly what a stranger posting
+    // this form is trying to learn about.
+    let taken = match app.db.users_by_email(&email) {
+        Ok(users) => !users.is_empty(),
+        Err(e) => {
+            tracing::error!(error = %e, "reading accounts for a signup");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+    let asked_today = match app.db.invites() {
+        Ok(invites) => {
+            let today = crate::db::today();
+            invites.iter().any(|row| {
+                row.email.eq_ignore_ascii_case(&email) && row.created_at.starts_with(&today)
+            })
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "reading invites for a signup");
+            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
+                .into_response();
+        }
+    };
+    if taken || asked_today {
+        // Logged, because the page cannot say it: an address hammering this
+        // form is worth seeing in the journal.
+        tracing::info!(taken, asked_today, "a signup asked for nothing new");
+        return asked();
+    }
+
+    match v1::mint_invite(&app, &email, "self-serve") {
+        Ok(_) => asked(),
+        // Refused for shape after we already checked it, or the ledger is
+        // unavailable. Neither is the visitor's problem to solve, and the
+        // second must not be reported as success.
+        Err(v1::InviteRefused::BadAddress) => {
+            ask_form(&email, Some("That does not look like an email address"))
+        }
+        Err(v1::InviteRefused::Unavailable) => {
+            super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
+}
 
 /// One page for every kind of dead invite. Bytes-identical on purpose.
 fn nothing_here() -> Response {

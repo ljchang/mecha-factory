@@ -26,7 +26,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
-const SCHEMA: i64 = 13;
+///
+/// 14 adds `signup_budget`, which the additive `IF NOT EXISTS` batch creates
+/// on its own — the bump is what makes an existing ledger run that batch.
+const SCHEMA: i64 = 14;
 
 #[derive(Clone)]
 pub struct Db {
@@ -2649,6 +2652,44 @@ impl Db {
         })
     }
 
+    /// Signup asks from this address today.
+    pub fn signup_asks_today(&self, ip_hash: &str, day: &str) -> Result<i64> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT asks FROM signup_budget WHERE day = ?1 AND ip_hash = ?2",
+                    params![day, ip_hash],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .unwrap_or(0))
+        })
+    }
+
+    /// Count one ask against this address's day.
+    ///
+    /// Counted whatever came of it — a repeated address, an account that
+    /// already exists, an invite that went out. The budget bounds *asking*,
+    /// because the alternative is a counter a prober can avoid incrementing by
+    /// choosing addresses that refuse, which is the same as no counter at all.
+    pub fn signup_ask_add(&self, ip_hash: &str, day: &str) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO signup_budget (day, ip_hash, asks) VALUES (?1, ?2, 1) \
+                 ON CONFLICT (day, ip_hash) DO UPDATE SET asks = asks + 1",
+                params![day, ip_hash],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Drop signup-budget rows for days gone by.
+    pub fn expire_signup_budget(&self, today: &str) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute("DELETE FROM signup_budget WHERE day < ?1", params![today])?)
+        })
+    }
+
     // ---- intake ---------------------------------------------------------
 
     /// Store a submission awaiting verification.
@@ -3258,6 +3299,17 @@ fn migrate(conn: &Connection) -> Result<()> {
             day     TEXT NOT NULL,
             ip_hash TEXT NOT NULL,
             bytes   INTEGER NOT NULL,
+            PRIMARY KEY (day, ip_hash)
+        );
+
+        -- Signup asks per address per day, the same shape and the same
+        -- privacy: a hash, so the count survives without the ledger keeping a
+        -- record of who looked. The week's certificate budget is the ceiling
+        -- this defends — one host must not be able to spend it alone.
+        CREATE TABLE IF NOT EXISTS signup_budget (
+            day     TEXT NOT NULL,
+            ip_hash TEXT NOT NULL,
+            asks    INTEGER NOT NULL,
             PRIMARY KEY (day, ip_hash)
         );
 

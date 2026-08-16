@@ -21,8 +21,9 @@ A factory is where machines are built and shipped from — and it is deliberatel
 > through self-serve: the manifest, the bundle store, the vendoring gate, the
 > notebook path, the MCP surface, **the server** — three origins, scoped keys,
 > SQLite, ACME — the inbound half (the public form, magic-link verification
-> over SES, the queue home drains), and **self-serve** end to end: invites,
-> handle claims, pairing, per-user certificates, the tenant page, the operator
+> over SES, the queue home drains), and **self-serve** end to end: open signup
+> bounded by the week's certificate budget, handle claims, pairing, per-user
+> certificates, the tenant page, the operator
 > surface. [`docs/SELF-SERVE.md`](docs/SELF-SERVE.md) records that arc;
 > [`docs/SECOND-CLIENT.md`](docs/SECOND-CLIENT.md) is the path for an MCP
 > client that is not mecha.

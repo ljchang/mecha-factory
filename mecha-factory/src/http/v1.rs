@@ -1644,7 +1644,10 @@ pub(crate) fn mint_invite(
     };
     let link = format!("{}/signup/{token}", app.config.base_url(Role::Gate));
     app.mailer.send_invite(&email, &link);
-    tracing::info!(invite = %row.id, "operator minted an invite");
+    // The note says where it came from, which now matters: this same function
+    // serves the operator's `/admin` form and the open signup page, and
+    // "operator minted an invite" would be a lie on half the calls.
+    tracing::info!(invite = %row.id, %note, "invite minted");
     Ok(MintedInvite {
         id: row.id,
         link,

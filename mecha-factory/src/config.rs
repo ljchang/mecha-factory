@@ -105,6 +105,62 @@ const RESERVED_HANDLES: &[&str] = &[
     // handle would serve at `docs.<artifacts-origin>`, which is close enough to
     // read as ours — and reserving it is only free before the first signup.
     "docs",
+    // Names that read as the deployment speaking rather than a tenant. A
+    // stranger publishing at `security.art.…` or `billing.art.…` is phishing
+    // with our own domain, and the handle is permanent — so this list is
+    // cheapest now and costs a name off somebody later.
+    "root",
+    "operator",
+    "staff",
+    "team",
+    "official",
+    "system",
+    "billing",
+    "legal",
+    "contact",
+    "info",
+    "news",
+    "signup",
+    "signin",
+    "register",
+    "account",
+    "accounts",
+    "settings",
+    "hangar",
+    "art",
+    "compute",
+    "artifacts",
+];
+
+/// Handles held back for a person or an organisation rather than for the
+/// machinery — the names open signup would otherwise lose in its first week.
+///
+/// Separate from [`RESERVED_HANDLES`] because the two are refused for
+/// different reasons and get relaxed on different days: an infrastructure name
+/// is never issuable, while any of these may be handed out by an operator who
+/// decides the right person is asking. Held in one place so that decision is
+/// an edit to a list rather than an argument with a stranger who got there
+/// first.
+const HELD_HANDLES: &[&str] = &[
+    "luke",
+    "lukechang",
+    "chang",
+    "cosanlab",
+    "cim",
+    "pbs",
+    "dartmouthpbs",
+    "dartmouth",
+    // Family. Held rather than claimed, so the name is there if any of them
+    // ever wants it and gone to nobody else in the meantime.
+    "edie",
+    "josephine",
+    "eunice",
+    "anthropic",
+    "claude",
+    "openai",
+    "google",
+    "microsoft",
+    "github",
 ];
 
 /// A handle is a DNS label, so the rule is DNS's and not ours.
@@ -129,7 +185,10 @@ pub fn valid_handle(handle: &str) -> anyhow::Result<()> {
     if handle.len() > 4 && handle[2..4] == *"--" {
         anyhow::bail!("`{handle}` looks like a punycode label, which is reserved");
     }
-    if RESERVED_HANDLES.contains(&handle) {
+    // One message for both lists. Which list a name is on is the operator's
+    // business, and telling a stranger "held" rather than "reserved" would
+    // invite the negotiation the lists exist to avoid.
+    if RESERVED_HANDLES.contains(&handle) || HELD_HANDLES.contains(&handle) {
         anyhow::bail!("`{handle}` is reserved");
     }
     Ok(())
@@ -607,6 +666,47 @@ mod tests {
             &"a".repeat(64),
         ] {
             assert!(valid_handle(bad).is_err(), "`{bad}` was accepted");
+        }
+        // Names held for a person or an organisation are refused the same way,
+        // and with the same words — which list a name is on is not a
+        // stranger's business.
+        for held in ["luke", "cosanlab", "dartmouth", "anthropic"] {
+            let refusal = valid_handle(held).unwrap_err().to_string();
+            assert!(refusal.contains("reserved"), "{held}: {refusal}");
+        }
+    }
+
+    /// A held name has to be spelled the way a handle is spelled, or it holds
+    /// nothing.
+    ///
+    /// The list is written by hand from names people say out loud — "Cosanlab",
+    /// "Chang" — and a capitalised entry can never match, because every handle
+    /// reaching [`valid_handle`] has already been lowercased. It would sit in
+    /// the list looking protected while the name stayed free, and the way that
+    /// gets discovered is somebody claiming it permanently. Same for a space or
+    /// an underscore.
+    ///
+    /// `RESERVED_HANDLES` is deliberately not checked: `_acme-challenge` is not
+    /// a legal handle *shape*, and it is in that list precisely because the
+    /// name matters to something other than handles.
+    #[test]
+    fn every_held_name_is_a_name_a_handle_could_have_been() {
+        for held in HELD_HANDLES {
+            assert_eq!(
+                *held,
+                held.to_ascii_lowercase(),
+                "`{held}` is held in a spelling no handle can take, so it holds nothing"
+            );
+            assert!(
+                !held.is_empty()
+                    && held.len() <= 63
+                    && held
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+                    && !held.starts_with('-')
+                    && !held.ends_with('-'),
+                "`{held}` is not a legal DNS label, so no claim could ever collide with it"
+            );
         }
     }
 

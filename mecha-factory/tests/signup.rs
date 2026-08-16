@@ -198,6 +198,195 @@ fn signup_answers_only_on_the_gate() {
     assert_eq!(elsewhere.status, 404, "{}", elsewhere.head);
 }
 
+/// The open door, end to end: an address nobody vouched for becomes an
+/// account, through the same rows and the same claim form an operator-minted
+/// invite goes through.
+///
+/// This is the whole of "anybody may create an account", and it is one test
+/// because it is one mechanism — asking mints the invite the operator would
+/// have minted, and everything after that is covered by the tests above.
+#[test]
+fn anybody_may_ask_and_the_link_becomes_an_account() {
+    let server = common::start();
+
+    let form = get(&server, "/signup");
+    assert_eq!(form.status, 200, "{}", form.head);
+    assert!(form.body.contains("Create an account"), "{}", form.body);
+
+    let asked = post(&server, "/signup", "email=casey%40example.org");
+    assert_eq!(asked.status, 200, "{}", asked.body);
+    assert!(asked.body.contains("Check your inbox"), "{}", asked.body);
+    assert_eq!(server.sent_links(), 1, "a link should have been mailed");
+
+    // The mailed link is an ordinary invite link, and it claims an ordinary
+    // account.
+    let token = server.verification_token();
+    let done = post(&server, &format!("/signup/{token}"), "handle=casey");
+    assert_eq!(done.status, 200, "{}", done.body);
+    let user = server.db.user_by_handle("casey").unwrap().unwrap();
+    assert_eq!(user.email, "casey@example.org");
+    assert!(user.active());
+
+    // The operator's panel can see where it came from, which is the one thing
+    // a self-serve invite carries that a minted one does not.
+    let rows = server.db.invites().unwrap();
+    let row = rows
+        .iter()
+        .find(|r| r.email == "casey@example.org")
+        .unwrap();
+    assert_eq!(row.note, "self-serve");
+}
+
+/// An address that already has an account, and an address that already asked
+/// today, get the page a brand-new address gets — the same bytes — and no
+/// second mail.
+///
+/// The form is unauthenticated and anyone may post to it, so a page that
+/// varied would be a membership oracle for every address somebody cares to
+/// type. Asserted on the body and not just the status, because equal statuses
+/// with different words would leak just as well.
+#[test]
+fn the_ask_page_never_says_whether_an_address_is_known() {
+    let server = common::start();
+
+    let fresh = post(&server, "/signup", "email=casey%40example.org");
+    assert_eq!(server.sent_links(), 1);
+
+    // The same address again: already asked today.
+    let again = post(&server, "/signup", "email=casey%40example.org");
+    assert_eq!(again.status, fresh.status);
+    assert_eq!(again.body, fresh.body, "a repeat ask was distinguishable");
+    assert_eq!(server.sent_links(), 1, "a repeat ask must not mail again");
+
+    // An address that already holds an account — the server's own user.
+    let existing = format!("email={}", server.user.email.replace('@', "%40"));
+    let known = post(&server, "/signup", &existing);
+    assert_eq!(known.status, fresh.status);
+    assert_eq!(
+        known.body, fresh.body,
+        "a known address was distinguishable"
+    );
+    assert_eq!(server.sent_links(), 1, "a known address must not be mailed");
+}
+
+/// The week's certificate budget is the gate, and when it is spent the page
+/// says so instead of minting an invite for a handle that cannot be issued.
+///
+/// The failure this prevents is the one nobody sees coming: Let's Encrypt
+/// refuses the 51st new certificate of the week, and the person who claimed
+/// that handle has permanent hostnames that die in the TLS handshake — before
+/// the application, so no page of ours can explain it.
+#[test]
+fn a_spent_week_pauses_signups_instead_of_overspending() {
+    let server = common::start();
+    // Forty between them, which is the week. Pending invites count beside
+    // accounts because each one is a certificate not yet ordered — and the
+    // harness's own `alice`, created before the window, deliberately counts
+    // for nothing: last week's certificate is already paid for.
+    let now = mecha_factory::db::now();
+    for n in 0..31 {
+        server
+            .db
+            .user_create(&format!("u{n}"), &format!("u{n}@example.org"), &now)
+            .unwrap();
+    }
+    for n in 0..9 {
+        // Minted *now*, unlike `invite` above: a row created outside the
+        // rolling window is a certificate last week already paid for, and the
+        // budget deliberately does not count it.
+        server
+            .db
+            .invite_create(
+                &format!("pending{n}@example.org"),
+                "test",
+                &hash_token(&mint_token()),
+                &now,
+                "2027-01-01T00:00:00Z",
+            )
+            .unwrap();
+    }
+
+    let asked = post(&server, "/signup", "email=casey%40example.org");
+    assert_eq!(asked.status, 503, "{}", asked.head);
+    assert!(asked.body.contains("Signups are paused"), "{}", asked.body);
+    assert!(
+        asked.head.to_lowercase().contains("retry-after"),
+        "a temporary refusal must say when: {}",
+        asked.head
+    );
+    assert_eq!(server.sent_links(), 0, "a paused week must mail nothing");
+
+    // And the form itself says so, rather than taking an address it can do
+    // nothing with.
+    let form = get(&server, "/signup");
+    assert_eq!(form.status, 503, "{}", form.head);
+
+    // Revoking a pending invite returns its slot at once — the certificate it
+    // stood for was never ordered.
+    let pending = server
+        .db
+        .invites()
+        .unwrap()
+        .into_iter()
+        .find(|r| r.email.starts_with("pending"))
+        .unwrap();
+    assert!(server.db.invite_revoke(&pending.id, &now).unwrap());
+    let after = post(&server, "/signup", "email=casey%40example.org");
+    assert_eq!(after.status, 200, "{}", after.body);
+    assert_eq!(server.sent_links(), 1);
+}
+
+/// One connection may ask a few times a day and no more, so a single host
+/// cannot spend the week's budget on addresses it owns.
+///
+/// Told plainly, unlike the address checks above: this is a fact about the
+/// asker's own connection, and a person behind a shared address who is never
+/// going to get mail deserves to know why.
+#[test]
+fn one_address_may_only_ask_so_often() {
+    let server = common::start();
+    for n in 0..3 {
+        let reply = post(&server, "/signup", &format!("email=a{n}%40example.org"));
+        assert_eq!(reply.status, 200, "ask {n}: {}", reply.head);
+    }
+    assert_eq!(server.sent_links(), 3);
+
+    let refused = post(&server, "/signup", "email=a3%40example.org");
+    assert_eq!(refused.status, 429, "{}", refused.head);
+    assert!(
+        refused.body.contains("Too many requests"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(server.sent_links(), 3, "a refused ask must mail nothing");
+}
+
+/// A typo is the asker's own business and is told back to them; nothing about
+/// it spends the day's asks.
+#[test]
+fn a_malformed_address_is_a_form_error_and_not_a_spent_ask() {
+    let server = common::start();
+    let bad = post(&server, "/signup", "email=not-an-address");
+    assert_eq!(bad.status, 400, "{}", bad.head);
+    assert!(bad.body.contains("email address"), "{}", bad.body);
+
+    // All three real asks are still available afterwards.
+    for n in 0..3 {
+        let reply = post(&server, "/signup", &format!("email=b{n}%40example.org"));
+        assert_eq!(reply.status, 200, "ask {n}: {}", reply.head);
+    }
+    assert_eq!(server.sent_links(), 3);
+}
+
+/// The ask routes are the gate's, like the claim routes beside them.
+#[test]
+fn asking_answers_only_on_the_gate() {
+    let server = common::start();
+    let elsewhere =
+        Request::new("GET", "/signup", server.host(server.artifacts)).send(server.artifacts);
+    assert_eq!(elsewhere.status, 404, "{}", elsewhere.head);
+}
+
 /// The store-level race arm the HTTP tests cannot reach: a claim whose
 /// handle check and insert must be one transaction, and a dead invite told
 /// apart from a taken handle without matching on error text.
