@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// 14 adds `signup_budget`, which the additive `IF NOT EXISTS` batch creates
 /// on its own — the bump is what makes an existing ledger run that batch.
-const SCHEMA: i64 = 14;
+const SCHEMA: i64 = 15;
 
 #[derive(Clone)]
 pub struct Db {
@@ -91,6 +91,14 @@ impl UserRow {
     pub fn active(&self) -> bool {
         self.status == "active"
     }
+}
+
+/// A pending signup request as the panel sees it.
+#[derive(Debug, Clone)]
+pub struct AskRow {
+    pub id: String,
+    pub email: String,
+    pub created_at: String,
 }
 
 /// One minted right to claim a handle, in whatever state it has reached.
@@ -704,6 +712,66 @@ impl Db {
             )?;
             let rows = stmt.query_map(params![email.trim()], user_row)?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    // ---- signup asks ----------------------------------------------------
+
+    /// A stranger's request to exist here, waiting for the operator.
+    ///
+    /// One pending row per address: a second ask while the first waits is
+    /// the same person refreshing, not a second decision to make, so it
+    /// lands on the existing row. A *decided* address may ask again — a
+    /// denial is "not this time", and re-asking after one is the honest
+    /// path back in.
+    pub fn ask_create(&self, email: &str, now: &str) -> Result<String> {
+        let id = crate::keys::random_id();
+        self.with(|conn| {
+            let existing: Option<String> = conn
+                .query_row(
+                    "SELECT id FROM signup_asks                      WHERE LOWER(email) = LOWER(?1) AND status = 'pending'",
+                    params![email.trim()],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(id) = existing {
+                return Ok(id);
+            }
+            conn.execute(
+                "INSERT INTO signup_asks (id, email, created_at) VALUES (?1, ?2, ?3)",
+                params![id, email.trim(), now],
+            )?;
+            Ok(id)
+        })
+    }
+
+    pub fn asks_pending(&self) -> Result<Vec<AskRow>> {
+        self.with(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, email, created_at FROM signup_asks                  WHERE status = 'pending' ORDER BY created_at",
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok(AskRow {
+                    id: r.get(0)?,
+                    email: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+    }
+
+    /// Decide a pending ask. Only `pending` rows move — deciding twice, or
+    /// deciding a row the other button already took, is a no-op that returns
+    /// false rather than a second outcome.
+    pub fn ask_decide(&self, id: &str, status: &str, now: &str) -> Result<bool> {
+        debug_assert!(status == "approved" || status == "denied");
+        self.with(|conn| {
+            let n = conn.execute(
+                "UPDATE signup_asks SET status = ?2, decided_at = ?3                  WHERE id = ?1 AND status = 'pending'",
+                params![id, status, now],
+            )?;
+            Ok(n > 0)
         })
     }
 
@@ -3326,6 +3394,19 @@ fn migrate(conn: &Connection) -> Result<()> {
         -- the verification tokens; the row outlives every state it passes
         -- through, because who was invited and what became of it is the
         -- operator's record.
+        -- A stranger asking to exist here. Costs nothing when it lands --
+        -- the certificate budget is spent at approval, when an invite is
+        -- minted from it -- and the row outlives its decision for the same
+        -- reason an invite row does: who asked and what the operator did
+        -- is the operator's record. Status: pending | approved | denied.
+        CREATE TABLE IF NOT EXISTS signup_asks (
+            id          TEXT PRIMARY KEY,
+            email       TEXT NOT NULL,
+            created_at  TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            decided_at  TEXT
+        );
+
         CREATE TABLE IF NOT EXISTS invites (
             id          TEXT PRIMARY KEY,
             email       TEXT NOT NULL,

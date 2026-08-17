@@ -2,33 +2,31 @@
 //!
 //! ```text
 //!   GET  /signup                    the address form: anyone may ask
-//!   POST /signup                    budget allowing, a link is mailed
+//!   POST /signup                    the ask becomes a pending request
 //!   GET  /signup/<token>            the claim form, if the invite is live
 //!   POST /signup/<token>            handle validated → the account exists
 //!   GET  /signup/<token>/form.css   the same stylesheet the forms use
 //! ```
 //!
-//! **Signup is open, and the thing that bounds it is certificates.** The two
-//! halves below are the operator-minted invite flow with the operator taken
-//! out of the middle: asking mints the same row `factory invite create` mints,
-//! mails the same link, and lands on the same claim form. What replaces the
-//! operator's judgement is not a smaller check — it is an arithmetic one.
+//! **Asking is free; approving is what spends.** An ask files a
+//! `signup_asks` row and nothing else — no invite, no mail, no certificate.
+//! The operator decides on `/admin`, where the budget is in view: approving
+//! mints the same row `factory invite create` mints and mails the same
+//! link; denying closes the row and mails nothing. (This replaced an
+//! operator-less design, 2026-08-17, on the operator's call: the arithmetic
+//! gate alone meant forty burner addresses could spend the week's
+//! certificates and pause signups for everyone. Under approval, that attack
+//! fills a queue the operator bulk-denies, and the budget never moves.)
 //!
-//! Every account costs a certificate. Let's Encrypt issues 50 **new**
+//! Every *approval* costs a certificate. Let's Encrypt issues 50 **new**
 //! certificates per registered domain per week, refilling at one per 202
 //! minutes, and each active user's two hostnames are one of them
 //! (`certificates::user_group`). Renewals are exempt, so the ceiling is on
-//! *growth* and never on the deployment already running. Uncapped signup does
-//! not fail by letting too many people in; it fails by handing person 51 a
-//! permanent handle whose hostnames cannot be issued, so their URLs die in the
-//! TLS handshake, before the application, for days — and nothing in the flow
-//! they walked through would have said so.
-//!
-//! So the budget is the gate, and it is spent where the certificate is spent:
-//! accounts created this week, plus invites live enough to still become one.
-//! When it is gone the page says signups are paused and names the hour a slot
-//! frees. That is the failure this shape chooses — visible, temporary, and
-//! nobody's URLs broken.
+//! *growth* and never on the deployment already running. The budget is
+//! enforced where the certificate is spent — the panel refuses an approval
+//! on a spent week and names the hour a slot frees — and counted the same
+//! way it always was: accounts created this week, plus invites live enough
+//! to still become one. A pending ask counts nothing.
 //!
 //! The signup endpoint ends by calling the same user-creation path the CLI
 //! does (`Db::invite_claim` → `create_user_in`), which is the promise `user
@@ -72,7 +70,7 @@ use crate::db::Claim;
 /// A budget set *at* the limit makes every one of those the thing that breaks
 /// somebody else's signup, and the person who finds out is the one whose
 /// handle has no certificate.
-const SIGNUPS_PER_WEEK: usize = 40;
+pub(crate) const SIGNUPS_PER_WEEK: usize = 40;
 
 /// Days a spent slot stays spent — Let's Encrypt's window, not ours.
 const BUDGET_DAYS: i64 = 7;
@@ -92,15 +90,22 @@ const BUDGET_DAYS: i64 = 7;
 const ASKS_PER_ADDRESS_PER_DAY: i64 = 3;
 
 /// What the week has already committed, and when the oldest of it frees.
-struct Budget {
-    spent: usize,
+pub(crate) struct Budget {
+    pub(crate) spent: usize,
+    /// The half of `spent` that is accounts created in the window.
+    pub(crate) accounts: usize,
+    /// The half that is invites still live enough to become one.
+    pub(crate) invites: usize,
     /// The earliest moment a slot comes back. `None` when nothing is spent.
-    frees_at: Option<String>,
+    pub(crate) frees_at: Option<String>,
 }
 
 impl Budget {
-    fn exhausted(&self) -> bool {
+    pub(crate) fn exhausted(&self) -> bool {
         self.spent >= SIGNUPS_PER_WEEK
+    }
+    pub(crate) fn free(&self) -> usize {
+        SIGNUPS_PER_WEEK.saturating_sub(self.spent)
     }
 }
 
@@ -112,7 +117,7 @@ impl Budget {
 /// already counted as the user it became; an expired or revoked one never cost
 /// anything, which is what makes revoking a pending invite in `/admin` return
 /// its slot immediately rather than a week later.
-fn budget(app: &Shared, now: &str) -> anyhow::Result<Budget> {
+pub(crate) fn budget(app: &Shared, now: &str) -> anyhow::Result<Budget> {
     let since = (chrono::Utc::now() - chrono::Duration::days(BUDGET_DAYS))
         .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -126,6 +131,7 @@ fn budget(app: &Shared, now: &str) -> anyhow::Result<Budget> {
         .map(|user| user.created_at)
         .filter(|at| at.as_str() > since.as_str())
         .collect();
+    let accounts = spent.len();
     spent.extend(
         app.db
             .invites()?
@@ -146,6 +152,8 @@ fn budget(app: &Shared, now: &str) -> anyhow::Result<Budget> {
                 .to_string()
         });
     Ok(Budget {
+        accounts,
+        invites: spent.len() - accounts,
         spent: spent.len(),
         frees_at,
     })
@@ -162,13 +170,13 @@ fn asked() -> Response {
     page(
         StatusCode::OK,
         shell(
-            "Check your inbox",
-            "<h1>Check your inbox</h1>\
-             <p>If that address can have an account, a link to pick your \
-             handle is on its way. It works once, and it expires.</p>\
-             <p>Nothing else happens until you open it — and if no mail \
-             arrives, that address already has an account or has already \
-             asked today.</p>",
+            "Request received",
+            "<h1>Request received</h1>\
+             <p>Account requests are reviewed by a person. If yours is \
+             approved, a link to pick your handle arrives by email — it \
+             works once, and it expires.</p>\
+             <p>There is nothing to do until then. If that address already \
+             has an account, no mail will come; sign in instead.</p>",
             "/account/a/",
         ),
     )
@@ -185,7 +193,8 @@ fn ask_form(attempted: &str, error: Option<&str>) -> Response {
     };
     let body = format!(
         "<h1>Create an account</h1>\
-         <p>Give an address and the box mails you a link. Open it, pick a \
+         <p>Give an address and ask. Requests are reviewed by a person; if \
+         yours is approved, the box mails you a link. Open it, pick a \
          handle, and your pages live at <code>&lt;handle&gt;.art.…</code> — \
          with a certificate ordered the moment you claim it.</p>\
          <p>The address is how you sign in afterwards, so use one you keep. \
@@ -207,45 +216,6 @@ fn ask_form(attempted: &str, error: Option<&str>) -> Response {
         },
         shell("Create an account", &body, "/account/a/"),
     )
-}
-
-/// Signups are paused, and the page says so rather than pretending.
-///
-/// A 503 with `Retry-After` because that is what this is: a temporary refusal
-/// by a box that is working. The alternative — accepting the ask and mailing a
-/// link to a handle that cannot be issued — moves the failure to the TLS
-/// handshake on somebody's permanent hostname, where no page can explain it.
-fn paused(budget: &Budget) -> Response {
-    let when = match &budget.frees_at {
-        Some(at) => format!(
-            " The next one frees on {}.",
-            mecha_manifest::escape_text(at)
-        ),
-        None => String::new(),
-    };
-    let mut response = page(
-        StatusCode::SERVICE_UNAVAILABLE,
-        shell(
-            "Signups are paused",
-            &format!(
-                "<h1>Signups are paused</h1>\
-                 <p>Every account here gets its own certificate, and the \
-                 issuing authority allows a fixed number of new ones each \
-                 week. This week's are spoken for.{when}</p>\
-                 <p>Nothing is wrong, and nothing is lost — come back and \
-                 ask again.</p>"
-            ),
-            "/account/a/",
-        ),
-    );
-    // An hour: the budget is a rolling window, so the honest answer is "later
-    // today" and never a precise second. Long enough that a retry loop is not
-    // the thing that empties the next slot.
-    response.headers_mut().insert(
-        axum::http::header::RETRY_AFTER,
-        HeaderValue::from_static("3600"),
-    );
-    response
 }
 
 /// One address has asked enough for one day.
@@ -270,20 +240,18 @@ fn too_many() -> Response {
 }
 
 /// `GET /signup` — the way in for somebody who has no link.
-pub async fn ask_page(State(app): State<Shared>, Extension(origin): Extension<Origin>) -> Response {
+pub async fn ask_page(
+    State(_app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+) -> Response {
     if v1::not_on_gate(&origin).is_some() {
         return nothing_here();
     }
-    // The budget is read here too, so a paused week is visible before anyone
-    // types an address rather than after.
-    match budget(&app, &crate::db::now()) {
-        Ok(budget) if budget.exhausted() => paused(&budget),
-        Ok(_) => ask_form("", None),
-        Err(e) => {
-            tracing::error!(error = %e, "reading the signup budget");
-            super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
-        }
-    }
+    // Asking costs nothing — the certificate budget is spent at approval,
+    // on the panel, where the operator can see it. So there is no paused
+    // page here: a spent week queues requests instead of turning real
+    // people away with a page that says nothing is wrong.
+    ask_form("", None)
 }
 
 /// `POST /signup` — mint this address its own invite, budget allowing.
@@ -309,18 +277,6 @@ pub async fn ask(
     }
 
     let now = crate::db::now();
-    let budget = match budget(&app, &now) {
-        Ok(budget) => budget,
-        Err(e) => {
-            tracing::error!(error = %e, "reading the signup budget");
-            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
-        }
-    };
-    if budget.exhausted() {
-        tracing::info!(spent = budget.spent, "a signup arrived on a spent budget");
-        return paused(&budget);
-    }
 
     // The week's budget is checked before this one so that a paused week is
     // reported as paused and costs the visitor nothing — being turned away by
@@ -369,35 +325,20 @@ pub async fn ask(
                 .into_response();
         }
     };
-    let asked_today = match app.db.invites() {
-        Ok(invites) => {
-            let today = crate::db::today();
-            invites.iter().any(|row| {
-                row.email.eq_ignore_ascii_case(&email) && row.created_at.starts_with(&today)
-            })
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "reading invites for a signup");
-            return super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable")
-                .into_response();
-        }
-    };
-    if taken || asked_today {
+    if taken {
         // Logged, because the page cannot say it: an address hammering this
         // form is worth seeing in the journal.
-        tracing::info!(taken, asked_today, "a signup asked for nothing new");
+        tracing::info!(taken, "a signup asked for an address that has an account");
         return asked();
     }
 
-    match v1::mint_invite(&app, &email, "self-serve") {
+    // Everyone else becomes a pending request the operator decides on the
+    // panel. `ask_create` folds a repeat ask into the existing pending row,
+    // so refreshing the form is not a way to fill the queue.
+    match app.db.ask_create(&email, &now) {
         Ok(_) => asked(),
-        // Refused for shape after we already checked it, or the ledger is
-        // unavailable. Neither is the visitor's problem to solve, and the
-        // second must not be reported as success.
-        Err(v1::InviteRefused::BadAddress) => {
-            ask_form(&email, Some("That does not look like an email address"))
-        }
-        Err(v1::InviteRefused::Unavailable) => {
+        Err(e) => {
+            tracing::error!(error = %e, "filing a signup request");
             super::Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
         }
     }

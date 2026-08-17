@@ -177,6 +177,8 @@ pub fn router(app: Shared) -> Router {
         )
         .route("/admin/signout", post(admin::signout))
         .route("/admin/status", post(admin::status))
+        .route("/admin/ask-approve", post(admin::ask_approve))
+        .route("/admin/ask-deny", post(admin::ask_deny))
         .route("/admin/invite", post(admin::invite))
         .route("/admin/invite-revoke", post(admin::invite_revoke))
         .route("/admin/key-revoke", post(admin::key_revoke))

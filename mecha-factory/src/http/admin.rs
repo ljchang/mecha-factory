@@ -8,6 +8,8 @@
 //!   POST /admin/s/<token>      the link becomes a session cookie
 //!   POST /admin/signout        the session stops working now
 //!   POST /admin/status         suspend or restore an account
+//!   POST /admin/ask-approve    a pending request becomes a mailed invite
+//!   POST /admin/ask-deny       a pending request is closed; nothing mails
 //!   POST /admin/invite         mint an invite; the box mails it
 //!   POST /admin/invite-revoke  stop an unclaimed invite working
 //!   POST /admin/key-revoke     break-glass, any key
@@ -551,6 +553,120 @@ pub async fn invite_revoke(
     render_panel(&app, &token, &key, Some(&notice))
 }
 
+/// `POST /admin/ask-approve` — a pending request becomes an invite, through
+/// the same one definition every mint uses. The budget is enforced here,
+/// because this is where the certificate is spent: a spent week refuses with
+/// the hour a slot frees, and the request stays pending for then.
+pub async fn ask_approve(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (token, key, values) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let id = field(&values, "id");
+    let now = crate::db::now();
+
+    let budget = match super::signup::budget(&app, &now) {
+        Ok(budget) => budget,
+        Err(e) => {
+            tracing::error!(error = %e, "reading the signup budget for an approval");
+            return render_panel(&app, &token, &key, Some("Unavailable — nothing approved."));
+        }
+    };
+    if budget.exhausted() {
+        let when = budget
+            .frees_at
+            .as_deref()
+            .map(|at| format!(" The next slot frees on {at}."))
+            .unwrap_or_default();
+        return render_panel(
+            &app,
+            &token,
+            &key,
+            Some(&format!(
+                "No certificate slots free this week — nothing approved.{when}                  The request stays pending."
+            )),
+        );
+    }
+
+    let ask = match app.db.asks_pending() {
+        Ok(asks) => asks.into_iter().find(|row| row.id == id),
+        Err(e) => {
+            tracing::error!(error = %e, "reading pending requests");
+            return render_panel(&app, &token, &key, Some("Unavailable — nothing approved."));
+        }
+    };
+    let Some(ask) = ask else {
+        return render_panel(
+            &app,
+            &token,
+            &key,
+            Some("Not a pending request (already decided, or unknown)."),
+        );
+    };
+
+    // Mint first, decide second: a decided row with no invite is a person
+    // silently lost, where an invite whose row re-approves is a no-op the
+    // dedup in `mint` tolerates. Post-redirect-get like `invite`, and for
+    // the same reason — this verb mails a stranger.
+    match v1::mint_invite(&app, &ask.email, "approved request") {
+        Ok(_) => {
+            if let Err(e) = app.db.ask_decide(&id, "approved", &now) {
+                tracing::error!(error = %e, "recording an approval after its invite minted");
+            }
+            (
+                StatusCode::SEE_OTHER,
+                [(header::LOCATION, "/admin".to_string())],
+            )
+                .into_response()
+        }
+        Err(v1::InviteRefused::BadAddress) => {
+            // The form validated shape at ask time; reaching this means the
+            // row itself is malformed. Deny it rather than leaving a
+            // permanently unapprovable row pending.
+            let _ = app.db.ask_decide(&id, "denied", &now);
+            render_panel(
+                &app,
+                &token,
+                &key,
+                Some("That address is malformed; the request was denied."),
+            )
+        }
+        Err(v1::InviteRefused::Unavailable) => {
+            render_panel(&app, &token, &key, Some("Unavailable — nothing approved."))
+        }
+    }
+}
+
+/// `POST /admin/ask-deny` — close a pending request. Nothing mails: the ask
+/// page promised mail only on approval, so silence is the shape of a denial
+/// rather than a broken promise.
+pub async fn ask_deny(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let (token, key, values) = match mutating(&app, &origin, &headers, &body) {
+        Ok(ok) => ok,
+        Err(response) => return *response,
+    };
+    let id = field(&values, "id");
+    let notice = match app.db.ask_decide(&id, "denied", &crate::db::now()) {
+        Ok(true) => "Request denied. Nothing was mailed.".to_string(),
+        Ok(false) => "Not a pending request (already decided, or unknown).".to_string(),
+        Err(e) => {
+            tracing::error!(error = %e, "denying a signup request");
+            "Unavailable — nothing changed.".to_string()
+        }
+    };
+    render_panel(&app, &token, &key, Some(&notice))
+}
+
 /// `POST /admin/key-revoke` — break-glass, any key, including the one whose
 /// session is asking. The next page load says so, because the session died
 /// with it.
@@ -648,6 +764,7 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
     // for. Everything is fetched before any HTML exists — one refusal
     // covers all five reads, and the queue counts come grouped so N
     // tenants are one query rather than N.
+    let now = crate::db::now();
     let fetched = (|| -> anyhow::Result<_> {
         Ok((
             app.db.users()?,
@@ -655,9 +772,11 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
             app.db.invites()?,
             app.db.keys()?,
             app.db.withheld()?,
+            app.db.asks_pending()?,
+            super::signup::budget(app, &now)?,
         ))
     })();
-    let (users, queue_depths, invites, keys, withheld) = match fetched {
+    let (users, queue_depths, invites, keys, withheld, asks, budget) = match fetched {
         Ok(data) => data,
         Err(e) => {
             tracing::error!(error = %e, "reading the operator ledgers");
@@ -830,11 +949,58 @@ fn render_panel(app: &Shared, token: &str, key: &KeyRow, notice: Option<&str>) -
          <button type=\"submit\">Withhold</button></form>"
     ));
 
+    // The budget line the whole approval design hangs off: the number is
+    // computed by the same function the approval handler enforces, so the
+    // panel can never disagree with the refusal.
+    let budget_out = {
+        let state = if budget.exhausted() {
+            "<strong>signups paused</strong> — approvals refuse until a slot frees".to_string()
+        } else {
+            format!("<strong>{} free</strong>", budget.free())
+        };
+        let frees = budget
+            .frees_at
+            .as_deref()
+            .map(|at| format!(" Oldest slot frees on {}.", esc(at)))
+            .unwrap_or_default();
+        format!(
+            "<p>{spent} of {cap} certificate slots committed this rolling week \
+             ({accounts} account(s) created + {pending} pending invite(s)) — {state}.{frees} \
+             The ceiling is Let&#39;s Encrypt&#39;s 50 new certificates per domain per week, \
+             held ten under as operator margin; renewals are exempt.</p>",
+            spent = budget.spent,
+            cap = super::signup::SIGNUPS_PER_WEEK,
+            accounts = budget.accounts,
+            pending = budget.invites,
+        )
+    };
+
+    let mut asks_out = String::new();
+    if asks.is_empty() {
+        asks_out.push_str("<p>Nobody is waiting.</p>");
+    } else {
+        asks_out.push_str("<table><tr><th>Email</th><th>Asked</th><th></th><th></th></tr>");
+        for row in &asks {
+            let approve = act("/admin/ask-approve", &[("id", &row.id)], "Approve");
+            let deny = act("/admin/ask-deny", &[("id", &row.id)], "Deny");
+            asks_out.push_str(&format!(
+                "<tr><td>{email}</td><td>{asked}</td><td>{approve}</td><td>{deny}</td></tr>",
+                email = esc(&row.email),
+                asked = esc(&row.created_at),
+            ));
+        }
+        asks_out.push_str("</table>");
+    }
+
     let body = format!(
         "<h1>Operator</h1>\
          <p>Signed in from operate key <code>{key_id}</code>{label}. \
          Everything here is the same row the CLI drives.</p>\
          {signout}{notice}\
+         <h2 id=\"signups\">Signups</h2>{budget_out}\
+         <h2 id=\"requests\">Requests</h2>\
+         <p>Asking cost nothing; approving mints and mails the invite, and \
+         spends a certificate slot. Denying mails nothing.</p>{asks_out}\
          <h2 id=\"accounts\">Accounts</h2>{accounts}\
          <h2 id=\"invites\">Invites</h2>\
          <p>The box mails the link; nothing to copy unless mail fails.</p>\

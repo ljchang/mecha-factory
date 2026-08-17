@@ -206,35 +206,28 @@ fn signup_answers_only_on_the_gate() {
 /// because it is one mechanism — asking mints the invite the operator would
 /// have minted, and everything after that is covered by the tests above.
 #[test]
-fn anybody_may_ask_and_the_link_becomes_an_account() {
+fn anybody_may_ask_and_the_ask_waits_for_the_operator() {
     let server = common::start();
 
     let form = get(&server, "/signup");
     assert_eq!(form.status, 200, "{}", form.head);
     assert!(form.body.contains("Create an account"), "{}", form.body);
+    assert!(form.body.contains("reviewed by a person"), "{}", form.body);
 
     let asked = post(&server, "/signup", "email=casey%40example.org");
     assert_eq!(asked.status, 200, "{}", asked.body);
-    assert!(asked.body.contains("Check your inbox"), "{}", asked.body);
-    assert_eq!(server.sent_links(), 1, "a link should have been mailed");
+    assert!(asked.body.contains("Request received"), "{}", asked.body);
 
-    // The mailed link is an ordinary invite link, and it claims an ordinary
-    // account.
-    let token = server.verification_token();
-    let done = post(&server, &format!("/signup/{token}"), "handle=casey");
-    assert_eq!(done.status, 200, "{}", done.body);
-    let user = server.db.user_by_handle("casey").unwrap().unwrap();
-    assert_eq!(user.email, "casey@example.org");
-    assert!(user.active());
-
-    // The operator's panel can see where it came from, which is the one thing
-    // a self-serve invite carries that a minted one does not.
-    let rows = server.db.invites().unwrap();
-    let row = rows
-        .iter()
-        .find(|r| r.email == "casey@example.org")
-        .unwrap();
-    assert_eq!(row.note, "self-serve");
+    // Nothing mails and nothing mints until the operator decides: the ask
+    // is a row, not an invite.
+    assert_eq!(server.sent_links(), 0, "an ask must not mail");
+    assert!(
+        server.db.invites().unwrap().is_empty(),
+        "an ask must not mint"
+    );
+    let pending = server.db.asks_pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].email, "casey@example.org");
 }
 
 /// An address that already has an account, and an address that already asked
@@ -250,13 +243,16 @@ fn the_ask_page_never_says_whether_an_address_is_known() {
     let server = common::start();
 
     let fresh = post(&server, "/signup", "email=casey%40example.org");
-    assert_eq!(server.sent_links(), 1);
 
-    // The same address again: already asked today.
+    // The same address again: already waiting.
     let again = post(&server, "/signup", "email=casey%40example.org");
     assert_eq!(again.status, fresh.status);
     assert_eq!(again.body, fresh.body, "a repeat ask was distinguishable");
-    assert_eq!(server.sent_links(), 1, "a repeat ask must not mail again");
+    assert_eq!(
+        server.db.asks_pending().unwrap().len(),
+        1,
+        "a repeat ask must fold into the waiting row"
+    );
 
     // An address that already holds an account — the server's own user.
     let existing = format!("email={}", server.user.email.replace('@', "%40"));
@@ -266,23 +262,25 @@ fn the_ask_page_never_says_whether_an_address_is_known() {
         known.body, fresh.body,
         "a known address was distinguishable"
     );
-    assert_eq!(server.sent_links(), 1, "a known address must not be mailed");
+    assert_eq!(
+        server.db.asks_pending().unwrap().len(),
+        1,
+        "a known address must not join the queue"
+    );
+    // And in every case: no mail. Mail is approval's to send.
+    assert_eq!(server.sent_links(), 0);
 }
 
-/// The week's certificate budget is the gate, and when it is spent the page
-/// says so instead of minting an invite for a handle that cannot be issued.
+/// A spent week queues asks instead of turning people away.
 ///
-/// The failure this prevents is the one nobody sees coming: Let's Encrypt
-/// refuses the 51st new certificate of the week, and the person who claimed
-/// that handle has permanent hostnames that die in the TLS handshake — before
-/// the application, so no page of ours can explain it.
+/// Under the approval design the budget is enforced at approval, on the
+/// panel (`tests/operator.rs`); the ask page has no paused state to show,
+/// because an ask no longer spends anything. The failure the old 503 page
+/// guarded against — minting a handle whose certificate cannot be issued —
+/// cannot happen from here anymore: nothing mints.
 #[test]
-fn a_spent_week_pauses_signups_instead_of_overspending() {
+fn a_spent_week_still_queues_asks() {
     let server = common::start();
-    // Forty between them, which is the week. Pending invites count beside
-    // accounts because each one is a certificate not yet ordered — and the
-    // harness's own `alice`, created before the window, deliberately counts
-    // for nothing: last week's certificate is already paid for.
     let now = mecha_factory::db::now();
     for n in 0..31 {
         server
@@ -291,9 +289,6 @@ fn a_spent_week_pauses_signups_instead_of_overspending() {
             .unwrap();
     }
     for n in 0..9 {
-        // Minted *now*, unlike `invite` above: a row created outside the
-        // rolling window is a certificate last week already paid for, and the
-        // budget deliberately does not count it.
         server
             .db
             .invite_create(
@@ -306,34 +301,14 @@ fn a_spent_week_pauses_signups_instead_of_overspending() {
             .unwrap();
     }
 
-    let asked = post(&server, "/signup", "email=casey%40example.org");
-    assert_eq!(asked.status, 503, "{}", asked.head);
-    assert!(asked.body.contains("Signups are paused"), "{}", asked.body);
-    assert!(
-        asked.head.to_lowercase().contains("retry-after"),
-        "a temporary refusal must say when: {}",
-        asked.head
-    );
-    assert_eq!(server.sent_links(), 0, "a paused week must mail nothing");
-
-    // And the form itself says so, rather than taking an address it can do
-    // nothing with.
     let form = get(&server, "/signup");
-    assert_eq!(form.status, 503, "{}", form.head);
+    assert_eq!(form.status, 200, "{}", form.head);
 
-    // Revoking a pending invite returns its slot at once — the certificate it
-    // stood for was never ordered.
-    let pending = server
-        .db
-        .invites()
-        .unwrap()
-        .into_iter()
-        .find(|r| r.email.starts_with("pending"))
-        .unwrap();
-    assert!(server.db.invite_revoke(&pending.id, &now).unwrap());
-    let after = post(&server, "/signup", "email=casey%40example.org");
-    assert_eq!(after.status, 200, "{}", after.body);
-    assert_eq!(server.sent_links(), 1);
+    let asked = post(&server, "/signup", "email=casey%40example.org");
+    assert_eq!(asked.status, 200, "{}", asked.head);
+    assert!(asked.body.contains("Request received"), "{}", asked.body);
+    assert_eq!(server.sent_links(), 0, "a spent week must mail nothing");
+    assert_eq!(server.db.asks_pending().unwrap().len(), 1);
 }
 
 /// One connection may ask a few times a day and no more, so a single host
@@ -349,7 +324,7 @@ fn one_address_may_only_ask_so_often() {
         let reply = post(&server, "/signup", &format!("email=a{n}%40example.org"));
         assert_eq!(reply.status, 200, "ask {n}: {}", reply.head);
     }
-    assert_eq!(server.sent_links(), 3);
+    assert_eq!(server.sent_links(), 0, "asks never mail; approval does");
 
     let refused = post(&server, "/signup", "email=a3%40example.org");
     assert_eq!(refused.status, 429, "{}", refused.head);
@@ -358,7 +333,7 @@ fn one_address_may_only_ask_so_often() {
         "{}",
         refused.body
     );
-    assert_eq!(server.sent_links(), 3, "a refused ask must mail nothing");
+    assert_eq!(server.sent_links(), 0, "a refused ask must mail nothing");
 }
 
 /// A typo is the asker's own business and is told back to them; nothing about
@@ -375,7 +350,7 @@ fn a_malformed_address_is_a_form_error_and_not_a_spent_ask() {
         let reply = post(&server, "/signup", &format!("email=b{n}%40example.org"));
         assert_eq!(reply.status, 200, "ask {n}: {}", reply.head);
     }
-    assert_eq!(server.sent_links(), 3);
+    assert_eq!(server.db.asks_pending().unwrap().len(), 3);
 }
 
 /// The ask routes are the gate's, like the claim routes beside them.

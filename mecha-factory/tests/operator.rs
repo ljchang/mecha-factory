@@ -673,3 +673,101 @@ fn revoking_the_email_door_key_closes_the_door_and_its_sessions() {
     assert_eq!(quiet.status, 200);
     assert_eq!(server.sent_links(), sent_before, "a revoked door is closed");
 }
+
+/// The approval gate, end to end: an ask waits, the panel shows it beside
+/// the budget, denying closes it silently, approving mints and mails the
+/// one invite definition — and a spent week refuses the approval while the
+/// request keeps waiting.
+#[test]
+fn the_panel_approves_and_denies_requests_with_the_budget_in_view() {
+    let server = common::start();
+    let operator = operator_key(&server);
+    let session = panel_signed_in(&server, &operator);
+
+    // Two strangers ask at the door.
+    for email in ["casey%40example.org", "dana%40example.org"] {
+        let asked = Request::new("POST", "/signup", server.gate.to_string())
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(format!("email={email}").into_bytes())
+            .send(server.gate);
+        assert_eq!(asked.status, 200, "{}", asked.head);
+    }
+    assert_eq!(server.sent_links(), 0, "asks mail nothing");
+
+    // The panel shows the queue and the budget in the same breath: the
+    // number the operator approves against is computed by the same function
+    // the approval handler enforces.
+    let panel = panel_get(&server, "/admin", Some(&session));
+    assert!(panel.body.contains("Requests"), "{}", panel.body);
+    assert!(panel.body.contains("casey@example.org"), "{}", panel.body);
+    assert!(panel.body.contains("dana@example.org"), "{}", panel.body);
+    assert!(
+        panel.body.contains("of 40 certificate slots"),
+        "{}",
+        panel.body
+    );
+
+    let csrf = panel_csrf(&server, &session);
+    let pending = server.db.asks_pending().unwrap();
+    let casey = pending.iter().find(|r| r.email.contains("casey")).unwrap();
+    let dana = pending.iter().find(|r| r.email.contains("dana")).unwrap();
+
+    // Denied: closed, silent, and gone from the queue.
+    let denied = panel_post(
+        &server,
+        "/admin/ask-deny",
+        &format!("csrf={csrf}&id={}", dana.id),
+        Some(&session),
+    );
+    assert_eq!(denied.status, 200, "{}", denied.head);
+    assert!(denied.body.contains("Request denied"), "{}", denied.body);
+    assert_eq!(server.sent_links(), 0, "a denial mails nothing");
+    assert_eq!(server.db.asks_pending().unwrap().len(), 1);
+
+    // Approved: the invite exists through the one mint definition, the mail
+    // went, and the request is decided.
+    let approved = panel_post(
+        &server,
+        "/admin/ask-approve",
+        &format!("csrf={csrf}&id={}", casey.id),
+        Some(&session),
+    );
+    assert_eq!(approved.status, 303, "{}", approved.head);
+    assert_eq!(server.sent_links(), 1, "approval is what mails");
+    let invites = server.db.invites().unwrap();
+    let row = invites
+        .iter()
+        .find(|r| r.email == "casey@example.org")
+        .expect("the approved invite");
+    assert_eq!(row.note, "approved request");
+    assert!(server.db.asks_pending().unwrap().is_empty());
+
+    // A spent week refuses the approval and keeps the request pending.
+    let now = mecha_factory::db::now();
+    for n in 0..40 {
+        server
+            .db
+            .user_create(&format!("w{n}"), &format!("w{n}@example.org"), &now)
+            .unwrap();
+    }
+    let late = Request::new("POST", "/signup", server.gate.to_string())
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(b"email=late%40example.org".to_vec())
+        .send(server.gate);
+    assert_eq!(late.status, 200, "{}", late.head);
+    let late_row = &server.db.asks_pending().unwrap()[0];
+    let refused = panel_post(
+        &server,
+        "/admin/ask-approve",
+        &format!("csrf={csrf}&id={}", late_row.id),
+        Some(&session),
+    );
+    assert_eq!(refused.status, 200, "{}", refused.head);
+    assert!(
+        refused.body.contains("No certificate slots free"),
+        "{}",
+        refused.body
+    );
+    assert_eq!(server.sent_links(), 1, "a refused approval mails nothing");
+    assert_eq!(server.db.asks_pending().unwrap().len(), 1, "still waiting");
+}
