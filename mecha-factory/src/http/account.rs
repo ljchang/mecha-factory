@@ -864,8 +864,7 @@ pub async fn pair(
         "<h1>Connect a machine</h1>\
          <p>If the client is not installed there yet \
          (<a href=\"https://rustup.rs\">Rust</a> first):</p>\
-         <pre><code>cargo install --git \
-https://github.com/ljchang/mecha-factory mecha-factory-publish</code></pre>\
+         <pre><code>cargo install mecha-factory-publish</code></pre>\
          <p>On the machine that will publish for <code>{handle}</code>, run:</p>\
          <pre><code>factory-publish connect --gate {gate} --handle {handle} \
 {code}</code></pre>\

@@ -489,8 +489,7 @@ pub async fn submit(
                      <p>Install the client — it is the CLI and the agent's MCP \
                      server in one binary, and it needs \
                      <a href=\"https://rustup.rs\">Rust</a>:</p>\
-                     <pre><code>cargo install --git \
-https://github.com/ljchang/mecha-factory mecha-factory-publish</code></pre>\
+                     <pre><code>cargo install mecha-factory-publish</code></pre>\
                      <p>Then, on the machine that will publish for you, run:</p>\
                      <pre><code>factory-publish connect --gate {gate} \
 --handle {handle} {code}</code></pre>\

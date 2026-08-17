@@ -17,10 +17,9 @@ about what an agent can do to the world.**
 cargo install mecha-factory-publish
 ```
 
-(Until the crates.io split ships: `cargo install --git
-https://github.com/ljchang/mecha-factory mecha-factory-publish`.)
-
 The binary is both the CLI and the MCP server. There is no separate daemon.
+Every tag publishes it, so the version a client installs and the binary the
+box runs are built from the same commit.
 
 ## Pair the machine
 

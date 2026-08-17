@@ -47,9 +47,10 @@ A factory is where machines are built and shipped from — and it is deliberatel
 | `mecha-factory-publish` | The home side. Renders bundles, versions them immutably, moves the one alias a share URL resolves through, holds the publish key, and serves the MCP surface mecha wires. |
 | `mecha-factory` | The box. One binary serving three origins under three policies, an authenticated write API, and a queue home drains. **Multi-user**: every row belongs to a person, and each person's artifacts are served from their own hostname. Holds no credential that reaches home. |
 
-Next, in order: a release binary from CI so the box needs no Rust toolchain,
-the crates.io split (`cargo install mecha-factory-publish`), then the booking
-page (§12 step 8).
+Both have shipped: a tag builds the box's binary in CI — static musl, so the
+droplet needs no Rust toolchain — and the same tag publishes all three crates,
+so `cargo install mecha-factory-publish` is how a client arrives and the
+version it installs is built from the commit the box is running.
 
 ## Try it
 

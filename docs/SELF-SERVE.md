@@ -322,10 +322,12 @@ correct system reported success at four points where nothing had happened.
   `remote::release_doors`.
 - **The welcome page named a binary with no distribution**, and stopped at
   `connect`. Releases carry the server for linux-musl; the client is
-  `cargo install --git` until the crates.io split. The page now says where
-  the client comes from, that publishing is not releasing, and that the
-  hangar starts off — the three things that were otherwise learned by
-  failing at them.
+  `cargo install mecha-factory-publish`, which every tag has published since
+  0.2.0 — the page had simply never mentioned it, and the docs that should
+  have still described the split as pending. The page now says where the
+  client comes from, that publishing is not releasing, and that the hangar
+  starts off — the three things that were otherwise learned by failing at
+  them.
 
 One smaller thing with a general shape: `connect` took its key label from
 `/etc/hostname`, which does not exist on macOS, so every Mac paired as the
