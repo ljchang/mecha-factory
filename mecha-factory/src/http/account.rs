@@ -862,11 +862,19 @@ pub async fn pair(
     let esc = mecha_manifest::escape_text;
     let body = format!(
         "<h1>Connect a machine</h1>\
+         <p>If the client is not installed there yet \
+         (<a href=\"https://rustup.rs\">Rust</a> first):</p>\
+         <pre><code>cargo install --git \
+https://github.com/ljchang/mecha-factory mecha-factory-publish</code></pre>\
          <p>On the machine that will publish for <code>{handle}</code>, run:</p>\
          <pre><code>factory-publish connect --gate {gate} --handle {handle} \
 {code}</code></pre>\
-         <p>The code works once and expires in {expiry}&nbsp;minutes. \
-         <a href=\"/account\">Back to your page.</a></p>",
+         <p>The code works once and expires in {expiry}&nbsp;minutes. A machine \
+         that is already paired refuses this rather than pairing twice; add \
+         <code>--replace</code> only if you mean to re-pair it, and revoke the \
+         old keys below. What lands is a publish key and a drain key — never a \
+         release key, which is why making something public happens on this \
+         page. <a href=\"/account\">Back to your page.</a></p>",
         handle = esc(&user.handle),
         gate = esc(&app.config.base_url(Role::Gate)),
         code = esc(&code),
@@ -912,11 +920,32 @@ fn board_section(app: &Shared, user: &UserRow, gate: &str, csrf: &str) -> String
     // The profile and the hangar always have a row, whether or not anything
     // has been written: "where do I turn this on" must not be answered by an
     // absent line.
+    //
+    // And the hangar's row says whether it is *on*. A new account's profile
+    // has `enabled = false` — deliberate, so that a page never appears by
+    // upgrading — which means the URL printed here answers 404 to its own
+    // owner from the day they sign up. The row used to print that URL as
+    // though it worked, and the only way to discover otherwise was to open it
+    // and read a "Not found" that says the same thing to a stranger as to a
+    // suspended account. The state belongs beside the link.
+    let profile = crate::http::hangar::read_profile(app, user);
+    let hangar_state = if profile.enabled {
+        String::new()
+    } else {
+        // Deliberately not the word "everyone": the artifacts table above uses
+        // it for "this bundle is public", and `account.rs`'s withholding test
+        // asserts the whole page stops saying it. A phrase here that trips
+        // that assertion would be a page-wide claim about readership made by
+        // a row that is not about a bundle at all.
+        "off — it answers \u{201c}Not found\u{201d} to anyone who opens it, you \
+         included, until <a href=\"/account/edit/profile\">your profile</a> turns it on"
+            .to_string()
+    };
     out.push_str(&format!(
         "<tr><td>your profile</td><td class=\"muted\">name, links, and the toggle</td>\
          <td></td><td><a href=\"/account/edit/profile\">Edit</a></td></tr>\
          <tr><td>the hangar</td><td><a href=\"{gate}/@{handle}\">{gate}/@{handle}</a></td>\
-         <td></td><td><a href=\"/account/edit/hangar\">Edit</a></td></tr>",
+         <td>{hangar_state}</td><td><a href=\"/account/edit/hangar\">Edit</a></td></tr>",
         handle = esc(&user.handle),
     ));
     for (slug, row) in &boards {

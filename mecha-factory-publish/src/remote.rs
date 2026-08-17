@@ -305,13 +305,17 @@ impl Remote {
         Self::configured_for(Scope::Publish)
     }
 
-    /// The configured remote presenting one particular credential.
-    pub fn configured_for(scope: Scope) -> Result<Option<Remote>> {
-        let dir = Self::dir()?;
+    /// Which box this machine is pointed at, with no credential involved.
+    ///
+    /// Separate from [`Remote::configured_for`] because the messages that say
+    /// *where to go instead* need the gate precisely when a key is missing —
+    /// and looking it up through a constructor that reads a key file would
+    /// fail on exactly the machines those messages exist for.
+    pub fn gate_configured() -> Result<Option<String>> {
         let gate = match std::env::var("FACTORY_GATE") {
             Ok(gate) if !gate.is_empty() => gate,
             _ => {
-                let path = dir.join("config.toml");
+                let path = Self::dir()?.join("config.toml");
                 let Ok(text) = std::fs::read_to_string(&path) else {
                     return Ok(None);
                 };
@@ -327,6 +331,15 @@ impl Remote {
                  on this connection."
             );
         }
+        Ok(Some(gate))
+    }
+
+    /// The configured remote presenting one particular credential.
+    pub fn configured_for(scope: Scope) -> Result<Option<Remote>> {
+        let dir = Self::dir()?;
+        let Some(gate) = Self::gate_configured()? else {
+            return Ok(None);
+        };
 
         let key_path = match std::env::var(scope.env()) {
             Ok(path) if !path.is_empty() => PathBuf::from(path),
@@ -717,6 +730,26 @@ pub fn release_command(id: &str, version: u32) -> String {
     format!("factory-publish alias {id} {version} --visibility public")
 }
 
+/// Both doors onto releasing, with the one a tenant actually has first.
+///
+/// The note this feeds used to end "from a machine that has one" — a route
+/// that does not exist for anybody who arrived through self-serve. `connect`
+/// deliberately never installs a release key and only the operator can mint
+/// one on the box, so "find a machine with a release key" is an instruction
+/// whose completion requires SSH. The door that *is* theirs is the account
+/// page, and it drives the same `alias_set` the release key drives — naming
+/// it is not the lesser answer, it is the other front door onto the identical
+/// act. The CLI form stays, second, for the machine that does hold one.
+pub fn release_doors(gate: &str, id: &str, version: u32) -> String {
+    format!(
+        "Release it from your account page at {gate}/account, which is where release \
+         authority lives for a paired machine — press \u{201c}Release v{version} \
+         publicly\u{201d}. A machine holding a release key can instead run `{}`; \
+         pairing never installs one.",
+        release_command(id, version)
+    )
+}
+
 /// Push a version and set the alias on the box, when there is one.
 ///
 /// `Ok(None)` means no remote is configured, which is an ordinary state and not
@@ -776,9 +809,9 @@ pub fn mirror(
                 // happened.
                 note.push_str(&format!(
                     "\nversion {target} is on the box and is not published: no release \
-                     key here, so the alias did not move. Release it with \
-                     `{}` from a machine that has one.",
-                    release_command(id, target)
+                     key here, so the alias did not move and the share URL still serves \
+                     nobody. {}",
+                    release_doors(remote.gate(), id, target)
                 ));
             }
         }
@@ -788,6 +821,42 @@ pub fn mirror(
         bare: pushed.url,
         serves,
         note,
+    }))
+}
+
+/// What did *not* reach the box, when an alias move stopped at this machine.
+///
+/// [`mirror_alias`] answers `None` for two different reasons and neither is
+/// visible in the value: no box is configured at all, or this machine holds
+/// no release key. Both mean **the box's share URL is exactly as it was** —
+/// and both callers printed "the share URL now resolves to v3" or "no longer
+/// resolves" over the top of that, describing a local file to somebody asking
+/// about the internet. An `unpublish` that reports a takedown while the origin
+/// keeps serving the bytes is the worse half: withdrawing something is the one
+/// act where believing it worked has consequences.
+///
+/// `None` here means a release key is installed and the box really was told.
+pub fn alias_stopped_here(id: &str, version: Option<u32>) -> Result<Option<String>> {
+    if Remote::installed(Scope::Release)?.is_some() {
+        return Ok(None);
+    }
+    let Some(gate) = Remote::gate_configured()? else {
+        return Ok(Some(
+            "No factory is configured, so this changed nothing beyond this machine's \
+             store — there is no share URL anywhere else to change."
+                .to_string(),
+        ));
+    };
+    Ok(Some(match version {
+        Some(version) => format!(
+            "The box was not told: no release key here, so its share URL is exactly as it \
+             was. {}",
+            release_doors(&gate, id, version)
+        ),
+        None => format!(
+            "The box was not told: no release key here, so anything already released is \
+             still being served. Take it down from your account page at {gate}/account."
+        ),
     }))
 }
 
@@ -1122,6 +1191,69 @@ mod tests {
         let command = release_command("brief", 3);
         assert!(command.contains(" brief 3"), "{command}");
         assert!(!command.contains("--version"), "clap rejects it: {command}");
+    }
+
+    /// The advice a publish-key-only machine gets has to name a door that
+    /// person can open.
+    ///
+    /// It used to say "from a machine that has one", and for everybody who
+    /// arrived through self-serve there is no such machine and no way to make
+    /// one: `connect` never installs a release key and minting one is an SSH
+    /// session on the box. The account page drives the same `alias_set`, so
+    /// it is not a workaround — it is the door.
+    #[test]
+    fn the_release_advice_names_the_account_page_first() {
+        let said = release_doors("https://gate.example.org", "brief", 3);
+        let Some(account) = said.find("https://gate.example.org/account") else {
+            panic!("no account page named: {said}");
+        };
+        assert!(
+            said.find("factory-publish alias").is_none_or(|cli| cli > account),
+            "the door that needs SSH came first: {said}"
+        );
+        assert!(
+            !said.contains("a machine that has one"),
+            "the dead end survived: {said}"
+        );
+    }
+
+    /// A gate is readable with no key on the machine at all.
+    ///
+    /// The messages that say *where to go instead* need it exactly when a key
+    /// is missing, so a lookup that read one would fail on the machines those
+    /// messages exist for.
+    #[test]
+    fn the_gate_is_readable_without_any_key() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let dir = home.path().join("factory");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.toml"),
+            "gate = \"https://gate.example.org\"\n",
+        )
+        .unwrap();
+        let gate = Remote::gate_configured();
+        let stopped = alias_stopped_here("brief", Some(3));
+        std::env::remove_var("MECHA_HOME");
+        assert_eq!(gate.unwrap().as_deref(), Some("https://gate.example.org"));
+        let stopped = stopped.unwrap().expect("no release key here, so: a note");
+        assert!(stopped.contains("/account"), "{stopped}");
+    }
+
+    /// With no box at all, an alias move is a local file edit, and saying
+    /// anything about a share URL describes somewhere this machine has never
+    /// spoken to.
+    #[test]
+    fn an_alias_with_no_box_says_nothing_left_the_machine() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let stopped = alias_stopped_here("brief", None);
+        std::env::remove_var("MECHA_HOME");
+        let stopped = stopped.unwrap().expect("no box, so: a note");
+        assert!(stopped.contains("nothing beyond this machine"), "{stopped}");
     }
 
     /// A one-shot gate that hands back the request body it was sent.

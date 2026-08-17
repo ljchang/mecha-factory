@@ -801,7 +801,20 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 requested,
             ) {
                 Ok(Some(reach)) => format!("\n{}", reach.sentence()),
-                Ok(None) => String::new(),
+                // No box at all, and this is the arm that used to say nothing
+                // — under a message whose next clause claimed a share URL now
+                // resolved. Nothing had left the machine, so the agent read
+                // "published", named a URL, and the person who opened it got
+                // an unresolvable host. The CLI's `reach` line has always been
+                // honest here; the tool surface has to say the same words,
+                // because an agent has no second place to look.
+                Ok(None) => format!(
+                    "\nNo factory is configured on this machine, so it is published here and \
+                     nowhere else — nothing has been sent anywhere and there is no share URL \
+                     yet. Pair this machine with `factory-publish connect --gate <gate> \
+                     --handle <yours> <code>`, then `factory-publish push {id} --version {}`.",
+                    published.version
+                ),
                 Err(e) => {
                     anyhow::bail!(
                         "{id} is published locally as version {} and the alias points at it, \
@@ -813,9 +826,16 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 }
             };
 
+            // Every claim about who can reach this comes from `reach`, and
+            // none of it from here. This sentence used to end "and its share
+            // URL now resolves to that version", which was true only on a
+            // machine holding a release key: on a correctly paired agent
+            // machine the alias does not move, and with no box configured
+            // there is no share URL at all. Both cases contradicted the
+            // sentence appended three lines later, and an agent reporting to
+            // a person reads the first one.
             Ok(format!(
-                "{} is published as version {}{}.\nIt is at {}, and its share URL now \
-                 resolves to that version.{}",
+                "{} is stored as version {}{}, at {}.{}",
                 id,
                 published.version,
                 if published.existing {
@@ -849,9 +869,17 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                 Some(reach) => format!(" {}", reach.sentence()),
                 None => String::new(),
             };
-            Ok(format!(
-                "{id}'s share URL now resolves to version {version}.{reach}"
-            ))
+            // On a paired machine this whole call is a local bookkeeping
+            // entry, so the share URL sentence has to be the one that says so
+            // — an agent that reads "now resolves to version 3" reports a
+            // publication that did not happen.
+            Ok(match crate::remote::alias_stopped_here(&id, Some(version))? {
+                Some(stopped) => format!(
+                    "{id}'s alias points at version {version} in this machine's store. \
+                     {stopped}{reach}"
+                ),
+                None => format!("{id}'s share URL now resolves to version {version}.{reach}"),
+            })
         }
         "bundle_unpublish" => {
             let id = string("id")?;
@@ -870,13 +898,23 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             // to nothing and *keeps* who may read it, which is exactly what
             // omitting the field means to the box.
             crate::remote::mirror_alias(&id, None, None)?;
+            // A takedown that only happened locally must never be reported as
+            // a takedown. This is the arm where believing the message has
+            // consequences: the agent tells somebody it is withdrawn, and the
+            // origin keeps serving the bytes to anyone holding the link.
+            let stopped = match crate::remote::alias_stopped_here(&id, None)? {
+                Some(why) => format!("{id}'s alias points at nothing in this machine's store. {why}"),
+                None => format!(
+                    "{id}'s share URL no longer resolves{}.",
+                    match before {
+                        Some(v) => format!(" (it pointed at version {v})"),
+                        None => String::new(),
+                    }
+                ),
+            };
             Ok(format!(
-                "{id}'s share URL no longer resolves{}. {} version(s) remain on disk — \
-                 nothing was deleted, and it can be aliased again.",
-                match before {
-                    Some(v) => format!(" (it pointed at version {v})"),
-                    None => String::new(),
-                },
+                "{stopped} {} version(s) remain on disk — nothing was deleted, and it can \
+                 be aliased again.",
                 store.versions(&id)?.len()
             ))
         }

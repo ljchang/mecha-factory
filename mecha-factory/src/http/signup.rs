@@ -473,15 +473,44 @@ pub async fn submit(
                 .map_err(|e| tracing::warn!(error = %e, "minting a pairing code at signup"))
                 .ok();
             let connect = match &pairing {
+                // Three things this page has to say, learned from the first
+                // stranger to read it. **Where the binary comes from**: the
+                // command below was printed for a person who had never heard
+                // of `factory-publish` and had no way to install it — the
+                // releases carry the server, not the client. **That releasing
+                // happens here**, not on the paired machine: `connect` never
+                // installs a release key, so a publish leaves the bytes on the
+                // box and the share URL serving nobody until somebody presses
+                // a button on the account page. **That the code is spent
+                // once**: a second attempt on an already-paired machine is
+                // refused for a reason that reads like a failure.
                 Some(code) => format!(
                     "<h2>Connect your machine</h2>\
-                     <p>On the machine that will publish for you, run:</p>\
+                     <p>Install the client — it is the CLI and the agent's MCP \
+                     server in one binary, and it needs \
+                     <a href=\"https://rustup.rs\">Rust</a>:</p>\
+                     <pre><code>cargo install --git \
+https://github.com/ljchang/mecha-factory mecha-factory-publish</code></pre>\
+                     <p>Then, on the machine that will publish for you, run:</p>\
                      <pre><code>factory-publish connect --gate {gate} \
 --handle {handle} {code}</code></pre>\
                      <p>The code works once and expires in \
                      {expiry}&nbsp;minutes. It installs this machine's own \
                      keys — pair each machine separately, and any of them \
-                     can be revoked on its own.</p>",
+                     can be revoked on its own. If this machine is already \
+                     paired, <code>connect</code> will say so and stop; add \
+                     <code>--replace</code> only if you mean to re-pair it.</p>\
+                     <h2>Then publish something</h2>\
+                     <pre><code>factory-publish render report.md --out ./report\n\
+factory-publish publish report ./report --title \"My report\"</code></pre>\
+                     <p><strong>Publishing does not make it public.</strong> A \
+                     paired machine deliberately holds no release key, so the \
+                     bytes reach the box and the share URL keeps serving \
+                     nobody until you release it from \
+                     <a href=\"{gate}/account\">your account page</a> — that \
+                     is the one place release authority lives, and it is also \
+                     where you turn your <code>/@{handle}</code> page on, \
+                     which starts off.</p>",
                     gate = mecha_manifest::escape_text(&app.config.base_url(Role::Gate)),
                     handle = mecha_manifest::escape_text(&user.handle),
                     code = mecha_manifest::escape_text(code),

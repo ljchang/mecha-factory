@@ -385,3 +385,39 @@ fn the_claim_outcomes_are_typed_not_worded() {
         other => panic!("a spent invite answered {other:?}"),
     }
 }
+
+/// The welcome page is the whole handover, so it has to survive being the
+/// only page a stranger ever reads.
+///
+/// It printed one command, for a binary with no distribution, and stopped —
+/// which left three things to be discovered by failing at them: where the
+/// client comes from, that a paired machine cannot make anything public, and
+/// that the hangar starts off. The first external tenant hit all three.
+#[test]
+fn the_welcome_page_hands_over_the_whole_path() {
+    let server = common::start();
+    let token = invite(&server, "casey@example.org");
+    let done = post(&server, &format!("/signup/{token}"), "handle=casey");
+    assert_eq!(done.status, 200, "{}", done.body);
+
+    // Where the binary comes from — the command below it is unrunnable
+    // otherwise.
+    assert!(done.body.contains("cargo install"), "{}", done.body);
+    // The pairing command itself, with the assertion that defends it.
+    assert!(
+        done.body.contains("factory-publish connect") && done.body.contains("--handle casey"),
+        "{}",
+        done.body
+    );
+    // That publishing is not releasing, and where releasing is.
+    assert!(
+        done.body.contains("/account"),
+        "the release door is unnamed: {}",
+        done.body
+    );
+    assert!(
+        done.body.contains("does not make it public"),
+        "publishing still reads as publication: {}",
+        done.body
+    );
+}

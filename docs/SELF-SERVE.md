@@ -290,6 +290,53 @@ never-reissued handle ledger, the single-use token, the pairing code minted at
 the end, and the certificate reconciler noticing a new row within thirty
 seconds. A stranger's account is a row `user create` could have written.
 
+## What the first external tenant found (2026-08-17)
+
+The first account that was not the operator's paired a machine and then went
+quiet. The keys ledger said why, and it is worth recording because none of it
+was a tenancy bug: **the box was right about everything and told nobody.**
+Every mechanism above worked — the account, the certificate within a minute,
+the hostname, the pairing, the per-user isolation. What failed was that a
+correct system reported success at four points where nothing had happened.
+
+- **`bundle_publish` over MCP claimed a share URL that did not exist.** Its
+  reply ended "and its share URL now resolves to that version" before calling
+  `Mirrored::sentence()`, the type that exists to stop exactly this. On a
+  paired machine the alias had not moved; with no gate configured nothing had
+  left the laptop at all — and the CLI's honest line ("no factory is
+  configured, so it is published locally and nowhere else") had no equivalent
+  on the tool surface. An agent reads the first sentence and reports it to a
+  person. Every claim about reach now comes from `sentence()` and none from
+  the wrapper.
+- **`unpublish` reported a takedown that never reached the box.** Same root:
+  `mirror_alias` answers `None` both for "no box" and "no release key", the
+  callers printed "the share URL no longer resolves" over it, and the origin
+  kept serving the bytes. This was the worst of the four — withdrawing
+  something is the one act where believing it worked has consequences —
+  and it is now `remote::alias_stopped_here`, which says which of the two
+  Nones happened.
+- **The advice for releasing named a door no tenant has.** "Release it with
+  `factory-publish alias …` from a machine that has one" — but `connect`
+  never installs a release key and minting one is an SSH session. The account
+  page was always the answer and was never mentioned. See
+  `remote::release_doors`.
+- **The welcome page named a binary with no distribution**, and stopped at
+  `connect`. Releases carry the server for linux-musl; the client is
+  `cargo install --git` until the crates.io split. The page now says where
+  the client comes from, that publishing is not releasing, and that the
+  hangar starts off — the three things that were otherwise learned by
+  failing at them.
+
+One smaller thing with a general shape: `connect` took its key label from
+`/etc/hostname`, which does not exist on macOS, so every Mac paired as the
+blank row in a ledger whose purpose is recognising which machine to revoke.
+
+The pattern across all four: **this design put its care into not lying about
+who can read something, and then let the messages around that machinery make
+the claim anyway.** `Mirrored` has seven arms and a test for each; the string
+that wrapped it had none. Prose that reports on a security boundary is part
+of the boundary.
+
 ## Certificates: the thing that actually gates this
 
 TLS-ALPN-01 cannot issue a wildcard, so every user's hostname needs to be on a

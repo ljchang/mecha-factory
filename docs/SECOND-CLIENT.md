@@ -29,7 +29,7 @@ single-use pairing code and shows one command. Run it on the machine that will
 hold the keys:
 
 ```sh
-factory-publish connect <code> --gate https://gate.mecha-factory.ai
+factory-publish connect --gate https://gate.mecha-factory.ai --handle <yours> <code>
 ```
 
 Interactively, `connect` asks you to **type the handle** you expect this
@@ -83,6 +83,34 @@ or, checked into a project, `.mcp.json`:
 `--root` is a path jail: every path a tool call supplies must resolve inside
 it, and the server says so on startup. It defaults to the working directory,
 which is what the `.mcp.json` form above relies on.
+
+## Publish, then release — they are two acts
+
+The loop, and the half of it that surprises everybody the first time:
+
+```sh
+factory-publish render report.md --out ./report
+factory-publish publish report ./report --title "My report"
+```
+
+That puts an immutable version on the box **and stops**. The share URL still
+serves nobody, because moving it is `Scope::Release` and a paired machine
+holds no release key — deliberately, so that an agent can do all the work and
+cannot be the one who decides the world sees it. Release it from
+`https://gate.mecha-factory.ai/account`: the artifacts table has the version
+and a **Release publicly** button, driving the same `alias_set` the release
+key drives.
+
+Two related things a new account finds out the same way, so they are written
+here rather than discovered:
+
+- **Your hangar starts off.** `/@you` answers "Not found" — to you as well as
+  to a stranger, byte for byte, because a disabled page and a nonexistent one
+  must be one refusal. The toggle is `enabled` in your profile, from the
+  account page.
+- **A machine pairs once.** `connect` on an already-paired machine refuses
+  rather than pairing twice; `--replace` is the override, and the keys it
+  displaces stay valid on the box until revoked there.
 
 ## What the tools are
 

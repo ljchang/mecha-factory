@@ -856,6 +856,12 @@ fn main() -> Result<()> {
             if let Some(at) = &mirrored {
                 println!("{}", at.columns());
             }
+            // Printed before `reach`, because it is the correction to the line
+            // already printed above: `{id} → v{version}` is a local fact, and
+            // on a paired machine it is the *only* thing that happened.
+            if let Some(stopped) = remote::alias_stopped_here(&id, Some(version))? {
+                println!("  {stopped}");
+            }
             reach(&store, &id, mirrored.as_ref())?;
         }
 
@@ -881,9 +887,22 @@ fn main() -> Result<()> {
             // the comment above states, now said to the box in its own terms
             // rather than by echoing a locally-read value back at it.
             remote::mirror_alias(&id, None, None)?;
-            match before {
-                Some(v) => println!("{id}: the share URL no longer resolves (was v{v})"),
-                None => println!("{id}: already unpublished"),
+            let stopped = remote::alias_stopped_here(&id, None)?;
+            match (&stopped, before) {
+                // The takedown reached the box: the unqualified sentence is
+                // true and stays.
+                (None, Some(v)) => println!("{id}: the share URL no longer resolves (was v{v})"),
+                (None, None) => println!("{id}: already unpublished"),
+                // It did not. Saying "no longer resolves" here would be the
+                // one wrong answer that nobody goes back to check.
+                (Some(why), Some(v)) => {
+                    println!("{id}: taken down on this machine only (was v{v})");
+                    println!("  {why}");
+                }
+                (Some(why), None) => {
+                    println!("{id}: already unpublished here");
+                    println!("  {why}");
+                }
             }
             // Said every time, because "unpublish" reads like "delete" and the
             // difference is the whole point: the record survives.
@@ -1363,6 +1382,34 @@ fn operator_command(action: OperatorAction) -> Result<()> {
     }
 }
 
+/// What to call this machine in the box's key ledger.
+///
+/// `/etc/hostname` is a Linux file, and reading only it meant every macOS
+/// pairing arrived with an empty label — which is not cosmetic: the ledger is
+/// how a person recognises which machine to revoke, and "the blank one" is not
+/// a recognition. The first external tenant paired from a Mac and produced
+/// exactly that row. `hostname` is in POSIX and answers on both; the file
+/// stays first because it needs no subprocess.
+fn machine_label() -> String {
+    if let Ok(name) = std::fs::read_to_string("/etc/hostname") {
+        let name = name.trim();
+        if !name.is_empty() {
+            return name.to_string();
+        }
+    }
+    if let Ok(out) = std::process::Command::new("hostname").output() {
+        if let Ok(name) = String::from_utf8(out.stdout) {
+            let name = name.trim();
+            if !name.is_empty() {
+                return name.to_string();
+            }
+        }
+    }
+    // A label is free text for a human's benefit, so an unnameable machine
+    // gets something recognisable rather than a refusal.
+    std::env::var("HOSTNAME").unwrap_or_else(|_| "unnamed machine".to_string())
+}
+
 fn connect_command(
     code: String,
     gate: Option<String>,
@@ -1402,11 +1449,7 @@ fn connect_command(
         }
     };
 
-    let label = label.unwrap_or_else(|| {
-        std::fs::read_to_string("/etc/hostname")
-            .map(|h| h.trim().to_string())
-            .unwrap_or_default()
-    });
+    let label = label.unwrap_or_else(machine_label);
 
     let summary = remote::connect(&remote::Connect {
         gate: &gate,

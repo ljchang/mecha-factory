@@ -865,3 +865,69 @@ fn a_withheld_live_version_does_not_read_as_readable_by_everyone() {
         page.body
     );
 }
+
+/// A new account's hangar is off, and the page that prints its URL says so.
+///
+/// `enabled` defaults to false on purpose — a page must never appear by
+/// upgrading — so the URL this row shows answers 404 to its own owner from
+/// the day they sign up. That refusal is deliberately byte-identical to the
+/// one a nonexistent handle gets, which makes it unreadable as a diagnosis:
+/// the first external tenant's report was "my page does not work". The state
+/// is knowable behind a session, so it belongs beside the link.
+#[test]
+fn the_hangar_row_says_when_the_hangar_is_off() {
+    let server = common::start();
+    let session = signed_in(&server);
+
+    let page = get(&server, "/account", Some(&session));
+    assert!(
+        page.body.contains("off &mdash; it answers") || page.body.contains("off — it answers"),
+        "a hangar that is off reads as live: {}",
+        page.body
+    );
+
+    // Turned on, the row stops explaining itself — the link is the answer.
+    server
+        .db
+        .record_edit(
+            &server.user.id,
+            mecha_factory::db::RECORD_PROFILE,
+            "",
+            "enabled = true\n",
+            &mecha_factory::db::now(),
+        )
+        .unwrap();
+    let page = get(&server, "/account", Some(&session));
+    assert!(
+        !page.body.contains("until <a href=\"/account/edit/profile\">your profile</a>"),
+        "an enabled hangar is still described as off: {}",
+        page.body
+    );
+}
+
+/// The pairing page names what pairing does *not* install.
+///
+/// A machine pairs with publish and drain and never release, so the page that
+/// hands over the command is the last place a person is told where releasing
+/// actually happens before they go and find out by publishing something that
+/// stays invisible.
+#[test]
+fn the_pairing_page_says_where_releasing_happens() {
+    let server = common::start();
+    let session = signed_in(&server);
+    let csrf = csrf_of(&server, &session);
+    let page = post(
+        &server,
+        "/account/pair",
+        &format!("csrf={csrf}"),
+        Some(&session),
+    );
+    assert_eq!(page.status, 200, "{}", page.body);
+    assert!(page.body.contains("cargo install"), "{}", page.body);
+    assert!(page.body.contains("--replace"), "{}", page.body);
+    assert!(
+        page.body.contains("never a release key"),
+        "the one thing pairing withholds is unsaid: {}",
+        page.body
+    );
+}
