@@ -899,7 +899,9 @@ fn the_hangar_row_says_when_the_hangar_is_off() {
         .unwrap();
     let page = get(&server, "/account", Some(&session));
     assert!(
-        !page.body.contains("until <a href=\"/account/edit/profile\">your profile</a>"),
+        !page
+            .body
+            .contains("until <a href=\"/account/edit/profile\">your profile</a>"),
         "an enabled hangar is still described as off: {}",
         page.body
     );

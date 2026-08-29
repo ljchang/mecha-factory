@@ -873,13 +873,15 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             // entry, so the share URL sentence has to be the one that says so
             // — an agent that reads "now resolves to version 3" reports a
             // publication that did not happen.
-            Ok(match crate::remote::alias_stopped_here(&id, Some(version))? {
-                Some(stopped) => format!(
-                    "{id}'s alias points at version {version} in this machine's store. \
+            Ok(
+                match crate::remote::alias_stopped_here(&id, Some(version))? {
+                    Some(stopped) => format!(
+                        "{id}'s alias points at version {version} in this machine's store. \
                      {stopped}{reach}"
-                ),
-                None => format!("{id}'s share URL now resolves to version {version}.{reach}"),
-            })
+                    ),
+                    None => format!("{id}'s share URL now resolves to version {version}.{reach}"),
+                },
+            )
         }
         "bundle_unpublish" => {
             let id = string("id")?;
@@ -903,7 +905,9 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             // consequences: the agent tells somebody it is withdrawn, and the
             // origin keeps serving the bytes to anyone holding the link.
             let stopped = match crate::remote::alias_stopped_here(&id, None)? {
-                Some(why) => format!("{id}'s alias points at nothing in this machine's store. {why}"),
+                Some(why) => {
+                    format!("{id}'s alias points at nothing in this machine's store. {why}")
+                }
                 None => format!(
                     "{id}'s share URL no longer resolves{}.",
                     match before {

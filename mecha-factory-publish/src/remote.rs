@@ -1208,7 +1208,8 @@ mod tests {
             panic!("no account page named: {said}");
         };
         assert!(
-            said.find("factory-publish alias").is_none_or(|cli| cli > account),
+            said.find("factory-publish alias")
+                .is_none_or(|cli| cli > account),
             "the door that needs SSH came first: {said}"
         );
         assert!(
