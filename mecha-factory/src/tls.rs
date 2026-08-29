@@ -269,10 +269,24 @@ pub fn describe(config: &Config) -> String {
             let cached = std::fs::read_dir(config.acme_cache())
                 .map(|entries| entries.flatten().count())
                 .unwrap_or(0);
+            // Named because this is the sentence somebody reads to confirm a
+            // redirect host was picked up. Without it `check` prints the same
+            // line whether the key parsed or not, which is a green light that
+            // says nothing about the field just edited. No redirect hosts is
+            // no clause, rather than an empty one.
+            let redirects = if config.redirect_hosts.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "; {} on a certificate of their own, 301 to the gate",
+                    config.redirect_hosts.join(", ")
+                )
+            };
             format!(
-                "acme http-01 for {} plus one certificate per active user \
+                "acme http-01 for {} plus one certificate per active user{} \
                  ({}{} cached files in {}), contact {}",
                 config.origins.names().join(", "),
+                redirects,
                 if tls.staging { "staging, " } else { "" },
                 cached,
                 config.acme_cache().display(),
@@ -298,5 +312,25 @@ mod tests {
         let mut loopback = Config::example();
         loopback.tls = None;
         assert!(describe(&loopback).contains("loopback"));
+    }
+
+    /// `check` is what a deploy runs before restarting, so it has to be able
+    /// to say whether `redirect_hosts` was picked up. It could not until
+    /// 2026-08-29: the line was built from the origins alone and read
+    /// identically whether the key had parsed or not.
+    #[test]
+    fn check_names_the_redirect_hosts_when_there_are_any() {
+        let bare = Config::example();
+        assert!(
+            !describe(&bare).contains("301"),
+            "no redirect hosts should mean no clause, not an empty one"
+        );
+
+        let mut with_redirects = Config::example();
+        with_redirects.redirect_hosts = vec!["example.org".into(), "www.example.org".into()];
+        let described = describe(&with_redirects);
+        assert!(described.contains("example.org"), "{described}");
+        assert!(described.contains("www.example.org"), "{described}");
+        assert!(described.contains("301"), "{described}");
     }
 }

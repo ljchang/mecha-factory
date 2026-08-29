@@ -398,9 +398,15 @@ pub struct Config {
     pub tls: Option<Tls>,
     #[serde(default)]
     pub limits: Limits,
-    /// Hostnames that 301 to the gate — the apex domain, `www`. They ride
-    /// the base certificate, so the redirect is served over TLS like
-    /// everything else; DNS for each still has to point at this box.
+    /// Hostnames that 301 to the gate, keeping path and query — the apex
+    /// domain, `www`.
+    ///
+    /// They get **their own certificate**, deliberately not the base group's:
+    /// folding them in would change the base group's identity, and every base
+    /// name would miss the certificate cache on the next start. See
+    /// [`crate::certificates::groups`], which owns that reasoning. DNS for
+    /// each still has to point at this box before the name is listed here,
+    /// because issuance cannot complete until it does.
     #[serde(default)]
     pub redirect_hosts: Vec<String>,
     /// Where the documentation lives, when there is any to point at. Shown in

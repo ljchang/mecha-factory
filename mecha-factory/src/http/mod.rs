@@ -350,6 +350,21 @@ pub fn router(app: Shared) -> Router {
         .with_state(app)
 }
 
+/// Where a redirect host sends the browser: the gate, at the same path **and
+/// query**.
+///
+/// The query is not decoration. `/view/<handle>/<id>?v=2` names a version, so
+/// dropping it answers with a different page than the link asked for — and
+/// silently, because a 301 to a real page looks like it worked. This was
+/// `uri.path()` until 2026-08-29, which nothing noticed because the apex
+/// pointed at a parked site until that day and so had no traffic to lose.
+fn redirect_target(gate: &str, uri: &axum::http::Uri) -> String {
+    format!(
+        "{gate}{}",
+        uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/")
+    )
+}
+
 /// The origin table, the rate limit, and the default policy — in that order,
 /// before any handler runs.
 async fn guard(
@@ -375,11 +390,7 @@ async fn guard(
             .iter()
             .any(|h| h.to_ascii_lowercase() == bare)
         {
-            let target = format!(
-                "{}{}",
-                app.config.base_url(Role::Gate),
-                request.uri().path()
-            );
+            let target = redirect_target(&app.config.base_url(Role::Gate), request.uri());
             return (
                 StatusCode::MOVED_PERMANENTLY,
                 [(axum::http::header::LOCATION, target)],
@@ -568,5 +579,46 @@ impl IntoResponse for Failure {
             body,
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A redirect host keeps the whole reference, not just its path.
+    ///
+    /// The query case is the one that regressed: it fails on `uri.path()`,
+    /// which is what this stood as until 2026-08-29.
+    #[test]
+    fn a_redirect_keeps_the_path_and_the_query() {
+        let gate = "https://gate.example.org";
+
+        assert_eq!(
+            redirect_target(gate, &"/".parse().unwrap()),
+            format!("{gate}/")
+        );
+        assert_eq!(
+            redirect_target(gate, &"/account".parse().unwrap()),
+            format!("{gate}/account")
+        );
+        assert_eq!(
+            redirect_target(gate, &"/view/alice/report?v=2&raw=1".parse().unwrap()),
+            format!("{gate}/view/alice/report?v=2&raw=1"),
+            "the query selects a version, so losing it answers with another page"
+        );
+    }
+
+    /// An authority-form target — what a proxy `CONNECT` carries — has no path
+    /// at all. The gate's own root is the honest answer, and the alternative
+    /// is a panic on a request nobody controls.
+    #[test]
+    fn a_uri_with_no_path_redirects_to_the_gates_root() {
+        let uri: axum::http::Uri = "gate.example.org:443".parse().unwrap();
+        assert_eq!(uri.path_and_query(), None, "the case under test is gone");
+        assert_eq!(
+            redirect_target("https://gate.example.org", &uri),
+            "https://gate.example.org/"
+        );
     }
 }
