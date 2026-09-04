@@ -420,6 +420,33 @@ pub fn clean_winner(
     }
 }
 
+/// What the sweep books by itself at close, under the owner's `[poll]`
+/// setting. `None` is the owner's pick — the ranking is staged with reasons
+/// and a person releases it.
+///
+/// Every mode refuses a silent participant: the table in
+/// MEETING-POLL-UX-DESIGN.md §5 has no row that books over someone who never
+/// answered.
+pub fn auto_book(
+    ranked: &[RankedCandidate],
+    responded: usize,
+    total_participants: usize,
+    mode: crate::availability::AutoBook,
+) -> Option<&RankedCandidate> {
+    use crate::availability::AutoBook;
+    if responded != total_participants {
+        return None;
+    }
+    match mode {
+        AutoBook::Manual => None,
+        AutoBook::Unanimous => clean_winner(ranked, responded, total_participants),
+        // The ranking already puts unanimous before merely feasible, more
+        // yeses before fewer, and the earliest among equals — so the best
+        // feasible slot is the first one, or there is none.
+        AutoBook::Feasible => ranked.first().filter(|c| c.feasible),
+    }
+}
+
 /// The Monday of the week holding `date`.
 pub fn week_of(date: NaiveDate) -> NaiveDate {
     date - Duration::days(i64::from(date.weekday().num_days_from_monday()))
@@ -1424,6 +1451,72 @@ mod tests {
             week_of("2026-08-16".parse().unwrap()),
             "2026-08-10".parse().unwrap()
         );
+    }
+
+    /// MEETING-POLL-UX-DESIGN.md §5's table, row by row: what each mode
+    /// books, and that no mode books over a silent participant.
+    #[test]
+    fn auto_book_follows_the_table_and_never_books_over_silence() {
+        use crate::availability::AutoBook::{Feasible, Manual, Unanimous};
+        use std::collections::BTreeMap;
+        let t = |s: &str| DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc);
+        let candidates = vec![
+            (t("2030-02-05T18:00:00Z"), 60u32),
+            (t("2030-02-06T15:00:00Z"), 60u32),
+        ];
+        let answer = |wed: &str, thu: &str| -> BTreeMap<String, PollAnswer> {
+            [
+                (
+                    "2030-02-05T18:00:00Z|60".to_string(),
+                    PollAnswer::parse(wed).unwrap(),
+                ),
+                (
+                    "2030-02-06T15:00:00Z|60".to_string(),
+                    PollAnswer::parse(thu).unwrap(),
+                ),
+            ]
+            .into()
+        };
+        let starts =
+            |ranked: &[RankedCandidate], mode| auto_book(ranked, 2, 2, mode).map(|c| c.start);
+
+        // One unanimous slot: unanimous and feasible book it, manual never.
+        let ranked = rank_poll(&candidates, &[answer("yes", "no"), answer("yes", "yes")], 2);
+        assert_eq!(starts(&ranked, Unanimous), Some(t("2030-02-05T18:00:00Z")));
+        assert_eq!(starts(&ranked, Feasible), Some(t("2030-02-05T18:00:00Z")));
+        assert_eq!(starts(&ranked, Manual), None);
+
+        // Two unanimous: a pick, unless feasible — which takes the earliest.
+        let ranked = rank_poll(
+            &candidates,
+            &[answer("yes", "yes"), answer("yes", "yes")],
+            2,
+        );
+        assert_eq!(starts(&ranked, Unanimous), None);
+        assert_eq!(starts(&ranked, Feasible), Some(t("2030-02-05T18:00:00Z")));
+
+        // The best needs an if-needed: feasible accepts the cost, unanimous
+        // hands it to the owner.
+        let ranked = rank_poll(
+            &candidates,
+            &[answer("yes", "no"), answer("if_needed", "no")],
+            2,
+        );
+        assert_eq!(starts(&ranked, Unanimous), None);
+        assert_eq!(starts(&ranked, Feasible), Some(t("2030-02-05T18:00:00Z")));
+
+        // Nothing feasible: nobody books.
+        let ranked = rank_poll(&candidates, &[answer("yes", "no"), answer("no", "yes")], 2);
+        assert_eq!(starts(&ranked, Feasible), None);
+
+        // A silent participant: no mode books, however clean the answered look.
+        let ranked = rank_poll(&candidates, &[answer("yes", "yes")], 2);
+        for mode in [Unanimous, Feasible, Manual] {
+            assert!(
+                auto_book(&ranked, 1, 2, mode).is_none(),
+                "{mode:?} booked over silence"
+            );
+        }
     }
 
     /// The guardrail, against every murky shape it must refuse: a tie of
