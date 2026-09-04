@@ -1115,9 +1115,10 @@ mod tests {
         assert!(life.book.is_none());
         assert!(!life.holds_slots(), "released");
         assert!(out.lines[0].contains("stalled"), "{:?}", out.lines);
-        assert!(
-            out.close_box_with.is_none(),
-            "no sentence for the page — nothing was decided"
+        assert_eq!(
+            out.close_box_with.as_deref(),
+            Some("No meeting was booked from this poll."),
+            "the page says so, which also retires the record"
         );
         assert_eq!(life.summary(), "stalled — invitations never all sent");
     }
