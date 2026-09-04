@@ -913,7 +913,7 @@ mod tests {
             json!({
                 "instrument": "book", "poll_id": id, "title": id,
                 "candidates": [{"start": WED, "end": "2030-02-05T19:00:00Z", "duration_minutes": 60}],
-                "lifecycle": { "closed_at": closed.then(|| WED) },
+                "lifecycle": { "closed_at": closed.then_some(WED) },
             })
         };
         std::fs::write(dir.join("open.json"), record("open", false).to_string()).unwrap();
