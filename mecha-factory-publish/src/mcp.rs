@@ -302,10 +302,11 @@ fn tools() -> Vec<ToolSpec> {
                  The times offered are drawn from the user's real availability at release — \
                  the booking policy's hours minus their actual busy time, from the slots \
                  pipeline that already runs — so nothing offered is a time they do not have, \
-                 and you never run a freebusy step or write a file. Each person is mailed \
-                 their own link from the user's account, the silent are nudged once, and the \
-                 poll closes on its own. What happens at close is the policy's `[poll] \
-                 auto_book`: by default a time everyone can do is booked as a calendar \
+                 and you never run a freebusy step or write a file. The call writes the \
+                 record and queues the invitations in it; the mail sweep on the user's timer \
+                 then mails each person their own link from the user's account, nudges the \
+                 silent once, and the poll closes on its own. What happens at close is the \
+                 policy's `[poll] auto_book`: by default a time everyone can do is booked as a calendar \
                  invitation by itself and anything else is put in front of the user to pick; \
                  the user may have set it to book any feasible time, or to always pick. Say \
                  why in `message`; the invitation text under it is a default the user edits \
@@ -1478,10 +1479,11 @@ fn describe_created(created: &crate::polls::Created) -> String {
                     .join(", ")
             );
             out.push_str(
-                "This wrote the record; the invitations are queued in it for `mecha-mail \
-                 polls`, which mails each person their own link from the user's account on \
-                 its timer. Nothing further is needed from you. From there the poll runs \
-                 itself: the silent are nudged once, and at close ",
+                "This wrote the record and queued the invitations in it; nothing has been \
+                 sent yet. Delivery is `mecha-mail polls`' when it runs on its timer — each \
+                 person their own link from the user's account. Nothing further is needed \
+                 from you. From there the poll runs itself: the silent are nudged once, and \
+                 at close ",
             );
             // The promise is the policy's, not a sentence printed regardless
             // of it: under `manual` nothing books by itself.
@@ -1521,6 +1523,35 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A meeting poll's answer carries no link and no address: a link in a
+    /// tool answer is a link the model is tempted to mail by hand, which is
+    /// the flow the sweep replaces. Would fail on the answer before the
+    /// lifecycle existed, which printed every URL.
+    #[test]
+    fn a_meeting_poll_answer_carries_no_link_and_no_address() {
+        let created = crate::polls::Created::Times {
+            poll_id: "lab-20300128".into(),
+            title: "Lab meeting".into(),
+            candidates: 8,
+            first: "Tue 5 Feb 1:00 PM".into(),
+            last: "Thu 14 Feb 4:00 PM".into(),
+            deadline_local: "Thursday 31 January at 5:00 PM EST".into(),
+            auto_book: "unanimous".into(),
+            people: vec![crate::polls::Invited {
+                name: "Priya".into(),
+                email: "priya@example.edu".into(),
+                url: "https://gate.example.org/p/h/lab-20300128/tok".into(),
+            }],
+            record: std::path::PathBuf::from("/tmp/lab.json"),
+        };
+        let answer = describe_created(&created);
+        assert!(!answer.contains("https://"), "{answer}");
+        assert!(!answer.contains("priya@example.edu"), "{answer}");
+        assert!(answer.contains("Priya"), "{answer}");
+        assert!(answer.contains("nothing has been sent yet"), "{answer}");
+        assert!(answer.contains("booked automatically"), "{answer}");
+    }
 
     /// The annotations are the whole security contract with mecha, and they are
     /// derived rather than declared on the far side: `openWorldHint` sets both

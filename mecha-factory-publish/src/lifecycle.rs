@@ -65,7 +65,7 @@ pub const DEFAULT_INVITATION: &str = "\
 
 I'm finding a time for \"{title}\" ({duration} minutes). Could you mark which of these times work for you?
 
-    {url}
+<{url}>
 
 Please answer by {deadline_local}. Tap a time to cycle through yes, if needed, and no. The link is yours alone — it is how the page knows the answers are yours — so please don't forward it. Once everyone has answered, I'll send a calendar invitation for the time that works.";
 
@@ -73,7 +73,7 @@ Please answer by {deadline_local}. Tap a time to cycle through yes, if needed, a
 pub const DEFAULT_NUDGE: &str = "\
 A quick reminder — the poll for \"{title}\" closes {deadline_local}, and I don't have your answer yet:
 
-    {url}
+<{url}>
 
 It takes about ten seconds. Thank you!";
 
@@ -433,12 +433,20 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
     }
 }
 
-/// The box answered `closed: false` to our close: someone closed it by hand
-/// between the tally and the write, and the box keeps the resolution
-/// written then. Record that — the box's sentence, not ours — rather than
-/// a completed write that never happened.
+/// The box answered `closed: false` to our close. Two worlds, told apart by
+/// the record: with a `booked` (or an owner's `no_time`) on it, the close
+/// was **ours** from an earlier tick whose record write was lost — the
+/// box has our sentence and the outcome stands. Without one, someone
+/// closed it by hand between the tally and the write, and the box keeps
+/// the resolution written then: record that — the box's sentence, not ours
+/// — rather than a completed write that never happened.
 pub fn box_refused_close(life: &mut Lifecycle, now: DateTime<Utc>) -> String {
     life.box_closed_at = Some(now);
+    if life.booked.is_some() || life.verdict.as_deref() == Some("no_time") {
+        return "the box was already closed — our own close from an earlier tick whose \
+                record write was lost; the outcome stands"
+            .to_string();
+    }
     life.resolution = None;
     life.verdict = Some("closed".to_string());
     "already closed on the box by hand; its resolution stands, not ours".to_string()
@@ -1087,11 +1095,20 @@ mod tests {
         });
         let out = advance(&mut life, &observed, t("2030-01-30T10:04:00Z"));
         assert!(out.close_box_with.is_some());
+        // Booked: the refusal is our own earlier close, its write lost.
         let line = box_refused_close(&mut life, t("2030-01-30T10:04:01Z"));
-        assert!(line.contains("its resolution stands"));
+        assert!(line.contains("our own close"), "{line}");
         assert!(life.box_closed_at.is_some(), "retired: the box is settled");
-        assert_eq!(life.resolution, None, "not a sentence the box never wrote");
-        assert_eq!(life.verdict.as_deref(), Some("closed"));
+        assert_eq!(life.verdict.as_deref(), Some("book"), "the booking stands");
+        assert!(life.resolution.is_some(), "our sentence stands");
+
+        // Not booked: someone closed it by hand in between.
+        let mut hand = fixture("unanimous");
+        advance(&mut hand, &observed, t("2030-01-30T10:00:00Z"));
+        let line = box_refused_close(&mut hand, t("2030-01-30T10:04:01Z"));
+        assert!(line.contains("by hand"), "{line}");
+        assert_eq!(hand.resolution, None, "not a sentence the box never wrote");
+        assert_eq!(hand.verdict.as_deref(), Some("closed"));
     }
 
     /// A close by hand on the box is final: recorded, resolution kept, no
@@ -1227,6 +1244,20 @@ mod tests {
         assert_eq!(after["lifecycle"]["closed_at"], WED);
 
         std::env::remove_var("MECHA_HOME");
+    }
+
+    /// The invitation body goes through a markdown renderer on the mail
+    /// side: an indented URL is a code block, an angle-bracketed one is a
+    /// link.
+    #[test]
+    fn the_templates_carry_the_link_as_a_link() {
+        for template in [DEFAULT_INVITATION, DEFAULT_NUDGE] {
+            assert!(template.contains("<{url}>"), "{template}");
+            assert!(
+                !template.lines().any(|l| l.starts_with("    ")),
+                "{template}"
+            );
+        }
     }
 
     #[test]

@@ -581,9 +581,10 @@ pub fn slug(title: &str, on: chrono::NaiveDate) -> String {
             dash = true;
         }
     }
-    let stem = out.trim_end_matches('-');
+    let stem = &out[..out.len().min(40)];
+    let stem = stem.trim_end_matches('-');
     let stem = if stem.is_empty() { "meeting" } else { stem };
-    format!("{}-{}", &stem[..stem.len().min(40)], on.format("%Y%m%d"))
+    format!("{stem}-{}", on.format("%Y%m%d"))
 }
 
 /// A deadline or a window edge as written: RFC 3339, or a bare date read in
@@ -626,6 +627,10 @@ pub fn plan_meeting(
         "the policy offers {:?}-minute meetings, not {}",
         policy.durations,
         request.duration
+    );
+    anyhow::ensure!(
+        request.max_candidates >= 1,
+        "max_candidates must be at least 1 — a poll with no times asks nothing"
     );
     let generated_at = chrono::DateTime::parse_from_rfc3339(&freebusy.generated_at)
         .context("generated_at")?
@@ -686,7 +691,7 @@ pub fn plan_meeting(
         .into_iter()
         .filter(|s| s.duration_minutes == request.duration)
         .filter(|s| s.start >= earliest && s.end <= latest)
-        .take(request.max_candidates.max(1))
+        .take(request.max_candidates)
         .collect();
     anyhow::ensure!(
         !candidates.is_empty(),
@@ -1017,7 +1022,11 @@ fn general(poll_id: &str, tally: &Value, spec_value: &Value, state: String) -> R
 /// resolution written at close is *not* overwritten.
 pub fn close(instrument: &str, poll_id: &str, resolution: Option<&str>) -> Result<bool> {
     let reply = gate()?.poll_close(instrument, poll_id, resolution)?;
-    Ok(reply["closed"].as_bool().unwrap_or(false))
+    // A reply this client cannot read is an error the caller retries, never
+    // a `false` that a sweep would record as somebody's refusal.
+    reply["closed"]
+        .as_bool()
+        .context("the box's close reply carries no `closed`")
 }
 
 /// Ballots as CSV — every answer, prose included.
@@ -1206,6 +1215,14 @@ end = "17:00"
         .unwrap_err()
         .to_string();
         assert!(err.contains("lowercase"), "{err}");
+
+        let err = planned(MeetingRequest {
+            max_candidates: 0,
+            ..lab(60)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("at least 1"), "{err}");
     }
 
     /// The candidates of an open poll are holds: a second poll never offers
@@ -1286,6 +1303,10 @@ end = "17:00"
             "grant-q-a-draft-2-20300128"
         );
         assert_eq!(slug("!!!", on), "meeting-20300128");
+        // The cut never leaves a doubled dash before the date.
+        let long = slug("a very long title that keeps going and going and going", on);
+        assert!(!long.contains("--"), "{long}");
+        assert!(long.ends_with("-20300128"));
     }
 
     /// Without its own freebusy the create reads the pipeline's cache, and
