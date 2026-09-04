@@ -166,6 +166,18 @@ impl Lifecycle {
         self.closed_at.is_some()
     }
 
+    /// Whether the booking page must still keep this poll's candidates off
+    /// sale. Not "still asking" but "still committed": a closed poll whose
+    /// event does not exist yet — the sweep decided, `mecha-mail polls` has
+    /// not run, or the owner has not picked — would otherwise publish the
+    /// winning slot for the minutes or days in between. A hand close and
+    /// `no_time` release at once.
+    pub fn holds_slots(&self) -> bool {
+        !self.is_closed()
+            || (self.booked.is_none()
+                && matches!(self.verdict.as_deref(), Some("book") | Some("pick")))
+    }
+
     /// The local rendering of the deadline, for the templates.
     pub fn deadline_local(&self) -> String {
         match (self.deadline, self.timezone.parse::<chrono_tz::Tz>()) {
@@ -240,10 +252,23 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
     let mut close_box_with = None;
 
     if !life.is_closed() {
+        // The box writes exactly `open` or `closed`. Anything else is a reply
+        // this client could not read — never a close, and never terminal:
+        // the record is left alone and the next tick asks again.
+        if seen.state != "open" && seen.state != "closed" {
+            lines.push(format!(
+                "the box reports state `{}`, which this client does not understand; record untouched",
+                seen.state
+            ));
+            return Advanced {
+                lines,
+                close_box_with,
+            };
+        }
         // Closed by hand on the box (the TUI's close key, the CLI): the
         // sweep records it and stops. Whatever resolution was written there
         // stands.
-        if seen.state != "open" {
+        if seen.state == "closed" {
             life.closed_at = Some(now);
             life.verdict = Some("closed".to_string());
             life.resolution = seen.resolution.clone();
@@ -493,10 +518,45 @@ fn load(path: &std::path::Path) -> Result<Option<Record>> {
     }))
 }
 
-/// Write the lifecycle back into the record, temp-sibling-and-rename so a
+/// The lifecycle fields this half owns. `save` writes these and nothing
+/// else, into the file as it is *now* — `mecha-mail polls` runs on the same
+/// timer and owns `invites`, `nudged_at` and `booked`, and a snapshot taken
+/// before a round of box calls would write its answers back over theirs:
+/// a lost `invites` entry is a second invitation, a lost `booked` a second
+/// calendar event.
+pub const OWNED: &[&str] = &[
+    "nudge_due",
+    "closed_at",
+    "verdict",
+    "book",
+    "ranked",
+    "silent",
+    "resolution",
+    "box_closed_at",
+];
+
+/// Write this half's fields back into the record, re-read first so another
+/// verb's writes since the load survive; temp-sibling-and-rename so a
 /// reader never sees half a file.
 pub fn save(record: &mut Record) -> Result<()> {
-    record.value["lifecycle"] = serde_json::to_value(&record.lifecycle)?;
+    let mine = serde_json::to_value(&record.lifecycle)?;
+    let mut current = match std::fs::read_to_string(&record.path) {
+        Ok(text) => serde_json::from_str::<Value>(&text).with_context(|| {
+            format!(
+                "{} changed under the sweep and is not JSON",
+                record.path.display()
+            )
+        })?,
+        // Gone since the load: write what we have rather than lose the tick.
+        Err(_) => record.value.clone(),
+    };
+    if !current["lifecycle"].is_object() {
+        current["lifecycle"] = json!({});
+    }
+    for key in OWNED {
+        current["lifecycle"][*key] = mine[*key].clone();
+    }
+    record.value = current;
     let tmp = record.path.with_extension("json.tmp");
     std::fs::write(&tmp, serde_json::to_string_pretty(&record.value)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
@@ -521,7 +581,7 @@ pub fn open_holds() -> Result<Vec<Interval>> {
         problems.join("\n")
     );
     let mut holds = Vec::new();
-    for record in records.iter().filter(|r| !r.lifecycle.is_closed()) {
+    for record in records.iter().filter(|r| r.lifecycle.holds_slots()) {
         let Some(candidates) = record.value["candidates"].as_array() else {
             continue;
         };
@@ -868,6 +928,52 @@ mod tests {
         assert_eq!(out.close_box_with.as_deref(), Some("No time found"));
     }
 
+    /// A reply this client could not read is neither a close nor terminal:
+    /// the record is untouched and the next tick asks again.
+    #[test]
+    fn an_unreadable_box_state_is_a_finding_not_a_close() {
+        let mut life = fixture("unanimous");
+        let before = life.clone();
+        let mut observed = seen(&[
+            ("Priya", Some(("yes", "yes"))),
+            ("Tal", Some(("yes", "yes"))),
+        ]);
+        observed.state = "?".into();
+        let out = advance(&mut life, &observed, t("2030-01-30T10:00:00Z"));
+        assert_eq!(life, before, "nothing recorded over an unknown state");
+        assert!(
+            out.lines[0].contains("does not understand"),
+            "{:?}",
+            out.lines
+        );
+        assert!(out.close_box_with.is_none());
+    }
+
+    /// The hold outlives the close: a decided poll whose event does not
+    /// exist yet keeps its candidates off the booking page.
+    #[test]
+    fn holds_last_until_the_booking_exists() {
+        let mut life = fixture("unanimous");
+        assert!(life.holds_slots(), "open");
+        life.closed_at = Some(t("2030-01-30T10:00:00Z"));
+        life.verdict = Some("book".into());
+        assert!(life.holds_slots(), "decided, not yet booked");
+        life.verdict = Some("pick".into());
+        assert!(life.holds_slots(), "waiting on the owner");
+        life.booked = Some(Booked {
+            event_id: "ev".into(),
+            account: "a".into(),
+            at: t("2030-01-30T10:03:00Z"),
+        });
+        assert!(!life.holds_slots(), "the event exists");
+        let mut gone = fixture("unanimous");
+        gone.closed_at = Some(t("2030-01-30T10:00:00Z"));
+        gone.verdict = Some("no_time".into());
+        assert!(!gone.holds_slots(), "no time: nothing to protect");
+        gone.verdict = Some("closed".into());
+        assert!(!gone.holds_slots(), "closed by hand: nothing to protect");
+    }
+
     /// A close by hand on the box is final: recorded, resolution kept, no
     /// verdict computed over it.
     #[test]
@@ -965,6 +1071,38 @@ mod tests {
             err.contains("candidate 0") && err.contains("`end`"),
             "{err}"
         );
+        std::fs::remove_file(dir.join("torn.json")).unwrap();
+
+        // A closed poll still waiting on its event holds its slot.
+        let mut decided = record("decided", true);
+        decided["lifecycle"]["verdict"] = json!("book");
+        std::fs::write(dir.join("decided.json"), decided.to_string()).unwrap();
+        assert_eq!(open_holds().unwrap().len(), 2, "open + decided-not-booked");
+
+        // `save` merges only this half's fields into the file as it is now:
+        // the mail half's write since the load survives.
+        let (loaded, _) = super::records().unwrap();
+        let mut mine = loaded.into_iter().find(|r| r.poll_id == "open").unwrap();
+        let mut theirs: Value =
+            serde_json::from_str(&std::fs::read_to_string(&mine.path).unwrap()).unwrap();
+        theirs["lifecycle"]["invites"] = json!({"Priya": "2030-01-29T14:00:00Z"});
+        theirs["lifecycle"]["booked"] = json!({"event_id": "ev9", "account": "a", "at": WED});
+        std::fs::write(&mine.path, theirs.to_string()).unwrap();
+        mine.lifecycle.verdict = Some("pick".into());
+        mine.lifecycle.closed_at = Some(t(WED));
+        save(&mut mine).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&mine.path).unwrap()).unwrap();
+        assert_eq!(
+            after["lifecycle"]["invites"]["Priya"],
+            "2030-01-29T14:00:00Z"
+        );
+        assert_eq!(
+            after["lifecycle"]["booked"]["event_id"], "ev9",
+            "theirs kept"
+        );
+        assert_eq!(after["lifecycle"]["verdict"], "pick", "mine written");
+        assert_eq!(after["lifecycle"]["closed_at"], WED);
 
         std::env::remove_var("MECHA_HOME");
     }
