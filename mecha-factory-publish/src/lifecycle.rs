@@ -507,15 +507,34 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
 
     // Once the outcome exists, the poll page gets its sentence.
     if life.is_closed() && life.box_closed_at.is_none() {
-        if let Some(booked) = &life.booked {
-            let sentence = life.resolution.clone().unwrap_or_else(|| {
-                let when = life
-                    .book
-                    .as_ref()
-                    .map(|b| local_range(b, &life.timezone))
-                    .unwrap_or_else(|| booked.at.to_rfc3339());
-                format!("Booked: {when}")
-            });
+        if life.booked.is_some() {
+            let when = life.book.as_ref().map(|b| local_range(b, &life.timezone));
+            let sentence = match (life.resolution.clone(), when) {
+                (Some(sentence), _) => sentence,
+                (None, Some(when)) => format!("Booked: {when}"),
+                // The event exists but not the slot it landed on: `mecha
+                // polls` has not written its half yet. No sentence beats a
+                // wrong one — the box keeps the first resolution it is
+                // given, for everyone holding a link, forever.
+                (None, None) => {
+                    lines.push(
+                        "booked, but the slot is not on the record yet; the page's sentence \
+                         waits a tick"
+                            .to_string(),
+                    );
+                    return Advanced {
+                        lines,
+                        close_box_with,
+                    };
+                }
+            };
+            life.resolution = Some(sentence.clone());
+            close_box_with = Some(sentence);
+        } else if life.verdict.as_deref() == Some("stalled") && life.resolution.is_none() {
+            // A stall is an outcome too: closing the page with it stops the
+            // sweep re-polling the box for this record every tick forever,
+            // and tells anyone holding a link what happened.
+            let sentence = "No meeting was booked from this poll.".to_string();
             life.resolution = Some(sentence.clone());
             close_box_with = Some(sentence);
         } else if let Some(sentence) = &life.resolution {
@@ -1238,7 +1257,45 @@ mod tests {
         assert!(!life.holds_slots(), "released");
         assert!(out.lines[0].contains("stalled"), "{:?}", out.lines);
         assert_eq!(life.summary(), "stalled — booking never made");
+        // A stall closes the page with an honest sentence, which is what
+        // retires the record from the sweep.
+        assert_eq!(
+            out.close_box_with.as_deref(),
+            Some("No meeting was booked from this poll.")
+        );
+    }
+
+    /// An event without its slot on the record — `booked` written before
+    /// `mecha polls` wrote `book` — gets no sentence yet, never a creation
+    /// timestamp under "Booked:".
+    #[test]
+    fn a_booking_without_its_slot_waits_for_its_sentence() {
+        let mut life = fixture("manual");
+        let observed = seen(&[
+            ("Priya", Some(("yes", "no"))),
+            ("Tal", Some(("yes", "yes"))),
+        ]);
+        advance(&mut life, &observed, t("2030-01-30T10:00:00Z"));
+        assert_eq!(life.verdict.as_deref(), Some("pick"));
+        life.booked = Some(Booked {
+            event_id: "ev".into(),
+            account: "a".into(),
+            at: t("2030-01-30T10:03:00Z"),
+        });
+        let out = advance(&mut life, &observed, t("2030-01-30T10:04:00Z"));
         assert!(out.close_box_with.is_none());
+        assert!(life.resolution.is_none());
+        assert!(out.lines[0].contains("waits a tick"), "{:?}", out.lines);
+        life.book = Some(Booking {
+            start: t(WED),
+            end: t("2030-02-05T19:00:00Z"),
+            duration_minutes: 60,
+        });
+        let out = advance(&mut life, &observed, t("2030-01-30T10:06:00Z"));
+        assert_eq!(
+            out.close_box_with.as_deref(),
+            Some("Booked: Tue 5 Feb, 1:00 PM–2:00 PM EST")
+        );
     }
 
     /// The conflict handoff runs under the same guards as the open branch:
