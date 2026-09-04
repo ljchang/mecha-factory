@@ -145,6 +145,9 @@ pub struct Lifecycle {
     /// The outbox id of the owner's pick draft, when there is one.
     pub pick_item: Option<String>,
     pub booked: Option<Booked>,
+    /// `mecha-mail polls` found the clean winner colliding with the owner's
+    /// live calendar and made no event. Its field; this side reads it.
+    pub conflict: Option<String>,
     /// The sentence the poll page shows once closed.
     pub resolution: Option<String>,
     pub box_closed_at: Option<DateTime<Utc>>,
@@ -193,6 +196,10 @@ impl Lifecycle {
     /// The one-line state the monitor and the briefing show.
     pub fn summary(&self) -> String {
         let sent = self.invites.values().filter(|v| v.is_some()).count();
+        if self.verdict.is_none() && self.invites.is_empty() {
+            // No invitations on record is not "all sent".
+            return "—".to_string();
+        }
         if let Some(verdict) = &self.verdict {
             return match verdict.as_str() {
                 "book" if self.booked.is_some() => "booked".to_string(),
@@ -354,6 +361,45 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
                 }
             }
         }
+    }
+
+    // The mail half found the clean winner colliding with the owner's live
+    // calendar: no event was made, and the decision comes back here — the
+    // owner picks, over the full ranking, with the collision on its row.
+    if life.is_closed()
+        && life.verdict.as_deref() == Some("book")
+        && life.booked.is_none()
+        && life.conflict.is_some()
+    {
+        let reason = life.conflict.clone().unwrap_or_default();
+        let collided = life.book.as_ref().map(|b| b.start);
+        life.verdict = Some("pick".to_string());
+        life.book = None;
+        life.ranked = seen
+            .ranked
+            .iter()
+            .take(3)
+            .map(|c| {
+                let mut why = self::reason(c, &seen.answers, &seen.silent);
+                if collided == Some(c.start) {
+                    why = format!("{why} — but {reason}");
+                }
+                RankedRow {
+                    start: c.start,
+                    end: c.start + chrono::Duration::minutes(i64::from(c.duration_minutes)),
+                    duration_minutes: c.duration_minutes,
+                    yes: c.yes,
+                    if_needed: c.if_needed,
+                    no: c.no,
+                    feasible: c.feasible,
+                    unanimous: c.unanimous,
+                    reason: why,
+                }
+            })
+            .collect();
+        lines.push(format!(
+            "the winning slot collided with the calendar ({reason}) — the owner picks"
+        ));
     }
 
     // Once the outcome exists, the poll page gets its sentence.
@@ -974,6 +1020,41 @@ mod tests {
         assert!(!gone.holds_slots(), "closed by hand: nothing to protect");
     }
 
+    /// The mail half could not book the clean winner: the verdict becomes
+    /// the owner's pick over the full ranking, the collision on its row,
+    /// and the slot is not offered as a booking again.
+    #[test]
+    fn a_conflict_from_the_mail_half_becomes_a_pick_over_the_full_ranking() {
+        let mut life = fixture("unanimous");
+        let observed = seen(&[
+            ("Priya", Some(("yes", "yes"))),
+            ("Tal", Some(("yes", "no"))),
+        ]);
+        advance(&mut life, &observed, t("2030-01-30T10:00:00Z"));
+        assert_eq!(life.verdict.as_deref(), Some("book"));
+        assert_eq!(life.book.as_ref().unwrap().start, t(WED));
+
+        life.conflict = Some("your calendar now has something at that time".into());
+        let out = advance(&mut life, &observed, t("2030-01-30T10:04:00Z"));
+        assert_eq!(life.verdict.as_deref(), Some("pick"));
+        assert!(life.book.is_none());
+        assert_eq!(life.ranked.len(), 2, "the whole ranking, not the one slot");
+        assert_eq!(life.ranked[0].start, t(WED));
+        assert!(
+            life.ranked[0]
+                .reason
+                .ends_with("— but your calendar now has something at that time"),
+            "{}",
+            life.ranked[0].reason
+        );
+        assert_eq!(life.ranked[1].reason, "Tal can't");
+        assert!(out.lines[0].contains("collided"), "{:?}", out.lines);
+        // And it is not re-flipped on the next tick.
+        let before = life.clone();
+        advance(&mut life, &observed, t("2030-01-30T10:06:00Z"));
+        assert_eq!(life, before);
+    }
+
     /// A close by hand on the box is final: recorded, resolution kept, no
     /// verdict computed over it.
     #[test]
@@ -1109,6 +1190,11 @@ mod tests {
 
     #[test]
     fn the_summary_reads_as_one_line() {
+        assert_eq!(
+            Lifecycle::default().summary(),
+            "—",
+            "no invitations on record is not done"
+        );
         let mut life = fixture("unanimous");
         assert_eq!(life.summary(), "invites sent");
         life.invites.insert("Tal".into(), None);
