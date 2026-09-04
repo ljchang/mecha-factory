@@ -1859,7 +1859,7 @@ fn sweep_command() -> Result<()> {
             // A write that fails is this record's failure, reported and
             // retried next tick — never the reason a later poll goes
             // un-advanced.
-            match lifecycle::save(&mut record) {
+            match lifecycle::save(&mut record, &before) {
                 Ok(()) => touched += 1,
                 Err(e) => {
                     eprintln!("{}: could not write the record — {e:#}", record.poll_id);

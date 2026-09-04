@@ -604,11 +604,15 @@ pub const OWNED: &[&str] = &[
     "box_closed_at",
 ];
 
-/// Write this half's fields back into the record, re-read first so another
-/// verb's writes since the load survive; temp-sibling-and-rename so a
-/// reader never sees half a file.
-pub fn save(record: &mut Record) -> Result<()> {
+/// Write the fields this tick **changed** back into the record, re-read
+/// first so another verb's writes since the load survive; temp-sibling-
+/// and-rename so a reader never sees half a file. Only what changed, not
+/// every owned key: `verdict` is shared with `mecha polls` (a rejected pick
+/// becomes `no_time` there), and a snapshot older than that rejection must
+/// not write `pick` back over it.
+pub fn save(record: &mut Record, before: &Lifecycle) -> Result<()> {
     let mine = serde_json::to_value(&record.lifecycle)?;
+    let was = serde_json::to_value(before)?;
     let mut current = match std::fs::read_to_string(&record.path) {
         Ok(text) => serde_json::from_str::<Value>(&text).with_context(|| {
             format!(
@@ -623,7 +627,9 @@ pub fn save(record: &mut Record) -> Result<()> {
         current["lifecycle"] = json!({});
     }
     for key in OWNED {
-        current["lifecycle"][*key] = mine[*key].clone();
+        if mine[*key] != was[*key] {
+            current["lifecycle"][*key] = mine[*key].clone();
+        }
     }
     record.value = current;
     let tmp = record.path.with_extension("json.tmp");
@@ -1227,9 +1233,10 @@ mod tests {
         theirs["lifecycle"]["invites"] = json!({"Priya": "2030-01-29T14:00:00Z"});
         theirs["lifecycle"]["booked"] = json!({"event_id": "ev9", "account": "a", "at": WED});
         std::fs::write(&mine.path, theirs.to_string()).unwrap();
+        let before = mine.lifecycle.clone();
         mine.lifecycle.verdict = Some("pick".into());
         mine.lifecycle.closed_at = Some(t(WED));
-        save(&mut mine).unwrap();
+        save(&mut mine, &before).unwrap();
         let after: Value =
             serde_json::from_str(&std::fs::read_to_string(&mine.path).unwrap()).unwrap();
         assert_eq!(
@@ -1242,6 +1249,32 @@ mod tests {
         );
         assert_eq!(after["lifecycle"]["verdict"], "pick", "mine written");
         assert_eq!(after["lifecycle"]["closed_at"], WED);
+
+        // An owned key this tick did not change is not written either: the
+        // owner's rejection, recorded by `mecha polls` after the load,
+        // stands over the snapshot's `pick`.
+        let (loaded, _) = super::records().unwrap();
+        let mut stale = loaded.into_iter().find(|r| r.poll_id == "open").unwrap();
+        let mut theirs: Value =
+            serde_json::from_str(&std::fs::read_to_string(&stale.path).unwrap()).unwrap();
+        theirs["lifecycle"]["verdict"] = json!("no_time");
+        theirs["lifecycle"]["resolution"] = json!("Let's do it async");
+        std::fs::write(&stale.path, theirs.to_string()).unwrap();
+        let before = stale.lifecycle.clone();
+        stale.lifecycle.silent = vec!["Tal".into()];
+        save(&mut stale, &before).unwrap();
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&stale.path).unwrap()).unwrap();
+        assert_eq!(
+            after["lifecycle"]["verdict"], "no_time",
+            "the rejection stands"
+        );
+        assert_eq!(after["lifecycle"]["resolution"], "Let's do it async");
+        assert_eq!(
+            after["lifecycle"]["silent"],
+            json!(["Tal"]),
+            "the change is written"
+        );
 
         std::env::remove_var("MECHA_HOME");
     }
