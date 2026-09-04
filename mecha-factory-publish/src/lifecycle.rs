@@ -452,7 +452,7 @@ pub fn local_range(booking: &Booking, timezone: &str) -> String {
             format!(
                 "{}, {}–{}",
                 start.format("%a %-d %b"),
-                start.format("%-I:%M"),
+                start.format("%-I:%M %p"),
                 end.format("%-I:%M %p %Z")
             )
         }
@@ -975,7 +975,7 @@ mod tests {
         let out = advance(&mut life, &observed, t("2030-01-30T10:04:00Z"));
         assert_eq!(
             out.close_box_with.as_deref(),
-            Some("Booked: Tue 5 Feb, 1:00–2:00 PM EST")
+            Some("Booked: Tue 5 Feb, 1:00 PM–2:00 PM EST")
         );
         assert_eq!(life.resolution, out.close_box_with);
 
