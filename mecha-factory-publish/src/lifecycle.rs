@@ -692,7 +692,12 @@ pub fn save(record: &mut Record, before: &Lifecycle) -> Result<()> {
         }
     }
     record.value = current;
-    let tmp = record.path.with_extension("json.tmp");
+    // A sibling unique to this process: three binaries write this file, and
+    // a shared temp name would let two of them interleave into a torn record
+    // that all three then report as unreadable.
+    let tmp = record
+        .path
+        .with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(&record.value)?)
         .with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, &record.path)
@@ -778,7 +783,7 @@ pub fn remember_freebusy(
         freebusy,
     };
     let path = cache_dir()?.join(format!("{instrument}.json"));
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     std::fs::write(&tmp, serde_json::to_string_pretty(&doc)?)?;
     std::fs::rename(&tmp, &path)?;
     Ok(path)
