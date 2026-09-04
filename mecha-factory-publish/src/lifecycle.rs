@@ -934,7 +934,11 @@ mod tests {
             out.close_box_with.is_none(),
             "the box closes once the event exists"
         );
-        assert!(out.lines[0].contains("books under `unanimous`"), "{:?}", out.lines);
+        assert!(
+            out.lines[0].contains("books under `unanimous`"),
+            "{:?}",
+            out.lines
+        );
     }
 
     /// The same answers under `manual`: the owner picks, with reasons.
