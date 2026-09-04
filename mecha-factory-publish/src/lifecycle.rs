@@ -296,6 +296,19 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
             };
         }
 
+        // A tally with no participants is the box failing to read its own
+        // roster (it serves an empty list on a database error), never a
+        // poll with nobody on it — the record's `invites` names them. Left
+        // alone, and asked again next tick.
+        if seen.total == 0 {
+            lines.push(
+                "the box reports no participants for this poll; record untouched".to_string(),
+            );
+            return Advanced {
+                lines,
+                close_box_with,
+            };
+        }
         let all_sent = !life.invites.is_empty() && life.invites.values().all(|v| v.is_some());
         // The lead is measured from the *last* invitation to go out: a
         // nudge eleven hours after someone's invitation is nagging however
@@ -372,10 +385,11 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
                         duration_minutes: winner.duration_minutes,
                     });
                     lines.push(format!(
-                        "closed: everyone answered, {} is a clean winner — booking",
+                        "closed: everyone answered, {} books under `{}`",
                         winner
                             .start
-                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                        life.auto_book
                     ));
                 }
                 None => {
@@ -476,15 +490,19 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
 }
 
 /// The box answered `closed: false` to our close. Two worlds, told apart by
-/// the record: with a `booked` (or an owner's `no_time`) on it, the close
-/// was **ours** from an earlier tick whose record write was lost — the
-/// box has our sentence and the outcome stands. Without one, someone
-/// closed it by hand between the tally and the write, and the box keeps
-/// the resolution written then: record that — the box's sentence, not ours
-/// — rather than a completed write that never happened.
+/// the record: with an outcome on it — a `booked`, an owner's `no_time`, or
+/// a decided pick whose event is still on its way — the close was **ours**
+/// from an earlier tick whose record write was lost; the box has our
+/// sentence and the outcome stands. Without one, someone closed it by hand
+/// between the tally and the write, and the box keeps the resolution
+/// written then: record that — the box's sentence, not ours — rather than
+/// a completed write that never happened.
 pub fn box_refused_close(life: &mut Lifecycle, now: DateTime<Utc>) -> String {
     life.box_closed_at = Some(now);
-    if life.booked.is_some() || life.verdict.as_deref() == Some("no_time") {
+    if life.booked.is_some()
+        || life.verdict.as_deref() == Some("no_time")
+        || (life.resolution.is_some() && life.verdict.as_deref() == Some("pick"))
+    {
         return "the box was already closed — our own close from an earlier tick whose \
                 record write was lost; the outcome stands"
             .to_string();
@@ -1033,6 +1051,21 @@ mod tests {
         assert_eq!(life.summary(), "stalled — invitations never all sent");
     }
 
+    /// The box serving an empty roster is a failure to read, not a poll
+    /// with nobody on it: nothing is decided over it.
+    #[test]
+    fn an_empty_roster_from_the_box_is_a_finding_not_a_decision() {
+        let mut life = fixture("feasible");
+        let before = life.clone();
+        let observed = Observed {
+            state: "open".into(),
+            ..Observed::default()
+        };
+        let out = advance(&mut life, &observed, t("2030-02-02T10:00:00Z"));
+        assert_eq!(life, before);
+        assert!(out.lines[0].contains("no participants"), "{:?}", out.lines);
+    }
+
     /// The nudge lead is measured from the last invitation out, not the
     /// first: a person invited this morning is not nagged this afternoon.
     #[test]
@@ -1184,6 +1217,20 @@ mod tests {
         assert!(life.box_closed_at.is_some(), "retired: the box is settled");
         assert_eq!(life.verdict.as_deref(), Some("book"), "the booking stands");
         assert!(life.resolution.is_some(), "our sentence stands");
+
+        // A decided pick whose event is still on its way: ours too — the
+        // owner's sentence and the hold both stand.
+        let mut picked = fixture("manual");
+        advance(&mut picked, &observed, t("2030-01-30T10:00:00Z"));
+        picked.resolution = Some("Booked: Tue".into());
+        let line = box_refused_close(&mut picked, t("2030-01-30T10:04:01Z"));
+        assert!(line.contains("our own close"), "{line}");
+        assert_eq!(picked.resolution.as_deref(), Some("Booked: Tue"));
+        assert_eq!(picked.verdict.as_deref(), Some("pick"));
+        assert!(
+            picked.holds_slots(),
+            "the slot stays held until the event exists"
+        );
 
         // Not booked: someone closed it by hand in between.
         let mut hand = fixture("unanimous");

@@ -671,9 +671,16 @@ pub fn plan_meeting(
         earliest = earliest.max(instant(raw, tz, 0, "earliest")?);
     }
     let latest = match request.latest {
-        // A bare date means the whole of that day; an instant means itself.
+        // A bare date means the whole of that day — up to the next local
+        // midnight, which across a DST change is not 24 hours away; an
+        // instant means itself.
         Some(raw) => match raw.parse::<chrono::NaiveDate>() {
-            Ok(_) => instant(raw, tz, 0, "latest")? + chrono::Duration::days(1),
+            Ok(date) => {
+                let next = date
+                    .succ_opt()
+                    .context("the day after `latest` does not exist")?;
+                instant(&next.to_string(), tz, 0, "latest")?
+            }
             Err(_) => instant(raw, tz, 0, "latest")?,
         },
         None => generated_at + chrono::Duration::days(i64::from(policy.horizon_days)),
@@ -806,8 +813,11 @@ pub fn create_meeting(
         // ran — not the freebusy document's own stamp, seconds earlier.
         if let Some(ran) = cached_at {
             bail!(
-                "the slots pipeline has not run since {} — check `systemctl --user status \
-                 mecha-slots.timer`",
+                "the slots pipeline's busy time is from {} (it last ran {}) — over an hour \
+                 old; check `systemctl --user status mecha-slots.timer`",
+                generated_at
+                    .with_timezone(&policy.timezone)
+                    .format("%a %H:%M %Z"),
                 ran.with_timezone(&policy.timezone).format("%a %H:%M %Z")
             );
         }
@@ -1349,7 +1359,10 @@ end = "17:00"
         let err = create_meeting(None, &lab(60), None, None, &named, &Invite::default())
             .unwrap_err()
             .to_string();
-        assert!(err.contains("has not run since"), "{err}");
+        assert!(
+            err.contains("over an hour old") && err.contains("last ran"),
+            "{err}"
+        );
 
         // Half an input is refused as such.
         let err = create_meeting(

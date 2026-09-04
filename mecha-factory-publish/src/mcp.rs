@@ -303,9 +303,9 @@ fn tools() -> Vec<ToolSpec> {
                  the booking policy's hours minus their actual busy time, from the slots \
                  pipeline that already runs — so nothing offered is a time they do not have, \
                  and you never run a freebusy step or write a file. The call writes the \
-                 record and queues the invitations in it; the mail sweep on the user's timer \
-                 then mails each person their own link from the user's account, nudges the \
-                 silent once, and the poll closes on its own. What happens at close is the \
+                 record and queues the invitations in it; the mail sweep, when it runs, mails \
+                 each person their own link from the user's account, nudges the silent once, \
+                 and the poll closes on its own. What happens at close is the \
                  policy's `[poll] auto_book`: by default a time everyone can do is booked as a calendar \
                  invitation by itself and anything else is put in front of the user to pick; \
                  the user may have set it to book any feasible time, or to always pick. Say \
@@ -1480,10 +1480,9 @@ fn describe_created(created: &crate::polls::Created) -> String {
             );
             out.push_str(
                 "This wrote the record and queued the invitations in it; nothing has been \
-                 sent yet. Delivery is `mecha-mail polls`' when it runs on its timer — each \
-                 person their own link from the user's account. Nothing further is needed \
-                 from you. From there the poll runs itself: the silent are nudged once, and \
-                 at close ",
+                 sent yet. Delivery is `mecha-mail polls`' when it runs — each person their \
+                 own link from the user's account. Nothing further is needed from you. From \
+                 there the poll runs itself: the silent are nudged once, and at close ",
             );
             // The promise is the policy's, not a sentence printed regardless
             // of it: under `manual` nothing books by itself.
