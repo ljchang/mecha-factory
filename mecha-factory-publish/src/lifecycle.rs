@@ -77,6 +77,10 @@ A quick reminder — the poll for \"{title}\" closes {deadline_local}, and I don
 
 It takes about ten seconds. Thank you!";
 
+/// How long past its deadline a poll with invitations still owed is kept
+/// before it is closed as stalled and its slots released.
+pub const STALL_GRACE_HOURS: i64 = 24;
+
 /// The slot a verdict or a pick lands on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Booking {
@@ -208,6 +212,7 @@ impl Lifecycle {
                 "pick" if self.booked.is_some() => "booked (your pick)".to_string(),
                 "pick" => "needs a pick".to_string(),
                 "no_time" => "no time found".to_string(),
+                "stalled" => "stalled — invitations never all sent".to_string(),
                 other => other.to_string(),
             };
         }
@@ -292,12 +297,15 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
         }
 
         let all_sent = !life.invites.is_empty() && life.invites.values().all(|v| v.is_some());
-        let first_sent = life.invites.values().flatten().min().copied();
+        // The lead is measured from the *last* invitation to go out: a
+        // nudge eleven hours after someone's invitation is nagging however
+        // long ago the first one went.
+        let last_sent = life.invites.values().flatten().max().copied();
 
         // The nudge: once, to the silent, a day before the deadline — and
         // not at all when the deadline was already close when the
         // invitations went out.
-        if let (Some(deadline), Some(first)) = (life.deadline, first_sent) {
+        if let (Some(deadline), Some(last)) = (life.deadline, last_sent) {
             let nudge = chrono::Duration::hours(i64::from(life.nudge_hours_before));
             let lead = chrono::Duration::hours(i64::from(life.nudge_min_lead_hours));
             if life.nudge_hours_before > 0
@@ -307,7 +315,7 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
                 && !seen.silent.is_empty()
                 && now >= deadline - nudge
                 && now < deadline
-                && deadline - first >= lead
+                && deadline - last >= lead
             {
                 life.nudge_due = seen.silent.clone();
                 lines.push(format!("nudge due to {}", seen.silent.join(", ")));
@@ -316,6 +324,40 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
 
         let everyone = seen.total > 0 && seen.responded >= seen.total;
         let past_deadline = life.deadline.is_some_and(|d| now >= d);
+        // Invitations still owed past the deadline: the mail half has not
+        // run, or an address never delivered. Reported every tick, and at
+        // a day past the deadline the poll is closed as stalled — which
+        // releases its candidates from the booking page. Before this the
+        // one unbounded state in the machine: a poll nobody was ever
+        // invited to held its slots off sale forever, silently.
+        if !all_sent && past_deadline {
+            let owed: Vec<&str> = life
+                .invites
+                .iter()
+                .filter(|(_, sent)| sent.is_none())
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let grace = chrono::Duration::hours(STALL_GRACE_HOURS);
+            if life.deadline.is_some_and(|d| now >= d + grace) {
+                life.closed_at = Some(now);
+                life.verdict = Some("stalled".to_string());
+                life.nudge_due.clear();
+                life.silent = seen.silent.clone();
+                lines.push(format!(
+                    "stalled: the deadline passed a day ago with {} invitation(s) never sent \
+                     ({}) — closed without a decision; its slots are released",
+                    owed.len(),
+                    owed.join(", ")
+                ));
+            } else {
+                lines.push(format!(
+                    "past the deadline with {} invitation(s) never sent ({}) — has `mecha-mail \
+                     polls` run? closes as stalled a day after the deadline",
+                    owed.len(),
+                    owed.join(", ")
+                ));
+            }
+        }
         if all_sent && (everyone || past_deadline) {
             life.closed_at = Some(now);
             life.silent = seen.silent.clone();
@@ -657,9 +699,12 @@ pub fn open_holds() -> Result<Vec<Interval>> {
     );
     let mut holds = Vec::new();
     for record in records.iter().filter(|r| r.lifecycle.holds_slots()) {
-        let Some(candidates) = record.value["candidates"].as_array() else {
-            continue;
-        };
+        let candidates = record.value["candidates"].as_array().with_context(|| {
+            format!(
+                "{}: has a lifecycle but no readable `candidates`",
+                record.path.display()
+            )
+        })?;
         for (i, c) in candidates.iter().enumerate() {
             let at = |k: &str| -> Result<DateTime<Utc>> {
                 c[k].as_str().and_then(|s| s.parse().ok()).with_context(|| {
@@ -954,18 +999,50 @@ mod tests {
         assert!(quiet.nudge_due.is_empty());
     }
 
-    /// Nothing closes while an invitation is still owed — a poll nobody has
-    /// been asked about cannot have a deadline pass on them.
+    /// Nothing decides while an invitation is still owed — a poll nobody has
+    /// been asked about cannot have a deadline pass on them. But the state
+    /// is reported, and a day past the deadline it is closed as stalled so
+    /// its slots go back on sale.
     #[test]
-    fn an_unsent_invitation_holds_the_poll_open() {
+    fn an_unsent_invitation_holds_the_poll_open_then_stalls_it() {
         let mut life = fixture("unanimous");
         life.invites.insert("Tal".into(), None);
-        advance(
-            &mut life,
-            &seen(&[("Priya", Some(("yes", "yes"))), ("Tal", None)]),
-            t("2030-02-02T10:00:00Z"),
-        );
+        let observed = seen(&[("Priya", Some(("yes", "yes"))), ("Tal", None)]);
+
+        // Before the deadline: nothing to say.
+        let out = advance(&mut life, &observed, t("2030-01-31T10:00:00Z"));
+        assert!(out.lines.is_empty(), "{:?}", out.lines);
+
+        // Past it: open, holding, and said so every tick.
+        let out = advance(&mut life, &observed, t("2030-02-02T10:00:00Z"));
         assert!(!life.is_closed());
+        assert!(life.holds_slots());
+        assert!(out.lines[0].contains("never sent (Tal)"), "{:?}", out.lines);
+
+        // A day past: stalled, no decision, slots released.
+        let out = advance(&mut life, &observed, t("2030-02-02T22:00:01Z"));
+        assert!(life.is_closed());
+        assert_eq!(life.verdict.as_deref(), Some("stalled"));
+        assert!(life.book.is_none());
+        assert!(!life.holds_slots(), "released");
+        assert!(out.lines[0].contains("stalled"), "{:?}", out.lines);
+        assert!(
+            out.close_box_with.is_none(),
+            "no sentence for the page — nothing was decided"
+        );
+        assert_eq!(life.summary(), "stalled — invitations never all sent");
+    }
+
+    /// The nudge lead is measured from the last invitation out, not the
+    /// first: a person invited this morning is not nagged this afternoon.
+    #[test]
+    fn the_nudge_lead_is_measured_from_the_last_invitation() {
+        let mut life = fixture("unanimous");
+        life.invites
+            .insert("Tal".into(), Some(t("2030-02-01T08:00:00Z")));
+        let observed = seen(&[("Priya", Some(("yes", "yes"))), ("Tal", None)]);
+        advance(&mut life, &observed, t("2030-02-01T10:00:00Z"));
+        assert!(life.nudge_due.is_empty(), "Tal was invited two hours ago");
     }
 
     /// The box gets its sentence only once the event exists (or the owner
@@ -1217,6 +1294,14 @@ mod tests {
             "{err}"
         );
         std::fs::remove_file(dir.join("torn.json")).unwrap();
+
+        // A lifecycle record with no readable candidates is a refusal too.
+        let mut bare = record("bare", false);
+        bare["candidates"] = json!(null);
+        std::fs::write(dir.join("bare.json"), bare.to_string()).unwrap();
+        let err = open_holds().unwrap_err().to_string();
+        assert!(err.contains("no readable `candidates`"), "{err}");
+        std::fs::remove_file(dir.join("bare.json")).unwrap();
 
         // A closed poll still waiting on its event holds its slot.
         let mut decided = record("decided", true);

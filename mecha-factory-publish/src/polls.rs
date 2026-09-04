@@ -750,7 +750,17 @@ pub fn create_meeting(
     );
 
     let instrument = match instrument {
-        Some(id) => id.to_string(),
+        Some(id) => {
+            // It becomes a file name under the factory dir.
+            anyhow::ensure!(
+                !id.is_empty()
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "instrument `{id}` must be letters, digits, - and _"
+            );
+            id.to_string()
+        }
         None => {
             let cached = lifecycle::cached_instruments()?;
             match cached.as_slice() {
