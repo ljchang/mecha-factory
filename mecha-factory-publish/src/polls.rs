@@ -100,6 +100,9 @@ pub enum Created {
         first: String,
         last: String,
         deadline_local: String,
+        /// `unanimous` | `feasible` | `manual` — what the sweep will book by
+        /// itself, so the answer promises only what the policy allows.
+        auto_book: String,
         people: Vec<Invited>,
         record: PathBuf,
     },
@@ -635,8 +638,11 @@ pub fn plan_meeting(
         earliest = earliest.max(instant(raw, tz, 0, "earliest")?);
     }
     let latest = match request.latest {
-        // A bare date means the whole of that day.
-        Some(raw) => instant(raw, tz, 0, "latest")? + chrono::Duration::days(1),
+        // A bare date means the whole of that day; an instant means itself.
+        Some(raw) => match raw.parse::<chrono::NaiveDate>() {
+            Ok(_) => instant(raw, tz, 0, "latest")? + chrono::Duration::days(1),
+            Err(_) => instant(raw, tz, 0, "latest")?,
+        },
         None => generated_at + chrono::Duration::days(i64::from(policy.horizon_days)),
     };
     anyhow::ensure!(
@@ -826,6 +832,7 @@ pub fn create_meeting(
         first: local(plan.candidates[0].start),
         last: local(plan.candidates[plan.candidates.len() - 1].start),
         deadline_local: life.deadline_local(),
+        auto_book: life.auto_book.clone(),
         people,
         record,
     })
@@ -1119,6 +1126,19 @@ end = "17:00"
             8,
             "the whole Tuesday window, on the half hour"
         );
+
+        // An instant is itself: nothing ends after 19:00Z that Tuesday.
+        let plan = planned(MeetingRequest {
+            earliest: Some("2030-02-10"),
+            latest: Some("2030-02-12T19:00:00Z"),
+            ..lab(30)
+        })
+        .unwrap();
+        assert!(plan
+            .candidates
+            .iter()
+            .all(|c| c.end <= t("2030-02-12T19:00:00Z")));
+        assert_eq!(plan.candidates.len(), 2);
 
         let plan = planned(MeetingRequest {
             poll_id: Some("lab_feb-2"),

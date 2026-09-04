@@ -285,9 +285,11 @@ enum PollsAction {
     /// The candidates are the engine's earliest feasible slots — already
     /// minus the user's real busy time — capped small, because a poll a
     /// colleague answers in ten seconds is the one that gets answered. The
-    /// box mints one capability URL per participant and this prints them;
-    /// addresses never leave this machine, so mailing the links is the
-    /// agent's (outbox-reviewed) or the user's own act.
+    /// box mints one capability URL per participant; addresses never leave
+    /// this machine. For a meeting poll the links are not printed: the
+    /// record queues the invitations and `mecha-mail polls` sends each
+    /// person theirs on the timer. A `--spec` poll's links are printed (or
+    /// land in `links.csv`) for the agent's outbox-reviewed mail or your own.
     Create {
         /// The instrument whose policy seeds this.
         instrument: String,
@@ -1847,8 +1849,16 @@ fn sweep_command() -> Result<()> {
             }
         }
         if record.lifecycle != before {
-            lifecycle::save(&mut record)?;
-            touched += 1;
+            // A write that fails is this record's failure, reported and
+            // retried next tick — never the reason a later poll goes
+            // un-advanced.
+            match lifecycle::save(&mut record) {
+                Ok(()) => touched += 1,
+                Err(e) => {
+                    eprintln!("{}: could not write the record — {e:#}", record.poll_id);
+                    continue;
+                }
+            }
         }
         for line in &advanced.lines {
             println!("{}: {line}", record.poll_id);
@@ -2126,10 +2136,14 @@ fn times_json(status: &mecha_factory_publish::polls::Status) -> serde_json::Valu
     else {
         unreachable!("times_json is only called on a times poll")
     };
-    let lifecycle = mecha_factory_publish::lifecycle::record(poll_id)
-        .ok()
-        .flatten()
-        .map(|r| mecha_factory_publish::lifecycle::describe(&r.lifecycle));
+    // Three worlds, kept apart: a lifecycle, none (a general poll, or a
+    // record from before one existed), and a record that is on disk but
+    // could not be read — which must not render as the benign second.
+    let lifecycle = match mecha_factory_publish::lifecycle::record(poll_id) {
+        Ok(Some(r)) => mecha_factory_publish::lifecycle::describe(&r.lifecycle),
+        Ok(None) => serde_json::Value::Null,
+        Err(e) => serde_json::json!({ "unreadable": format!("{e:#}") }),
+    };
     serde_json::json!({
         "poll": poll_id,
         "state": state,
@@ -2200,8 +2214,10 @@ fn print_times(status: &mecha_factory_publish::polls::Status) {
     if !silent.is_empty() {
         println!("  silent: {}", silent.join(", "));
     }
-    if let Ok(Some(record)) = mecha_factory_publish::lifecycle::record(poll_id) {
-        println!("  lifecycle: {}", record.lifecycle.summary());
+    match mecha_factory_publish::lifecycle::record(poll_id) {
+        Ok(Some(record)) => println!("  lifecycle: {}", record.lifecycle.summary()),
+        Ok(None) => {}
+        Err(e) => println!("  lifecycle: record unreadable — {e:#}"),
     }
     for r in ranked.iter().take(5) {
         println!(

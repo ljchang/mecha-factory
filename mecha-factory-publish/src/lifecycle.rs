@@ -508,19 +508,36 @@ pub fn save(record: &mut Record) -> Result<()> {
 /// The candidate slots of every poll still open, as holds for the booking
 /// engine — SCHEDULING-DESIGN.md §5.5: the public page must not sell a slot
 /// a poll is still asking about.
+///
+/// An unreadable record, or a candidate that does not parse, is an error
+/// rather than a hold quietly not taken: the caller is `slots push`, and a
+/// push made on the strength of a file it could not read publishes exactly
+/// the times an open poll is still asking about.
 pub fn open_holds() -> Result<Vec<Interval>> {
-    let (records, _) = records()?;
+    let (records, problems) = records()?;
+    anyhow::ensure!(
+        problems.is_empty(),
+        "refusing to compute holds over poll records that could not be read:\n{}",
+        problems.join("\n")
+    );
     let mut holds = Vec::new();
     for record in records.iter().filter(|r| !r.lifecycle.is_closed()) {
-        if let Some(candidates) = record.value["candidates"].as_array() {
-            for c in candidates {
-                if let (Some(start), Some(end)) = (
-                    c["start"].as_str().and_then(|s| s.parse().ok()),
-                    c["end"].as_str().and_then(|s| s.parse().ok()),
-                ) {
-                    holds.push(Interval { start, end });
-                }
-            }
+        let Some(candidates) = record.value["candidates"].as_array() else {
+            continue;
+        };
+        for (i, c) in candidates.iter().enumerate() {
+            let at = |k: &str| -> Result<DateTime<Utc>> {
+                c[k].as_str().and_then(|s| s.parse().ok()).with_context(|| {
+                    format!(
+                        "{}: candidate {i} has no readable `{k}`",
+                        record.path.display()
+                    )
+                })
+            };
+            holds.push(Interval {
+                start: at("start")?,
+                end: at("end")?,
+            });
         }
     }
     Ok(holds)
@@ -924,16 +941,30 @@ mod tests {
             json!({"poll_id": "survey"}).to_string(),
         )
         .unwrap();
-        std::fs::write(dir.join("broken.json"), "{not json").unwrap();
 
         let holds = open_holds().unwrap();
         assert_eq!(holds.len(), 1);
         assert_eq!(holds[0].start, t(WED));
 
+        // One unreadable record refuses the whole computation: a push over
+        // it would publish the times that record is holding.
+        std::fs::write(dir.join("broken.json"), "{not json").unwrap();
+        let err = open_holds().unwrap_err().to_string();
+        assert!(err.contains("broken.json"), "{err}");
         let (records, problems) = records().unwrap();
         assert_eq!(records.len(), 2);
         assert_eq!(problems.len(), 1, "an unreadable record is a finding");
-        assert!(problems[0].contains("broken.json"));
+        std::fs::remove_file(dir.join("broken.json")).unwrap();
+
+        // So does a candidate that does not parse.
+        let mut torn = record("torn", false);
+        torn["candidates"][0]["end"] = json!("yesterday-ish");
+        std::fs::write(dir.join("torn.json"), torn.to_string()).unwrap();
+        let err = open_holds().unwrap_err().to_string();
+        assert!(
+            err.contains("candidate 0") && err.contains("`end`"),
+            "{err}"
+        );
 
         std::env::remove_var("MECHA_HOME");
     }

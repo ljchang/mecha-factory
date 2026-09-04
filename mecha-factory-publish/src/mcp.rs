@@ -304,10 +304,12 @@ fn tools() -> Vec<ToolSpec> {
                  pipeline that already runs — so nothing offered is a time they do not have, \
                  and you never run a freebusy step or write a file. Each person is mailed \
                  their own link from the user's account, the silent are nudged once, and the \
-                 poll closes on its own: a time everyone can do is booked as a calendar \
-                 invitation by itself, anything else is put in front of the user to pick. \
-                 Say why in `message`; the invitation text under it is a default the user \
-                 edits on the review card. Read where a poll stands with poll_status.",
+                 poll closes on its own. What happens at close is the policy's `[poll] \
+                 auto_book`: by default a time everyone can do is booked as a calendar \
+                 invitation by itself and anything else is put in front of the user to pick; \
+                 the user may have set it to book any feasible time, or to always pick. Say \
+                 why in `message`; the invitation text under it is a default the user edits \
+                 on the review card. Read where a poll stands with poll_status.",
             read_only: false,
             open_world: true,
             schema: || {
@@ -1460,6 +1462,7 @@ fn describe_created(created: &crate::polls::Created) -> String {
             first,
             last,
             deadline_local,
+            auto_book,
             people,
             record,
         } => {
@@ -1477,9 +1480,23 @@ fn describe_created(created: &crate::polls::Created) -> String {
             out.push_str(
                 "Each person is mailed their own link from the user's account within a few \
                  minutes; nothing further is needed from you. From here the poll runs itself: \
-                 the silent are nudged once, a time everyone can do is booked automatically, \
-                 and anything else goes to the user to pick. poll_status says where it stands.",
+                 the silent are nudged once, and at close ",
             );
+            // The promise is the policy's, not a sentence printed regardless
+            // of it: under `manual` nothing books by itself.
+            out.push_str(match auto_book.as_str() {
+                "unanimous" => {
+                    "a time everyone can do is booked automatically; anything else goes to \
+                     the user to pick."
+                }
+                "feasible" => {
+                    "the best time everyone can make (if-needed included) is booked \
+                     automatically; nothing feasible, or a silent participant, goes to the \
+                     user to pick."
+                }
+                _ => "the ranking goes to the user to pick — this policy books nothing by itself.",
+            });
+            out.push_str(" poll_status says where it stands.");
             out.push_str(&format!("\nrecord: {}", record.display()));
             out
         }
