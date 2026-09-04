@@ -203,6 +203,7 @@ impl Lifecycle {
         if let Some(verdict) = &self.verdict {
             return match verdict.as_str() {
                 "book" if self.booked.is_some() => "booked".to_string(),
+                "book" if self.conflict.is_some() => "booking blocked — collision".to_string(),
                 "book" => "booking".to_string(),
                 "pick" if self.booked.is_some() => "booked (your pick)".to_string(),
                 "pick" => "needs a pick".to_string(),
