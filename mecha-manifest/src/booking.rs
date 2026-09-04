@@ -410,7 +410,7 @@ pub fn clean_winner(
     responded: usize,
     total_participants: usize,
 ) -> Option<&RankedCandidate> {
-    if responded != total_participants {
+    if total_participants == 0 || responded != total_participants {
         return None;
     }
     let mut unanimous = ranked.iter().filter(|c| c.unanimous);
@@ -434,7 +434,11 @@ pub fn auto_book(
     mode: crate::availability::AutoBook,
 ) -> Option<&RankedCandidate> {
     use crate::availability::AutoBook;
-    if responded != total_participants {
+    // An empty roster is vacuously "everyone answered", and `rank_poll` over
+    // no answers marks every candidate unanimous. A tally with no
+    // participants — which the box serves on a database error — must never
+    // book a time nobody was asked about.
+    if total_participants == 0 || responded != total_participants {
         return None;
     }
     match mode {
@@ -1517,6 +1521,17 @@ mod tests {
                 "{mode:?} booked over silence"
             );
         }
+
+        // Nobody at all: vacuously unanimous, and no mode books it.
+        let ranked = rank_poll(&candidates[..1], &[], 0);
+        assert!(ranked[0].unanimous, "the ranking alone would say yes");
+        for mode in [Unanimous, Feasible, Manual] {
+            assert!(
+                auto_book(&ranked, 0, 0, mode).is_none(),
+                "{mode:?} booked for nobody"
+            );
+        }
+        assert!(clean_winner(&ranked, 0, 0).is_none());
     }
 
     /// The guardrail, against every murky shape it must refuse: a tie of
