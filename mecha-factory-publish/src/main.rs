@@ -1844,7 +1844,14 @@ fn sweep_command() -> Result<()> {
         let advanced = lifecycle::advance(&mut record.lifecycle, &seen, now);
         if let Some(sentence) = &advanced.close_box_with {
             match polls::close(&record.instrument, &record.poll_id, Some(sentence)) {
-                Ok(_) => record.lifecycle.box_closed_at = Some(now),
+                Ok(true) => record.lifecycle.box_closed_at = Some(now),
+                // `false` is the box saying it was already closed — by hand,
+                // since the tally — and that it keeps the resolution written
+                // then. Not a success, and not ours to report as one.
+                Ok(false) => {
+                    let line = lifecycle::box_refused_close(&mut record.lifecycle, now);
+                    println!("{}: {line}", record.poll_id);
+                }
                 Err(e) => eprintln!("{}: could not close on the box — {e:#}", record.poll_id),
             }
         }

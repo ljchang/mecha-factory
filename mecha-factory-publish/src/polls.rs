@@ -379,6 +379,34 @@ fn record_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// The meeting poll's record as written — one function, so the shape
+/// `lifecycle::open_holds` reads is the shape this writes and a test can
+/// run one through the other.
+fn times_record(
+    instrument: &str,
+    request: &MeetingRequest,
+    plan: &Plan,
+    generated_at: &str,
+    people: &[Invited],
+    life: &crate::lifecycle::Lifecycle,
+) -> Value {
+    json!({
+        "instrument": instrument,
+        "poll_id": plan.poll_id,
+        "title": request.title,
+        "duration_minutes": request.duration,
+        "deadline": plan.deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "earliest": plan.earliest.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "latest": plan.latest.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        "created_at": generated_at,
+        "candidates": plan.candidates,
+        "participants": people.iter().map(|p| json!({
+            "name": p.name, "email": p.email, "url": p.url,
+        })).collect::<Vec<_>>(),
+        "lifecycle": life,
+    })
+}
+
 fn write_record(poll_id: &str, record: &Value) -> Result<PathBuf> {
     let path = record_dir()?.join(format!("{poll_id}.json"));
     std::fs::write(&path, serde_json::to_string_pretty(record)?)?;
@@ -734,8 +762,8 @@ pub fn create_meeting(
         }
     };
 
-    let (policy_toml, freebusy, from_cache) = match (policy_toml, freebusy) {
-        (Some(policy), Some(freebusy)) => (policy.to_string(), freebusy, false),
+    let (policy_toml, freebusy, cached_at) = match (policy_toml, freebusy) {
+        (Some(policy), Some(freebusy)) => (policy.to_string(), freebusy, None),
         (None, None) => {
             let Some(cached) = lifecycle::cached_freebusy(&instrument)? else {
                 bail!(
@@ -746,7 +774,7 @@ pub fn create_meeting(
             };
             let freebusy: Freebusy = serde_json::from_value(cached.freebusy)
                 .context("the cached freebusy is not `mecha-mail freebusy --json` output")?;
-            (cached.policy, freebusy, true)
+            (cached.policy, freebusy, Some(cached.cached_at))
         }
         _ => bail!(
             "`policy` and `freebusy` go together: pass both, or neither to use the pipeline's"
@@ -759,13 +787,13 @@ pub fn create_meeting(
         .with_timezone(&chrono::Utc);
     let age = chrono::Utc::now() - generated_at;
     if age > chrono::Duration::hours(1) {
-        if from_cache {
+        // The sentence is about the timer, so it reports when `slots push`
+        // ran — not the freebusy document's own stamp, seconds earlier.
+        if let Some(ran) = cached_at {
             bail!(
                 "the slots pipeline has not run since {} — check `systemctl --user status \
                  mecha-slots.timer`",
-                generated_at
-                    .with_timezone(&policy.timezone)
-                    .format("%a %H:%M %Z")
+                ran.with_timezone(&policy.timezone).format("%a %H:%M %Z")
             );
         }
         bail!("this freebusy answer is over an hour old; re-run the pipeline");
@@ -803,21 +831,14 @@ pub fn create_meeting(
     // holds the booking page subtracts while the poll is open.
     let record = write_record(
         &poll_id,
-        &json!({
-            "instrument": instrument,
-            "poll_id": poll_id,
-            "title": request.title,
-            "duration_minutes": request.duration,
-            "deadline": plan.deadline.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "earliest": plan.earliest.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "latest": plan.latest.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-            "created_at": freebusy.generated_at,
-            "candidates": plan.candidates,
-            "participants": people.iter().map(|p| json!({
-                "name": p.name, "email": p.email, "url": p.url,
-            })).collect::<Vec<_>>(),
-            "lifecycle": life,
-        }),
+        &times_record(
+            &instrument,
+            request,
+            &plan,
+            &freebusy.generated_at,
+            &people,
+            &life,
+        ),
     )?;
 
     let local = |at: chrono::DateTime<chrono::Utc>| {
@@ -1212,6 +1233,48 @@ end = "17:00"
                 c.start
             );
         }
+    }
+
+    /// The holds seam, end to end: a record written by the writer this
+    /// crate uses is read back by `open_holds` as exactly its candidates —
+    /// the shape is measured, not re-derived in a fixture.
+    #[test]
+    fn a_written_record_is_read_back_as_its_own_holds() {
+        let _guard = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let policy = crate::availability::Policy::from_toml(POLICY).unwrap();
+        let plan = plan_meeting(&policy, &freebusy(), &[], &lab(60)).unwrap();
+        let people = vec![Invited {
+            name: "Priya".into(),
+            email: "priya@example.edu".into(),
+            url: "https://g/p/1".into(),
+        }];
+        let life = crate::lifecycle::fresh(
+            &policy,
+            &["Priya".to_string()],
+            plan.deadline,
+            None,
+            None,
+            "s",
+            "i",
+        );
+        let record = times_record(
+            "book",
+            &lab(60),
+            &plan,
+            "2030-01-28T12:00:00Z",
+            &people,
+            &life,
+        );
+        write_record(&plan.poll_id, &record).unwrap();
+
+        let holds = crate::lifecycle::open_holds().unwrap();
+        assert_eq!(holds.len(), plan.candidates.len());
+        for (hold, candidate) in holds.iter().zip(&plan.candidates) {
+            assert_eq!((hold.start, hold.end), (candidate.start, candidate.end));
+        }
+        std::env::remove_var("MECHA_HOME");
     }
 
     #[test]

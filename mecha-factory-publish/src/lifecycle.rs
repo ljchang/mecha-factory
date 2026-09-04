@@ -280,6 +280,9 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
             life.verdict = Some("closed".to_string());
             life.resolution = seen.resolution.clone();
             life.box_closed_at = Some(now);
+            // A nudge queued before the owner closed by hand would mail
+            // "the poll closes Thursday" about a poll that is closed.
+            life.nudge_due.clear();
             lines.push("closed on the box by hand; nothing more to do".to_string());
             return Advanced {
                 lines,
@@ -427,6 +430,17 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
         lines,
         close_box_with,
     }
+}
+
+/// The box answered `closed: false` to our close: someone closed it by hand
+/// between the tally and the write, and the box keeps the resolution
+/// written then. Record that — the box's sentence, not ours — rather than
+/// a completed write that never happened.
+pub fn box_refused_close(life: &mut Lifecycle, now: DateTime<Utc>) -> String {
+    life.box_closed_at = Some(now);
+    life.resolution = None;
+    life.verdict = Some("closed".to_string());
+    "already closed on the box by hand; its resolution stands, not ours".to_string()
 }
 
 /// "Tue 9 Sep, 2:00–3:00 PM EDT", in the poll's zone.
@@ -1055,11 +1069,36 @@ mod tests {
         assert_eq!(life, before);
     }
 
+    /// The box refusing our close (someone closed it by hand in between)
+    /// is recorded as the box's outcome, never as ours having been written.
+    #[test]
+    fn a_refused_close_records_the_boxs_outcome_not_ours() {
+        let mut life = fixture("unanimous");
+        let observed = seen(&[
+            ("Priya", Some(("yes", "no"))),
+            ("Tal", Some(("yes", "yes"))),
+        ]);
+        advance(&mut life, &observed, t("2030-01-30T10:00:00Z"));
+        life.booked = Some(Booked {
+            event_id: "ev1".into(),
+            account: "work".into(),
+            at: t("2030-01-30T10:03:00Z"),
+        });
+        let out = advance(&mut life, &observed, t("2030-01-30T10:04:00Z"));
+        assert!(out.close_box_with.is_some());
+        let line = box_refused_close(&mut life, t("2030-01-30T10:04:01Z"));
+        assert!(line.contains("its resolution stands"));
+        assert!(life.box_closed_at.is_some(), "retired: the box is settled");
+        assert_eq!(life.resolution, None, "not a sentence the box never wrote");
+        assert_eq!(life.verdict.as_deref(), Some("closed"));
+    }
+
     /// A close by hand on the box is final: recorded, resolution kept, no
-    /// verdict computed over it.
+    /// verdict computed over it — and a queued nudge dies with it.
     #[test]
     fn a_hand_close_on_the_box_is_recorded_and_left_alone() {
         let mut life = fixture("feasible");
+        life.nudge_due = vec!["Tal".into()];
         let mut observed = seen(&[
             ("Priya", Some(("yes", "yes"))),
             ("Tal", Some(("yes", "yes"))),
@@ -1070,6 +1109,7 @@ mod tests {
         assert_eq!(life.verdict.as_deref(), Some("closed"));
         assert_eq!(life.resolution.as_deref(), Some("Moved to Slack"));
         assert!(life.book.is_none());
+        assert!(life.nudge_due.is_empty(), "no reminder about a closed poll");
         assert!(out.close_box_with.is_none());
     }
 

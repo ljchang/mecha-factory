@@ -1478,10 +1478,10 @@ fn describe_created(created: &crate::polls::Created) -> String {
                     .join(", ")
             );
             out.push_str(
-                "The invitations are queued for `mecha-mail polls`, which mails each person \
-                 their own link from the user's account on its timer; nothing further is \
-                 needed from you. From there the poll runs itself: the silent are nudged \
-                 once, and at close ",
+                "This wrote the record; the invitations are queued in it for `mecha-mail \
+                 polls`, which mails each person their own link from the user's account on \
+                 its timer. Nothing further is needed from you. From there the poll runs \
+                 itself: the silent are nudged once, and at close ",
             );
             // The promise is the policy's, not a sentence printed regardless
             // of it: under `manual` nothing books by itself.
