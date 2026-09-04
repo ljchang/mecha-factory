@@ -341,9 +341,11 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
         // Invitations still owed past the deadline: the mail half has not
         // run, or an address never delivered. Reported every tick, and at
         // a day past the deadline the poll is closed as stalled — which
-        // releases its candidates from the booking page. Before this the
-        // one unbounded state in the machine: a poll nobody was ever
-        // invited to held its slots off sale forever, silently.
+        // releases its candidates from the booking page. Before this a
+        // poll nobody was ever invited to held its slots off sale forever,
+        // silently. (A `pick` also holds without a bound, but it waits on a
+        // person and says so in `summary()`, which is a different thing
+        // from waiting on a broken timer.)
         if !all_sent && past_deadline {
             let owed: Vec<&str> = life
                 .invites
@@ -552,8 +554,8 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
 }
 
 /// The box answered `closed: false` to our close. Two worlds, told apart by
-/// the record: with an outcome on it — a `booked`, an owner's `no_time`, or
-/// a decided pick whose event is still on its way — the close was **ours**
+/// the record: with an outcome on it — a `booked`, an owner's `no_time`, a
+/// stall, or a decided pick whose event is still on its way — the close was **ours**
 /// from an earlier tick whose record write was lost; the box has our
 /// sentence and the outcome stands. Without one, someone closed it by hand
 /// between the tally and the write, and the box keeps the resolution
@@ -562,7 +564,7 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
 pub fn box_refused_close(life: &mut Lifecycle, now: DateTime<Utc>) -> String {
     life.box_closed_at = Some(now);
     if life.booked.is_some()
-        || life.verdict.as_deref() == Some("no_time")
+        || matches!(life.verdict.as_deref(), Some("no_time") | Some("stalled"))
         || (life.resolution.is_some() && life.verdict.as_deref() == Some("pick"))
     {
         return "the box was already closed — our own close from an earlier tick whose \
@@ -1396,6 +1398,17 @@ mod tests {
             picked.holds_slots(),
             "the slot stays held until the event exists"
         );
+
+        // A stall that asked for its close and lost the reply: ours too.
+        let mut stalled = fixture("unanimous");
+        stalled.invites.insert("Tal".into(), None);
+        let silent = seen(&[("Priya", Some(("yes", "yes"))), ("Tal", None)]);
+        let out = advance(&mut stalled, &silent, t("2030-02-02T22:00:01Z"));
+        assert!(out.close_box_with.is_some());
+        let line = box_refused_close(&mut stalled, t("2030-02-02T22:02:01Z"));
+        assert!(line.contains("our own close"), "{line}");
+        assert_eq!(stalled.verdict.as_deref(), Some("stalled"));
+        assert!(stalled.resolution.is_some());
 
         // Not booked: someone closed it by hand in between.
         let mut hand = fixture("unanimous");
