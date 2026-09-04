@@ -212,6 +212,7 @@ impl Lifecycle {
                 "pick" if self.booked.is_some() => "booked (your pick)".to_string(),
                 "pick" => "needs a pick".to_string(),
                 "no_time" => "no time found".to_string(),
+                "stalled" if self.book.is_some() => "stalled — booking never made".to_string(),
                 "stalled" => "stalled — invitations never all sent".to_string(),
                 other => other.to_string(),
             };
@@ -431,6 +432,21 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
         && life.booked.is_none()
         && life.conflict.is_some()
     {
+        // The same two guards the open branch runs first: a tally with no
+        // roster or an unreadable state is not evidence to rank over, and
+        // this transition is one-way — a ranking written from it would
+        // assert a unanimity no ballot established, forever.
+        if seen.total == 0 || (seen.state != "open" && seen.state != "closed") {
+            lines.push(format!(
+                "the winning slot collided, but the box's tally is unreadable (state `{}`, {} \
+                 participant(s)); record untouched",
+                seen.state, seen.total
+            ));
+            return Advanced {
+                lines,
+                close_box_with,
+            };
+        }
         let reason = life.conflict.clone().unwrap_or_default();
         let collided = life.book.as_ref().map(|b| b.start);
         life.verdict = Some("pick".to_string());
@@ -460,6 +476,33 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
         lines.push(format!(
             "the winning slot collided with the calendar ({reason}) — the owner picks"
         ));
+    }
+
+    // A verdict of `book` whose event never arrives — the mail half not
+    // installed, its account broken — is the invitation stall one step
+    // later, and bounded the same way: reported every tick, and a day past
+    // the close marked stalled, which releases the held slots. The decision
+    // is kept on the record; nothing books from it after this.
+    if life.is_closed()
+        && life.verdict.as_deref() == Some("book")
+        && life.booked.is_none()
+        && life.conflict.is_none()
+    {
+        let grace = chrono::Duration::hours(STALL_GRACE_HOURS);
+        if life.closed_at.is_some_and(|c| now >= c + grace) {
+            life.verdict = Some("stalled".to_string());
+            lines.push(
+                "stalled: decided a day ago and no event has been made — has `mecha-mail \
+                 polls` run? closed without a booking; its slots are released"
+                    .to_string(),
+            );
+        } else {
+            lines.push(
+                "decided, waiting on `mecha-mail polls` to make the event; stalls a day after \
+                 the close"
+                    .to_string(),
+            );
+        }
     }
 
     // Once the outcome exists, the poll page gets its sentence.
@@ -1166,6 +1209,61 @@ mod tests {
         assert!(!gone.holds_slots(), "no time: nothing to protect");
         gone.verdict = Some("closed".into());
         assert!(!gone.holds_slots(), "closed by hand: nothing to protect");
+    }
+
+    /// A decided booking the mail half never makes is reported, then a day
+    /// past the close marked stalled — the slots go back on sale, and the
+    /// decision stays on the record without ever booking from it.
+    #[test]
+    fn a_booking_that_never_arrives_is_reported_then_stalled() {
+        let mut life = fixture("unanimous");
+        let observed = seen(&[
+            ("Priya", Some(("yes", "no"))),
+            ("Tal", Some(("yes", "yes"))),
+        ]);
+        advance(&mut life, &observed, t("2030-01-30T10:00:00Z"));
+        assert_eq!(life.verdict.as_deref(), Some("book"));
+        assert!(life.holds_slots());
+
+        let out = advance(&mut life, &observed, t("2030-01-30T12:00:00Z"));
+        assert!(out.lines[0].contains("waiting on"), "{:?}", out.lines);
+        assert!(
+            life.holds_slots(),
+            "still held while the event may yet come"
+        );
+
+        let out = advance(&mut life, &observed, t("2030-01-31T10:00:01Z"));
+        assert_eq!(life.verdict.as_deref(), Some("stalled"));
+        assert!(life.book.is_some(), "the decision stays on the record");
+        assert!(!life.holds_slots(), "released");
+        assert!(out.lines[0].contains("stalled"), "{:?}", out.lines);
+        assert_eq!(life.summary(), "stalled — booking never made");
+        assert!(out.close_box_with.is_none());
+    }
+
+    /// The conflict handoff runs under the same guards as the open branch:
+    /// an empty roster from the box is not a ranking to write, once, forever.
+    #[test]
+    fn a_conflict_over_an_unreadable_tally_is_left_for_the_next_tick() {
+        let mut life = fixture("unanimous");
+        let observed = seen(&[
+            ("Priya", Some(("yes", "no"))),
+            ("Tal", Some(("yes", "yes"))),
+        ]);
+        advance(&mut life, &observed, t("2030-01-30T10:00:00Z"));
+        life.conflict = Some("busy".into());
+        let before = life.clone();
+        let empty = Observed {
+            state: "open".into(),
+            ..Observed::default()
+        };
+        let out = advance(&mut life, &empty, t("2030-01-30T10:04:00Z"));
+        assert_eq!(life, before, "nothing written from an empty tally");
+        assert!(out.lines[0].contains("unreadable"), "{:?}", out.lines);
+        // With the real tally it proceeds as before.
+        advance(&mut life, &observed, t("2030-01-30T10:06:00Z"));
+        assert_eq!(life.verdict.as_deref(), Some("pick"));
+        assert_eq!(life.ranked.len(), 2);
     }
 
     /// The mail half could not book the clean winner: the verdict becomes

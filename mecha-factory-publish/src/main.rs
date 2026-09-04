@@ -1937,7 +1937,23 @@ fn polls_command(action: PollsAction) -> Result<()> {
                                 .context("stdin is not `mecha-mail freebusy --json` output")?;
                             (Some(text), Some(freebusy))
                         }
-                        None => (None, None),
+                        None => {
+                            // Busy time piped in without the policy it goes
+                            // with is half an input: refused, as the library
+                            // refuses it, rather than silently replaced by
+                            // the pipeline's cache.
+                            use std::io::IsTerminal;
+                            if !std::io::stdin().is_terminal() {
+                                let stdin = std::io::read_to_string(std::io::stdin())
+                                    .context("reading stdin")?;
+                                anyhow::ensure!(
+                                    stdin.trim().is_empty(),
+                                    "freebusy on stdin without --policy — pass both, or \
+                                     neither to use the pipeline's last input"
+                                );
+                            }
+                            (None, None)
+                        }
                     };
                     polls::create_meeting(
                         Some(&instrument),

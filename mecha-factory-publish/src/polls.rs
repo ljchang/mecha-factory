@@ -868,7 +868,7 @@ pub fn create_meeting(
 
     let local = |at: chrono::DateTime<chrono::Utc>| {
         at.with_timezone(&policy.timezone)
-            .format("%a %-d %b %-I:%M %p")
+            .format("%a %-d %b %-I:%M %p %Z")
             .to_string()
     };
     Ok(Created::Times {
