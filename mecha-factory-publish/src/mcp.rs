@@ -298,27 +298,30 @@ fn tools() -> Vec<ToolSpec> {
         ToolSpec {
             name: "poll_meeting_create",
             description:
-                "Create a poll over meeting times, seeded with the user's real availability — \
-                 the policy's slots minus their actual busy time, so nothing offered is a time \
-                 they do not have. Deliberately separate from poll_create rather than a mode \
-                 flag on it: the two take different inputs entirely.",
+                "Find a meeting time with named people. One call: a title, who, and how long. \
+                 The times offered are drawn from the user's real availability at release — \
+                 the booking policy's hours minus their actual busy time, from the slots \
+                 pipeline that already runs — so nothing offered is a time they do not have, \
+                 and you never run a freebusy step or write a file. The call writes the \
+                 record and queues the invitations in it; the mail sweep, when it runs, mails \
+                 each person their own link from the user's account, nudges the silent once, \
+                 and the poll closes on its own. What happens at close is the \
+                 policy's `[poll] auto_book`: by default a time everyone can do is booked as a calendar \
+                 invitation by itself and anything else is put in front of the user to pick; \
+                 the user may have set it to book any feasible time, or to always pick. Say \
+                 why in `message`; the invitation text under it is a default the user edits \
+                 on the review card. Read where a poll stands with poll_status.",
             read_only: false,
             open_world: true,
             schema: || {
                 json!({
                     "type": "object",
                     "properties": {
-                        "instrument": {"type": "string"},
-                        "poll_id": {"type": "string"},
-                        "policy": {"type": "string", "description": "Path to the availability policy TOML (the `[availability]` vocabulary)."},
-                        "freebusy": {
-                            "type": "string",
-                            "description": "Path to `mecha-mail freebusy --days N --json` output, written within the last hour and reaching at least the policy's horizon. Both are refused rather than worked around."
-                        },
-                        "title": {"type": "string", "description": "What the meeting is."},
-                        "duration_minutes": {"type": "integer", "minimum": 1, "description": "Must be a length the policy offers."},
+                        "title": {"type": "string", "description": "What the meeting is, as the invitation and the calendar event will name it."},
+                        "duration_minutes": {"type": "integer", "minimum": 5, "description": "A length the booking policy offers (usually 30 or 60)."},
                         "participants": {
                             "type": "array",
+                            "description": "Everyone who gets a link. A name is that person's identity on the poll and cannot repeat.",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -330,10 +333,28 @@ fn tools() -> Vec<ToolSpec> {
                             }
                         },
                         "roster": {"type": "string", "description": "Path to a `name,email` CSV, joined with `participants`."},
-                        "deadline": {"type": "string", "description": "RFC 3339. After this, answers freeze on their own."},
-                        "max_candidates": {"type": "integer", "minimum": 1, "description": "How many slots to offer; 5-15 is the point. Default 10."}
+                        "message": {"type": "string", "description": "The user's own sentence to the recipients — why this meeting, what to expect. Rendered above the invitation block."},
+                        "deadline": {"type": "string", "description": "When answers close: RFC 3339, or a YYYY-MM-DD date (closes that day at the policy's hour). Default: the policy's `deadline_days` out. Times are drawn from after the deadline plus the policy's notice."},
+                        "earliest": {"type": "string", "description": "YYYY-MM-DD: no time before this day."},
+                        "latest": {"type": "string", "description": "YYYY-MM-DD: no time after this day. 'Next two weeks' is a `latest`."},
+                        "account": {"type": "string", "description": "The mail account the invitations and the event come from. Omit for the default."},
+                        "subject": {
+                            "type": "string",
+                            "default": crate::lifecycle::DEFAULT_SUBJECT,
+                            "description": "The invitation's subject; `{title}` is substituted. Leave the default unless the user asks."
+                        },
+                        "invitation": {
+                            "type": "string",
+                            "default": crate::lifecycle::DEFAULT_INVITATION,
+                            "description": "The invitation body sent to each person with their link. `{message}`, `{title}`, `{duration}`, `{deadline_local}` and `{url}` are substituted. Leave the default unless the user asks; the user edits it on the review card."
+                        },
+                        "instrument": {"type": "string", "description": "The booking instrument whose policy seeds this. Omit when there is one."},
+                        "poll_id": {"type": "string", "description": "A new id: lowercase, digits, - and _. Omit to derive one from the title and date."},
+                        "max_candidates": {"type": "integer", "minimum": 1, "description": "How many times to offer; 5-15 is the point. Default 10."},
+                        "policy": {"type": "string", "description": "Only with `freebusy`: a path to an availability policy TOML, instead of the pipeline's."},
+                        "freebusy": {"type": "string", "description": "Only with `policy`: a path to `mecha-mail freebusy --json` output written within the last hour, instead of the pipeline's cache."}
                     },
-                    "required": ["instrument", "poll_id", "policy", "freebusy", "title", "duration_minutes"],
+                    "required": ["title", "duration_minutes"],
                     "additionalProperties": false
                 })
             },
@@ -1007,37 +1028,66 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             Ok(describe_created(&created))
         }
         "poll_meeting_create" => {
-            let policy = confined(root, &string("policy")?)?;
-            let policy_toml = std::fs::read_to_string(&policy)
-                .with_context(|| format!("reading {}", policy.display()))?;
-            let freebusy_path = confined(root, &string("freebusy")?)?;
-            let freebusy = crate::polls::Freebusy::parse(
-                &std::fs::read_to_string(&freebusy_path)
-                    .with_context(|| format!("reading {}", freebusy_path.display()))?,
-            )?;
+            let optional = |key: &str| args.get(key).and_then(Value::as_str);
+            // Both or neither: a policy without busy time (or the reverse)
+            // is half an input, and the pipeline's cache is the whole one.
+            let (policy_toml, freebusy) = match (optional("policy"), optional("freebusy")) {
+                (Some(policy), Some(freebusy)) => {
+                    let policy = confined(root, policy)?;
+                    let freebusy = confined(root, freebusy)?;
+                    (
+                        Some(
+                            std::fs::read_to_string(&policy)
+                                .with_context(|| format!("reading {}", policy.display()))?,
+                        ),
+                        Some(crate::polls::Freebusy::parse(
+                            &std::fs::read_to_string(&freebusy)
+                                .with_context(|| format!("reading {}", freebusy.display()))?,
+                        )?),
+                    )
+                }
+                (None, None) => (None, None),
+                _ => anyhow::bail!(
+                    "`policy` and `freebusy` go together: pass both, or neither to use the \
+                     pipeline's"
+                ),
+            };
             let duration = args
                 .get("duration_minutes")
                 .and_then(Value::as_u64)
                 .ok_or_else(|| anyhow::anyhow!("`duration_minutes` is required"))?
                 as u32;
             let named = participants(args, root)?;
+            let title = string("title")?;
             let created = crate::polls::create_meeting(
-                &string("instrument")?,
-                &string("poll_id")?,
-                &policy_toml,
-                &string("title")?,
-                duration,
-                args.get("deadline").and_then(Value::as_str),
-                args.get("max_candidates")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(10) as usize,
-                &freebusy,
+                optional("instrument"),
+                &crate::polls::MeetingRequest {
+                    title: &title,
+                    duration,
+                    poll_id: optional("poll_id"),
+                    deadline: optional("deadline"),
+                    earliest: optional("earliest"),
+                    latest: optional("latest"),
+                    max_candidates: args
+                        .get("max_candidates")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(10) as usize,
+                },
+                policy_toml.as_deref(),
+                freebusy,
                 &named,
+                &crate::polls::Invite {
+                    message: optional("message"),
+                    account: optional("account"),
+                    subject: optional("subject"),
+                    invitation: optional("invitation"),
+                },
             )?;
             Ok(describe_created(&created))
         }
         "poll_status" => {
-            let status = crate::polls::status(&string("instrument")?, &string("poll_id")?)?;
+            let poll_id = string("poll_id")?;
+            let status = crate::polls::status(&string("instrument")?, &poll_id)?;
             let view = status.for_agent();
             let mut out = format!(
                 "poll `{}` ({}): {} of {} answered\n",
@@ -1045,6 +1095,22 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             );
             if let Some(resolution) = &view.resolution {
                 out.push_str(&format!("outcome: {resolution}\n"));
+            }
+            // Where the lifecycle stands, from the record at home — the
+            // invitations, the verdict, the booking — beside the box's tally.
+            // Three worlds, kept apart as the CLI keeps them: a lifecycle,
+            // none, and a local record that could not be read — which is
+            // named, and never the reason the box's tally goes unreported.
+            match crate::lifecycle::record(&poll_id) {
+                Ok(Some(record)) => {
+                    out.push_str(&format!("lifecycle: {}\n", record.lifecycle.summary()));
+                    out.push_str(&serde_json::to_string_pretty(&crate::lifecycle::describe(
+                        &record.lifecycle,
+                    ))?);
+                    out.push('\n');
+                }
+                Ok(None) => {}
+                Err(e) => out.push_str(&format!("lifecycle: record unreadable — {e:#}\n")),
             }
             out.push_str(&serde_json::to_string_pretty(&view.body)?);
             out.push_str(
@@ -1394,25 +1460,54 @@ fn describe_created(created: &crate::polls::Created) -> String {
             ));
             out
         }
+        // No URLs here, on purpose: the invitations are the sweep's to send,
+        // and a link in a tool answer is a link the model is tempted to mail
+        // by hand — which is the flow this replaces.
         Created::Times {
             poll_id,
             title,
             candidates,
+            first,
+            last,
+            deadline_local,
+            auto_book,
             people,
             record,
         } => {
             let mut out = format!(
-                "Poll `{poll_id}` (\"{title}\") is open: {candidates} candidate time(s) drawn \
-                 from real availability, {} participant(s). Each link is that person's \
-                 identity on the poll, so send each one only to them.\n",
-                people.len()
+                "Poll `{poll_id}` (\"{title}\") is open: {candidates} candidate time(s) from \
+                 {first} to {last}, drawn from the user's real availability. Answers close \
+                 {deadline_local}.\nInvited ({}): {}.\n",
+                people.len(),
+                people
+                    .iter()
+                    .map(|p| p.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
-            for person in people {
-                out.push_str(&format!(
-                    "  {} <{}>\n    {}\n",
-                    person.name, person.email, person.url
-                ));
-            }
+            out.push_str(
+                "This wrote the record and queued the invitations in it; nothing has been \
+                 sent yet, and nothing here can see whether the mail sweep (`mecha-mail \
+                 polls`, on the user's timer) is installed — when it runs, it mails each \
+                 person their own link from the user's account, and the record says so. \
+                 Nothing further is needed from you. From there the sweeps carry the poll: \
+                 the silent are nudged once, and at close ",
+            );
+            // The promise is the policy's, not a sentence printed regardless
+            // of it: under `manual` nothing books by itself.
+            out.push_str(match auto_book.as_str() {
+                "unanimous" => {
+                    "a time everyone can do is booked automatically; anything else goes to \
+                     the user to pick."
+                }
+                "feasible" => {
+                    "the best time everyone can make (if-needed included) is booked \
+                     automatically; nothing feasible, or a silent participant, goes to the \
+                     user to pick."
+                }
+                _ => "the ranking goes to the user to pick — this policy books nothing by itself.",
+            });
+            out.push_str(" poll_status says where it stands.");
             out.push_str(&format!("\nrecord: {}", record.display()));
             out
         }
@@ -1436,6 +1531,35 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A meeting poll's answer carries no link and no address: a link in a
+    /// tool answer is a link the model is tempted to mail by hand, which is
+    /// the flow the sweep replaces. Would fail on the answer before the
+    /// lifecycle existed, which printed every URL.
+    #[test]
+    fn a_meeting_poll_answer_carries_no_link_and_no_address() {
+        let created = crate::polls::Created::Times {
+            poll_id: "lab-20300128".into(),
+            title: "Lab meeting".into(),
+            candidates: 8,
+            first: "Tue 5 Feb 1:00 PM".into(),
+            last: "Thu 14 Feb 4:00 PM".into(),
+            deadline_local: "Thursday 31 January at 5:00 PM EST".into(),
+            auto_book: "unanimous".into(),
+            people: vec![crate::polls::Invited {
+                name: "Priya".into(),
+                email: "priya@example.edu".into(),
+                url: "https://gate.example.org/p/h/lab-20300128/tok".into(),
+            }],
+            record: std::path::PathBuf::from("/tmp/lab.json"),
+        };
+        let answer = describe_created(&created);
+        assert!(!answer.contains("https://"), "{answer}");
+        assert!(!answer.contains("priya@example.edu"), "{answer}");
+        assert!(answer.contains("Priya"), "{answer}");
+        assert!(answer.contains("nothing has been sent yet"), "{answer}");
+        assert!(answer.contains("booked automatically"), "{answer}");
+    }
 
     /// The annotations are the whole security contract with mecha, and they are
     /// derived rather than declared on the far side: `openWorldHint` sets both

@@ -72,6 +72,69 @@ pub struct Policy {
     pub increment_minutes: u32,
     pub windows: Vec<WeeklyWindow>,
     pub overrides: Vec<DateOverride>,
+    /// How a group poll seeded from this policy runs its lifecycle.
+    pub poll: PollPolicy,
+}
+
+/// What books a group poll by itself, once answers are in.
+///
+/// The 2026-08-07 ruling was *auto with guardrails*: a booking happens with
+/// nobody in the loop only when every participant answered and exactly one
+/// slot is a plain yes for all. That stays the default. The other two are
+/// the owner's to choose, and neither books over a silent participant — a
+/// meeting someone never agreed to is the failure the poll exists to prevent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AutoBook {
+    /// Everyone answered and one slot is unanimous plain-yes.
+    #[default]
+    Unanimous,
+    /// Everyone answered and the best-ranked slot is feasible — an if-needed
+    /// is accepted, a tie takes the earliest.
+    Feasible,
+    /// Never: every close is the owner's pick.
+    Manual,
+}
+
+impl AutoBook {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AutoBook::Unanimous => "unanimous",
+            AutoBook::Feasible => "feasible",
+            AutoBook::Manual => "manual",
+        }
+    }
+}
+
+/// The numbers a poll's lifecycle runs on, all owner-set, all defaulted.
+///
+/// Copied into the poll's record at creation, so a policy edit never changes
+/// a poll already in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PollPolicy {
+    pub auto_book: AutoBook,
+    /// Answers close this many days after the invitations go out …
+    pub deadline_days: u32,
+    /// … at this hour, in the policy's zone.
+    pub deadline_hour: u32,
+    /// One nudge to whoever is silent, this long before the deadline. Zero
+    /// disables it.
+    pub nudge_hours_before: u32,
+    /// No nudge when the deadline was closer than this at send — a reminder
+    /// eleven hours after an invitation is nagging.
+    pub nudge_min_lead_hours: u32,
+}
+
+impl Default for PollPolicy {
+    fn default() -> Self {
+        PollPolicy {
+            auto_book: AutoBook::Unanimous,
+            deadline_days: 3,
+            deadline_hour: 17,
+            nudge_hours_before: 24,
+            nudge_min_lead_hours: 36,
+        }
+    }
 }
 
 /// The `[availability]` section exactly as TOML states it, before meaning is
@@ -97,6 +160,25 @@ pub struct RawPolicy {
     pub windows: Vec<RawWindow>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub overrides: Vec<RawOverride>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poll: Option<RawPollPolicy>,
+}
+
+/// The `[poll]` table as written: every key optional, so an owner states
+/// only what they are changing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RawPollPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_book: Option<AutoBook>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_days: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_hour: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge_hours_before: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nudge_min_lead_hours: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -162,6 +244,25 @@ impl Policy {
         ensure(raw.increment_minutes >= 5, || {
             "increment_minutes must be at least 5".into()
         })?;
+        let defaults = PollPolicy::default();
+        let raw_poll = raw.poll.clone().unwrap_or_default();
+        let poll = PollPolicy {
+            auto_book: raw_poll.auto_book.unwrap_or(defaults.auto_book),
+            deadline_days: raw_poll.deadline_days.unwrap_or(defaults.deadline_days),
+            deadline_hour: raw_poll.deadline_hour.unwrap_or(defaults.deadline_hour),
+            nudge_hours_before: raw_poll
+                .nudge_hours_before
+                .unwrap_or(defaults.nudge_hours_before),
+            nudge_min_lead_hours: raw_poll
+                .nudge_min_lead_hours
+                .unwrap_or(defaults.nudge_min_lead_hours),
+        };
+        ensure(poll.deadline_days >= 1, || {
+            "poll.deadline_days must be at least 1".into()
+        })?;
+        ensure(poll.deadline_hour <= 23, || {
+            "poll.deadline_hour must be 0–23".into()
+        })?;
 
         let time = |raw: &str| -> crate::Result<NaiveTime> {
             NaiveTime::parse_from_str(raw, "%H:%M")
@@ -209,6 +310,7 @@ impl Policy {
             increment_minutes: raw.increment_minutes,
             windows,
             overrides,
+            poll,
         })
     }
 }
@@ -378,6 +480,7 @@ mod tests {
                     end: hm("17:00"),
                 },
             ],
+            poll: PollPolicy::default(),
             overrides: vec![],
         }
     }
@@ -663,6 +766,43 @@ mod tests {
             assert!(
                 format!("{err:#}").contains(expect),
                 "should fail mentioning `{expect}`, got: {err:#}\n{toml}"
+            );
+        }
+    }
+
+    /// `[poll]` is optional, every key in it is optional, and a key it does
+    /// not know is an error — the same arrangement as the rest of the policy,
+    /// because `auto_bok = "manual"` silently meaning "unanimous" is a
+    /// meeting booked over someone's objection.
+    #[test]
+    fn the_poll_table_defaults_key_by_key_and_refuses_typos() {
+        let base = "timezone = \"UTC\"\ndurations = [30]\n[[windows]]\nday = \"mon\"\nstart = \"09:00\"\nend = \"10:00\"\n";
+        let absent = Policy::from_toml(base).unwrap();
+        assert_eq!(absent.poll, PollPolicy::default());
+        assert_eq!(absent.poll.auto_book, AutoBook::Unanimous);
+
+        let partial = Policy::from_toml(&format!(
+            "{base}[poll]\nauto_book = \"manual\"\nnudge_hours_before = 0\n"
+        ))
+        .unwrap();
+        assert_eq!(partial.poll.auto_book, AutoBook::Manual);
+        assert_eq!(partial.poll.nudge_hours_before, 0);
+        assert_eq!(
+            partial.poll.deadline_days, 3,
+            "untouched keys keep the default"
+        );
+        assert_eq!(partial.poll.deadline_hour, 17);
+
+        for (bad, expect) in [
+            ("[poll]\nauto_bok = \"manual\"\n", "auto_bok"),
+            ("[poll]\nauto_book = \"always\"\n", "always"),
+            ("[poll]\ndeadline_hour = 24\n", "0–23"),
+            ("[poll]\ndeadline_days = 0\n", "at least 1"),
+        ] {
+            let err = Policy::from_toml(&format!("{base}{bad}")).unwrap_err();
+            assert!(
+                format!("{err:#}").contains(expect),
+                "should fail mentioning `{expect}`, got: {err:#}"
             );
         }
     }

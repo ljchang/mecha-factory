@@ -273,6 +273,9 @@ enum Command {
     Switchboard(SwitchboardAction),
 }
 
+// `Create` carries every optional the meeting poll takes; the enum lives for
+// one command and is never stored, so the size difference costs nothing.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum PollsAction {
     /// Create a poll from the availability pipeline:
@@ -282,9 +285,11 @@ enum PollsAction {
     /// The candidates are the engine's earliest feasible slots — already
     /// minus the user's real busy time — capped small, because a poll a
     /// colleague answers in ten seconds is the one that gets answered. The
-    /// box mints one capability URL per participant and this prints them;
-    /// addresses never leave this machine, so mailing the links is the
-    /// agent's (outbox-reviewed) or the user's own act.
+    /// box mints one capability URL per participant; addresses never leave
+    /// this machine. For a meeting poll the links are not printed: the
+    /// record queues the invitations and `mecha-mail polls` sends each
+    /// person theirs on the timer. A `--spec` poll's links are printed (or
+    /// land in `links.csv`) for the agent's outbox-reviewed mail or your own.
     Create {
         /// The instrument whose policy seeds this.
         instrument: String,
@@ -294,9 +299,12 @@ enum PollsAction {
         /// shape: choice, ranking, likert, vas, text). Replaces the
         /// availability pipeline entirely — no stdin, no policy, and the
         /// title and deadline come from the spec.
-        #[arg(long, conflicts_with_all = ["policy", "title", "duration", "deadline", "max_candidates"])]
+        #[arg(long, conflicts_with_all = ["policy", "title", "duration", "deadline", "max_candidates", "earliest", "latest", "message", "account"])]
         spec: Option<PathBuf>,
-        #[arg(long, required_unless_present = "spec")]
+        /// The availability policy TOML. With it, stdin is `mecha-mail
+        /// freebusy --json` output (the pipeline contract); without it, both
+        /// come from what `slots push` last saw for the instrument.
+        #[arg(long)]
         policy: Option<PathBuf>,
         #[arg(long, required_unless_present = "spec")]
         title: Option<String>,
@@ -311,13 +319,31 @@ enum PollsAction {
         /// the LMS mail-merge. A `link`-audience spec takes neither.
         #[arg(long)]
         roster: Option<PathBuf>,
-        /// RFC 3339. After this, answers freeze on their own.
+        /// RFC 3339, or a date that closes at the policy's `deadline_hour`.
+        /// Default: `[poll] deadline_days` out. Answers freeze on their own.
         #[arg(long)]
         deadline: Option<String>,
+        /// The earliest date a candidate may fall on.
+        #[arg(long)]
+        earliest: Option<String>,
+        /// The latest date a candidate may fall on.
+        #[arg(long)]
+        latest: Option<String>,
+        /// Your sentence, above the invitation's default block.
+        #[arg(long)]
+        message: Option<String>,
+        /// The mail account the invitations and the event come from.
+        #[arg(long)]
+        account: Option<String>,
         /// How many candidate slots to offer (5–15 is the point).
         #[arg(long, default_value_t = 10)]
         max_candidates: usize,
     },
+    /// Advance every open meeting poll by one tick: observe the tally on the
+    /// box, queue the nudge, close on the poll's own terms, decide the
+    /// verdict, and close on the box once the outcome exists. Sends nothing
+    /// and books nothing — that is `mecha-mail polls`, on the same timer.
+    Sweep,
     /// The tally: ranked with the auto-book verdict for a times poll,
     /// per-question tallies for a general one.
     Status {
@@ -1697,9 +1723,11 @@ fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<
          the busy data must cover the present"
     );
 
-    // Holds (open group polls) and bookings (the local ledger) arrive with
-    // later build steps; today the calendar itself is the only subtraction.
-    let slots = availability::availability(&policy, &doc.busy, &[], &[], generated_at);
+    // Open meeting polls hold their candidates (SCHEDULING-DESIGN.md §5.5):
+    // the page must not sell a slot a poll is still asking about. Bookings
+    // from the local ledger arrive with a later build step.
+    let holds = mecha_factory_publish::lifecycle::open_holds()?;
+    let slots = availability::availability(&policy, &doc.busy, &holds, &[], generated_at);
 
     if dry_run {
         println!(
@@ -1732,12 +1760,126 @@ fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<
         "slots": slots,
     });
     let reply = remote.slots_push(id, &payload)?;
+    // What this tick saw, kept: a meeting poll created without its own
+    // freebusy seeds from here — including one released hours after it was
+    // staged, which is the case a path to a file could never serve.
+    mecha_factory_publish::lifecycle::remember_freebusy(
+        id,
+        &policy_path.display().to_string(),
+        &policy_text,
+        &stdin,
+    )?;
     println!(
-        "pushed {} slot(s) for `{id}` (generated {})",
+        "pushed {} slot(s) for `{id}` (generated {}){}",
         reply["stored"].as_u64().unwrap_or(slots.len() as u64),
         doc.generated_at,
+        if holds.is_empty() {
+            String::new()
+        } else {
+            format!(", {} slot(s) held by open polls", holds.len())
+        }
     );
     Ok(())
+}
+
+/// One tick of every open meeting poll. Each record is advanced on its own,
+/// so one unreachable poll never stalls the rest; what could not be read is
+/// printed as a finding, never skipped as if absent.
+fn sweep_command() -> Result<()> {
+    use mecha_factory_publish::lifecycle::{self, Observed};
+    use mecha_factory_publish::polls::{self, Status};
+
+    let (records, problems) = lifecycle::records()?;
+    for problem in &problems {
+        eprintln!("unreadable: {problem}");
+    }
+    let now = chrono::Utc::now();
+    let mut touched = 0usize;
+    for mut record in records {
+        // Retired once the box is settled — unless the record still holds
+        // slots off the booking page, in which case the stall bound must
+        // keep running until the event exists or the hold is released.
+        if record.lifecycle.box_closed_at.is_some() && !record.lifecycle.holds_slots() {
+            continue;
+        }
+        let status = match polls::status(&record.instrument, &record.poll_id) {
+            Ok(status) => status,
+            Err(e) => {
+                eprintln!("{}: the box did not answer — {e:#}", record.poll_id);
+                continue;
+            }
+        };
+        let Status::Times {
+            state,
+            resolution,
+            responded,
+            total,
+            ranked,
+            silent,
+            answers,
+            ..
+        } = status
+        else {
+            eprintln!("{}: not a meeting poll on the box; skipped", record.poll_id);
+            continue;
+        };
+        let seen = Observed {
+            state,
+            resolution,
+            responded,
+            total,
+            silent,
+            ranked: ranked
+                .iter()
+                .map(|r| mecha_manifest::RankedCandidate {
+                    start: r.start,
+                    duration_minutes: r.duration_minutes,
+                    yes: r.yes,
+                    if_needed: r.if_needed,
+                    no: r.no,
+                    feasible: r.feasible,
+                    unanimous: r.unanimous,
+                })
+                .collect(),
+            answers,
+        };
+        let before = record.lifecycle.clone();
+        let advanced = lifecycle::advance(&mut record.lifecycle, &seen, now);
+        if let Some(sentence) = &advanced.close_box_with {
+            match polls::close(&record.instrument, &record.poll_id, Some(sentence)) {
+                Ok(true) => record.lifecycle.box_closed_at = Some(now),
+                // `false` is the box saying it was already closed — by hand,
+                // since the tally — and that it keeps the resolution written
+                // then. Not a success, and not ours to report as one.
+                Ok(false) => {
+                    let line = lifecycle::box_refused_close(&mut record.lifecycle, now);
+                    println!("{}: {line}", record.poll_id);
+                }
+                Err(e) => eprintln!("{}: could not close on the box — {e:#}", record.poll_id),
+            }
+        }
+        if record.lifecycle != before {
+            // A write that fails is this record's failure, reported and
+            // retried next tick — never the reason a later poll goes
+            // un-advanced.
+            match lifecycle::save(&mut record, &before) {
+                Ok(()) => touched += 1,
+                Err(e) => {
+                    eprintln!("{}: could not write the record — {e:#}", record.poll_id);
+                    continue;
+                }
+            }
+        }
+        for line in &advanced.lines {
+            println!("{}: {line}", record.poll_id);
+        }
+    }
+    println!("swept: {touched} record(s) changed");
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        bail!("{} record(s) could not be read", problems.len())
+    }
 }
 
 /// The person's front end onto `polls`. Everything below this line is
@@ -1748,6 +1890,8 @@ fn polls_command(action: PollsAction) -> Result<()> {
     use mecha_factory_publish::polls::{self, Status};
 
     match action {
+        PollsAction::Sweep => sweep_command()?,
+
         PollsAction::Create {
             instrument,
             poll_id,
@@ -1758,6 +1902,10 @@ fn polls_command(action: PollsAction) -> Result<()> {
             participants,
             roster,
             deadline,
+            earliest,
+            latest,
+            message,
+            account,
             max_candidates,
         } => {
             let roster_text = match &roster {
@@ -1777,30 +1925,59 @@ fn polls_command(action: PollsAction) -> Result<()> {
                         .with_context(|| format!("{}", spec_path.display()))?
                 }
                 None => {
-                    let (Some(policy), Some(title), Some(duration)) = (policy, title, duration)
-                    else {
-                        bail!("clap enforces --policy/--title/--duration unless --spec is given");
+                    let (Some(title), Some(duration)) = (title, duration) else {
+                        bail!("clap enforces --title/--duration unless --spec is given");
                     };
-                    let policy_text = std::fs::read_to_string(&policy)
-                        .with_context(|| format!("reading {}", policy.display()))?;
-                    // The stdin contract `slots push` uses, and the same
-                    // refusals downstream of it.
-                    let stdin =
-                        std::io::read_to_string(std::io::stdin()).context("reading stdin")?;
-                    let freebusy = polls::Freebusy::parse(&stdin)
-                        .context("stdin is not `mecha-mail freebusy --json` output")?;
+                    // With --policy, stdin is the pipeline contract `slots
+                    // push` uses; without it, the pipeline's own last input.
+                    let (policy_text, freebusy) = match &policy {
+                        Some(path) => {
+                            let text = std::fs::read_to_string(path)
+                                .with_context(|| format!("reading {}", path.display()))?;
+                            let stdin = std::io::read_to_string(std::io::stdin())
+                                .context("reading stdin")?;
+                            let freebusy = polls::Freebusy::parse(&stdin)
+                                .context("stdin is not `mecha-mail freebusy --json` output")?;
+                            (Some(text), Some(freebusy))
+                        }
+                        None => {
+                            // Busy time piped in without the policy it goes
+                            // with is half an input: refused, as the library
+                            // refuses it, rather than silently replaced by
+                            // the pipeline's cache.
+                            use std::io::IsTerminal;
+                            if !std::io::stdin().is_terminal() {
+                                let stdin = std::io::read_to_string(std::io::stdin())
+                                    .context("reading stdin")?;
+                                anyhow::ensure!(
+                                    stdin.trim().is_empty(),
+                                    "freebusy on stdin without --policy — pass both, or \
+                                     neither to use the pipeline's last input"
+                                );
+                            }
+                            (None, None)
+                        }
+                    };
                     polls::create_meeting(
-                        &instrument,
-                        &poll_id,
-                        &policy_text,
-                        &title,
-                        duration,
-                        deadline.as_deref(),
-                        max_candidates,
-                        &freebusy,
+                        Some(&instrument),
+                        &polls::MeetingRequest {
+                            title: &title,
+                            duration,
+                            poll_id: Some(&poll_id),
+                            deadline: deadline.as_deref(),
+                            earliest: earliest.as_deref(),
+                            latest: latest.as_deref(),
+                            max_candidates,
+                        },
+                        policy_text.as_deref(),
+                        freebusy,
                         &named,
-                    )
-                    .with_context(|| format!("{}", policy.display()))?
+                        &polls::Invite {
+                            message: message.as_deref(),
+                            account: account.as_deref(),
+                            ..polls::Invite::default()
+                        },
+                    )?
                 }
             };
             print_created(&created);
@@ -1934,17 +2111,24 @@ fn print_created(created: &mecha_factory_publish::polls::Created) {
         Created::Times {
             poll_id,
             candidates,
+            first,
+            last,
+            deadline_local,
             people,
             record,
             ..
         } => {
             println!(
-                "poll `{poll_id}`: {candidates} candidate(s), {} participant(s)",
+                "poll `{poll_id}`: {candidates} candidate time(s) from {first} to {last}, \
+                 {} participant(s); answers close {deadline_local}",
                 people.len()
             );
-            print_invites(people);
-            println!("\nrecord: {}", record.display());
-            println!("Send each person their own link — it is their identity on the poll.");
+            println!("record: {}", record.display());
+            println!(
+                "The invitations are queued for `mecha-mail polls`, which sends each person \
+                 their own link on its timer; `polls sweep` carries the poll from there. \
+                 Neither has run yet — this minted the poll on the box and wrote the record."
+            );
         }
     }
 }
@@ -1967,19 +2151,33 @@ fn times_json(status: &mecha_factory_publish::polls::Status) -> serde_json::Valu
     let Status::Times {
         poll_id,
         state,
+        resolution,
         responded,
         total,
         ranked,
         clean_winner,
+        silent,
+        ..
     } = status
     else {
         unreachable!("times_json is only called on a times poll")
     };
+    // Three worlds, kept apart: a lifecycle, none (a general poll, or a
+    // record from before one existed), and a record that is on disk but
+    // could not be read — which must not render as the benign second.
+    let lifecycle = match mecha_factory_publish::lifecycle::record(poll_id) {
+        Ok(Some(r)) => mecha_factory_publish::lifecycle::describe(&r.lifecycle),
+        Ok(None) => serde_json::Value::Null,
+        Err(e) => serde_json::json!({ "unreadable": format!("{e:#}") }),
+    };
     serde_json::json!({
         "poll": poll_id,
         "state": state,
+        "resolution": resolution,
         "responded": responded,
         "total": total,
+        "silent": silent,
+        "lifecycle": lifecycle,
         "ranked": ranked.iter().map(|r| serde_json::json!({
             "start": r.start.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
             "duration_minutes": r.duration_minutes,
@@ -2032,11 +2230,21 @@ fn print_times(status: &mecha_factory_publish::polls::Status) {
         total,
         ranked,
         clean_winner,
+        silent,
+        ..
     } = status
     else {
         unreachable!("print_times is only called on a times poll")
     };
     println!("poll `{poll_id}` ({state}): {responded} of {total} answered");
+    if !silent.is_empty() {
+        println!("  silent: {}", silent.join(", "));
+    }
+    match mecha_factory_publish::lifecycle::record(poll_id) {
+        Ok(Some(record)) => println!("  lifecycle: {}", record.lifecycle.summary()),
+        Ok(None) => {}
+        Err(e) => println!("  lifecycle: record unreadable — {e:#}"),
+    }
     for r in ranked.iter().take(5) {
         println!(
             "  {}  {:>3} min   yes {}  if-needed {}  no {}{}",
@@ -2220,6 +2428,14 @@ mod surface {
         ),
         ("polls status", Tools(&["poll_status"])),
         ("polls close", Tools(&["poll_close"])),
+        (
+            "polls sweep",
+            NotATool(
+                "the timer's verb: it advances every open meeting poll by one tick, with no \
+                 judgment in it. A model reads where a poll stands through poll_status; the \
+                 decisions are the sweep's and the owner's.",
+            ),
+        ),
         (
             "polls export",
             NotATool(

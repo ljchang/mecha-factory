@@ -22,6 +22,7 @@
 /// the same types. Re-exported here because this crate is where it *runs*
 /// (`slots push`), and the CLI reads better naming it locally.
 pub use mecha_manifest::availability;
+pub mod lifecycle;
 pub mod mcp;
 pub mod notebook;
 pub mod poll_export;

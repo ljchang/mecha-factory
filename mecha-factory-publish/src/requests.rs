@@ -435,7 +435,7 @@ fn attachments_from(row: &Value, seq: i64) -> Vec<RecordAttachment> {
 }
 
 #[cfg(unix)]
-fn restrict(path: &Path) -> Result<()> {
+pub(crate) fn restrict(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let meta = std::fs::metadata(path)?;
     let mut perms = meta.permissions();
@@ -446,7 +446,7 @@ fn restrict(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn restrict(_path: &Path) -> Result<()> {
+pub(crate) fn restrict(_path: &Path) -> Result<()> {
     Ok(())
 }
 
