@@ -410,6 +410,8 @@ fn times_record(
 fn write_record(poll_id: &str, record: &Value) -> Result<PathBuf> {
     let path = record_dir()?.join(format!("{poll_id}.json"));
     std::fs::write(&path, serde_json::to_string_pretty(record)?)?;
+    // Addresses and capability URLs: the owner's alone.
+    crate::requests::restrict(&path)?;
     Ok(path)
 }
 
@@ -1041,9 +1043,13 @@ fn general(poll_id: &str, tally: &Value, spec_value: &Value, state: String) -> R
 /// Freeze the answers. `false` means it was already closed — in which case the
 /// resolution written at close is *not* overwritten.
 pub fn close(instrument: &str, poll_id: &str, resolution: Option<&str>) -> Result<bool> {
-    let reply = gate()?.poll_close(instrument, poll_id, resolution)?;
-    // A reply this client cannot read is an error the caller retries, never
-    // a `false` that a sweep would record as somebody's refusal.
+    closed_from(&gate()?.poll_close(instrument, poll_id, resolution)?)
+}
+
+/// `closed` off the box's reply. A reply this client cannot read is an
+/// error the caller retries, never a `false` that a sweep would record as
+/// somebody's refusal.
+fn closed_from(reply: &Value) -> Result<bool> {
     reply["closed"]
         .as_bool()
         .context("the box's close reply carries no `closed`")
@@ -1312,6 +1318,16 @@ end = "17:00"
             assert_eq!((hold.start, hold.end), (candidate.start, candidate.end));
         }
         std::env::remove_var("MECHA_HOME");
+    }
+
+    /// A close reply without `closed` is an error, never a refusal.
+    #[test]
+    fn a_close_reply_without_closed_is_an_error_not_a_refusal() {
+        assert!(closed_from(&json!({"closed": true})).unwrap());
+        assert!(!closed_from(&json!({"closed": false})).unwrap());
+        let err = closed_from(&json!({"ok": true})).unwrap_err().to_string();
+        assert!(err.contains("no `closed`"), "{err}");
+        assert!(closed_from(&json!({"closed": "yes"})).is_err());
     }
 
     #[test]

@@ -1796,7 +1796,10 @@ fn sweep_command() -> Result<()> {
     let now = chrono::Utc::now();
     let mut touched = 0usize;
     for mut record in records {
-        if record.lifecycle.box_closed_at.is_some() {
+        // Retired once the box is settled — unless the record still holds
+        // slots off the booking page, in which case the stall bound must
+        // keep running until the event exists or the hold is released.
+        if record.lifecycle.box_closed_at.is_some() && !record.lifecycle.holds_slots() {
             continue;
         }
         let status = match polls::status(&record.instrument, &record.poll_id) {
