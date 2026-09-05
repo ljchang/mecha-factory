@@ -409,9 +409,15 @@ fn times_record(
 
 fn write_record(poll_id: &str, record: &Value) -> Result<PathBuf> {
     let path = record_dir()?.join(format!("{poll_id}.json"));
-    std::fs::write(&path, serde_json::to_string_pretty(record)?)?;
+    // Temp-sibling-and-rename, like every other writer of this file: a
+    // create cut short by a full disk must not leave a torn record behind,
+    // because `open_holds` refuses to compute over one and every `slots
+    // push` after it would fail until a person found the file.
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(record)?)?;
     // Addresses and capability URLs: the owner's alone.
-    crate::requests::restrict(&path)?;
+    crate::requests::restrict(&tmp)?;
+    std::fs::rename(&tmp, &path)?;
     Ok(path)
 }
 

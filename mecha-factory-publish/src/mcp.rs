@@ -1098,12 +1098,19 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             }
             // Where the lifecycle stands, from the record at home — the
             // invitations, the verdict, the booking — beside the box's tally.
-            if let Some(record) = crate::lifecycle::record(&poll_id)? {
-                out.push_str(&format!("lifecycle: {}\n", record.lifecycle.summary()));
-                out.push_str(&serde_json::to_string_pretty(&crate::lifecycle::describe(
-                    &record.lifecycle,
-                ))?);
-                out.push('\n');
+            // Three worlds, kept apart as the CLI keeps them: a lifecycle,
+            // none, and a local record that could not be read — which is
+            // named, and never the reason the box's tally goes unreported.
+            match crate::lifecycle::record(&poll_id) {
+                Ok(Some(record)) => {
+                    out.push_str(&format!("lifecycle: {}\n", record.lifecycle.summary()));
+                    out.push_str(&serde_json::to_string_pretty(&crate::lifecycle::describe(
+                        &record.lifecycle,
+                    ))?);
+                    out.push('\n');
+                }
+                Ok(None) => {}
+                Err(e) => out.push_str(&format!("lifecycle: record unreadable — {e:#}\n")),
             }
             out.push_str(&serde_json::to_string_pretty(&view.body)?);
             out.push_str(

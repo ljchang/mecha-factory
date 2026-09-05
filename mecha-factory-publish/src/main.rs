@@ -2127,7 +2127,7 @@ fn print_created(created: &mecha_factory_publish::polls::Created) {
             println!(
                 "The invitations are queued for `mecha-mail polls`, which sends each person \
                  their own link on its timer; `polls sweep` carries the poll from there. \
-                 Neither has run yet — this only wrote the record."
+                 Neither has run yet — this minted the poll on the box and wrote the record."
             );
         }
     }
