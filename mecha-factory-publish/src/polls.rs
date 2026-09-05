@@ -372,11 +372,11 @@ fn gate() -> Result<Remote> {
 }
 
 /// Where the local record of a poll lives. The box never learns the addresses,
-/// so this is the only place that knows who a name is.
+/// so this is the only place that knows who a name is — and the directory
+/// and everything in it are the owner's alone (0700/0600), from one
+/// definition shared with the lifecycle so the two cannot disagree.
 fn record_dir() -> Result<PathBuf> {
-    let dir = remote::Remote::dir()?.join("polls");
-    std::fs::create_dir_all(&dir)?;
-    Ok(dir)
+    crate::lifecycle::record_dir()
 }
 
 /// The meeting poll's record as written — one function, so the shape
@@ -521,6 +521,8 @@ pub fn create_general(
         ]));
     }
     std::fs::write(&links_csv, csv)?;
+    // One capability URL per participant, beside the record it belongs to.
+    crate::requests::restrict(&links_csv)?;
 
     Ok(Created::Roster {
         poll_id: poll_id.to_string(),
@@ -866,7 +868,22 @@ pub fn create_meeting(
             &people,
             &life,
         ),
-    )?;
+    )
+    // The record is the only copy of the minted links — the box keeps
+    // hashes, and the answer deliberately prints none. So a failed write
+    // must not strand an open poll: the error carries the links, for the
+    // operator to mail by hand.
+    .with_context(|| {
+        format!(
+            "poll `{poll_id}` is open on the box but its record could not be written; the \
+             links, which exist nowhere else, are:\n{}",
+            people
+                .iter()
+                .map(|p| format!("  {} <{}>  {}", p.name, p.email, p.url))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    })?;
 
     let local = |at: chrono::DateTime<chrono::Utc>| {
         at.with_timezone(&policy.timezone)

@@ -651,7 +651,7 @@ fn reason(
 
 /// Addresses and capability URLs live here: the owner's alone, like the
 /// request store, so the directory and every file in it are 0700/0600.
-fn record_dir() -> Result<PathBuf> {
+pub(crate) fn record_dir() -> Result<PathBuf> {
     let dir = Remote::dir()?.join("polls");
     std::fs::create_dir_all(&dir)?;
     crate::requests::restrict(&dir)?;
