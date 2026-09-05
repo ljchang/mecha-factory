@@ -876,7 +876,7 @@ pub fn create_meeting(
     // success path keeps from the model. So the links go to the restricted
     // sibling `create_general` already uses, and the error names the path;
     // only if that write fails too are they printed, as the last resort.
-    .or_else(|e| {
+    .map_err(|e| {
         let sibling = record_dir().and_then(|dir| {
             let path = dir.join(format!("{poll_id}.links.csv"));
             let mut csv =
@@ -892,7 +892,7 @@ pub fn create_meeting(
             crate::requests::restrict(&path)?;
             Ok::<_, anyhow::Error>(path)
         });
-        Err(match sibling {
+        match sibling {
             Ok(path) => e.context(format!(
                 "poll `{poll_id}` is open on the box but its record could not be written; \
                  the links, which exist nowhere else, are in {} — mail them by hand",
@@ -907,7 +907,7 @@ pub fn create_meeting(
                     .collect::<Vec<_>>()
                     .join("\n")
             )),
-        })
+        }
     })?;
 
     let local = |at: chrono::DateTime<chrono::Utc>| {
