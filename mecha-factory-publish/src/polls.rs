@@ -871,18 +871,43 @@ pub fn create_meeting(
     )
     // The record is the only copy of the minted links — the box keeps
     // hashes, and the answer deliberately prints none. So a failed write
-    // must not strand an open poll: the error carries the links, for the
-    // operator to mail by hand.
-    .with_context(|| {
-        format!(
-            "poll `{poll_id}` is open on the box but its record could not be written; the \
-             links, which exist nowhere else, are:\n{}",
-            people
-                .iter()
-                .map(|p| format!("  {} <{}>  {}", p.name, p.email, p.url))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )
+    // must not strand an open poll — but on the MCP path the error *is*
+    // the tool answer, and a link in a tool answer is the one thing the
+    // success path keeps from the model. So the links go to the restricted
+    // sibling `create_general` already uses, and the error names the path;
+    // only if that write fails too are they printed, as the last resort.
+    .or_else(|e| {
+        let sibling = record_dir().and_then(|dir| {
+            let path = dir.join(format!("{poll_id}.links.csv"));
+            let mut csv =
+                crate::poll_export::csv_line(&["name".into(), "email".into(), "url".into()]);
+            for p in &people {
+                csv.push_str(&crate::poll_export::csv_line(&[
+                    p.name.clone(),
+                    p.email.clone(),
+                    p.url.clone(),
+                ]));
+            }
+            std::fs::write(&path, csv)?;
+            crate::requests::restrict(&path)?;
+            Ok::<_, anyhow::Error>(path)
+        });
+        Err(match sibling {
+            Ok(path) => e.context(format!(
+                "poll `{poll_id}` is open on the box but its record could not be written; \
+                 the links, which exist nowhere else, are in {} — mail them by hand",
+                path.display()
+            )),
+            Err(_) => e.context(format!(
+                "poll `{poll_id}` is open on the box but neither its record nor a links \
+                 file could be written; the links, which exist nowhere else, are:\n{}",
+                people
+                    .iter()
+                    .map(|p| format!("  {} <{}>  {}", p.name, p.email, p.url))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )),
+        })
     })?;
 
     let local = |at: chrono::DateTime<chrono::Utc>| {
