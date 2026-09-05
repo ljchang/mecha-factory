@@ -485,12 +485,13 @@ pub fn advance(life: &mut Lifecycle, seen: &Observed, now: DateTime<Utc>) -> Adv
     // later, and bounded the same way: reported every tick, and a day past
     // the close marked stalled, which releases the held slots. The decision
     // is kept on the record; nothing books from it after this.
-    // …and the same wait for a pick the owner has decided (`resolution`
-    // written, the event not): once picked it waits on the timer, not on
-    // a person, and is bounded the same way.
-    let decided_pick = life.verdict.as_deref() == Some("pick") && life.resolution.is_some();
+    // A pick has no such wait: releasing its card *is* the booking, and
+    // `mecha polls` writes `book` and `booked` in the same save — so a pick
+    // is either waiting on a person (unbounded, and said so in `summary()`)
+    // or booked. Anchoring a bound on `closed_at` for it would stall a pick
+    // the owner approved more than a day after the close, on arrival.
     if life.is_closed()
-        && (life.verdict.as_deref() == Some("book") || decided_pick)
+        && life.verdict.as_deref() == Some("book")
         && life.booked.is_none()
         && life.conflict.is_none()
     {
@@ -1311,29 +1312,6 @@ mod tests {
             out.close_box_with.as_deref(),
             Some("Booked: Tue 5 Feb, 1:00 PM–2:00 PM EST")
         );
-    }
-
-    /// A pick the owner decided whose event never arrives is bounded like a
-    /// booking's: the hold is released a day on, whatever retired the record.
-    #[test]
-    fn a_decided_pick_that_never_books_is_stalled_too() {
-        let mut life = fixture("manual");
-        let observed = seen(&[
-            ("Priya", Some(("yes", "no"))),
-            ("Tal", Some(("yes", "yes"))),
-        ]);
-        advance(&mut life, &observed, t("2030-01-30T10:00:00Z"));
-        life.resolution = Some("Booked: Tue".into());
-        let out = advance(&mut life, &observed, t("2030-01-30T10:04:00Z"));
-        assert!(
-            out.close_box_with.is_some(),
-            "the page gets the owner's sentence"
-        );
-        life.box_closed_at = Some(t("2030-01-30T10:04:00Z"));
-        assert!(life.holds_slots());
-        advance(&mut life, &observed, t("2030-01-31T10:00:01Z"));
-        assert_eq!(life.verdict.as_deref(), Some("stalled"));
-        assert!(!life.holds_slots(), "released");
     }
 
     /// The conflict handoff runs under the same guards as the open branch:

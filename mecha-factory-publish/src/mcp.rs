@@ -1480,9 +1480,11 @@ fn describe_created(created: &crate::polls::Created) -> String {
             );
             out.push_str(
                 "This wrote the record and queued the invitations in it; nothing has been \
-                 sent yet. Delivery is `mecha-mail polls`' when it runs — each person their \
-                 own link from the user's account. Nothing further is needed from you. From \
-                 there the poll runs itself: the silent are nudged once, and at close ",
+                 sent yet, and nothing here can see whether the mail sweep (`mecha-mail \
+                 polls`, on the user's timer) is installed — when it runs, it mails each \
+                 person their own link from the user's account, and the record says so. \
+                 Nothing further is needed from you. From there the sweeps carry the poll: \
+                 the silent are nudged once, and at close ",
             );
             // The promise is the policy's, not a sentence printed regardless
             // of it: under `manual` nothing books by itself.
