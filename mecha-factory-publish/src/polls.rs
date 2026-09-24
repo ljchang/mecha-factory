@@ -27,12 +27,20 @@
 //! cloud that makes text worth collecting lives in the presenter anyway.
 //!
 //! What makes returning it right is that mecha already has a mechanism for
-//! third-party words, and it is not silence: `poll_status` carries
-//! `openWorldHint`, so everything here arrives marked `untrusted_input` and
-//! arms the trifecta interlock — the same treatment as a mail body, a fetched
-//! page, or a pkg retrieval, every one of which the model reads in full.
-//! Withholding on top of that was stricter than how mecha treats the user's own
-//! inbox.
+//! third-party words, and it is not silence: everything here arrives marked
+//! `untrusted_input` and arms the trifecta interlock — the same treatment as a
+//! mail body, a fetched page, or a graph retrieval, every one of which the
+//! model reads in full. Withholding on top of that was stricter than how mecha
+//! treats the user's own inbox.
+//!
+//! **Where that marking comes from changed.** It used to be `poll_status`'s
+//! `openWorldHint`, which also declared the read a way out, so mecha refused
+//! it on its own first call. It is now the operator's
+//! `[mcp.capabilities] untrusted_input = true` on this server, exactly as
+//! mecha-mail's reads get theirs (see `mcp.rs`, "No read of ours is a sink").
+//! No annotation can say "third-party content, but not a way out", so an
+//! operator who leaves that line off gets these answers unmarked. The
+//! argument for returning the prose holds only with it set.
 //!
 //! What survives is the **separation**. Typed tallies are numbers the box
 //! computed from enum answers; prose is sentences somebody typed; they ride in
@@ -171,11 +179,12 @@ pub enum Status {
 /// `{"answers": 7}` is a feature that does not work.
 ///
 /// What makes returning it right is that mecha already has a mechanism for
-/// other people's words, and it is not silence. `poll_status` carries
-/// `openWorldHint`, so everything here arrives marked `untrusted_input` and
-/// arms the trifecta interlock — the same treatment as a mail body, a fetched
-/// page, or a pkg retrieval, every one of which the model reads. Withholding
-/// on top of that was stricter than how mecha treats the user's own inbox.
+/// other people's words, and it is not silence: the operator marks this
+/// server `untrusted_input`, so everything here arrives marked and arms the
+/// trifecta interlock, as a mail body or a fetched page does (the module docs
+/// say where that marking now comes from, and what happens without it).
+/// Withholding on top of that was stricter than how mecha treats the user's
+/// own inbox.
 ///
 /// What survives from the original design is the *separation*: typed tallies
 /// are numbers the box computed from enum answers, prose is other people's
@@ -379,6 +388,49 @@ fn record_dir() -> Result<PathBuf> {
     crate::lifecycle::record_dir()
 }
 
+/// Who a general poll's record says it reached: one shared link, or a
+/// roster with a link each.
+enum Audience<'a> {
+    Link(&'a str),
+    Roster(&'a [Invited]),
+}
+
+/// A general poll's record as written — one function for both audiences, as
+/// [`times_record`] is for meetings, so the shape `local_instrument` gates
+/// `poll_status` on is the shape a test can write through the real writer.
+fn general_record(
+    instrument: &str,
+    poll_id: &str,
+    spec: &mecha_manifest::PollSpec,
+    created_at: &str,
+    screen_url: Option<&str>,
+    audience: Audience,
+) -> Value {
+    let mut record = json!({
+        "instrument": instrument,
+        "poll_id": poll_id,
+        "title": spec.title,
+        "deadline": spec.deadline,
+        "created_at": created_at,
+        "screen_url": screen_url,
+    });
+    match audience {
+        Audience::Link(url) => {
+            record["audience"] = json!("link");
+            record["max_ballots"] = json!(spec.audience.max_ballots);
+            record["url"] = json!(url);
+        }
+        Audience::Roster(people) => {
+            record["audience"] = json!("roster");
+            record["participants"] = people
+                .iter()
+                .map(|p| json!({"name": p.name, "email": p.email, "url": p.url}))
+                .collect();
+        }
+    }
+    record
+}
+
 /// The meeting poll's record as written — one function, so the shape
 /// `lifecycle::open_holds` reads is the shape this writes and a test can
 /// run one through the other.
@@ -407,8 +459,33 @@ fn times_record(
     })
 }
 
+/// The instrument of a poll this machine made, from its local record, or
+/// `None` when this machine has no record of it. Every create writes one
+/// (named, link and meeting polls alike), so a poll with no record here is
+/// one this machine never made.
+pub fn local_instrument(poll_id: &str) -> Result<Option<String>> {
+    let path = crate::lifecycle::record_path(poll_id)?;
+    // Absent is `None`; a record that cannot even be checked is an error,
+    // never read as absence — the stance `lifecycle::records` takes too.
+    if !path
+        .try_exists()
+        .with_context(|| format!("checking {}", path.display()))?
+    {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let record: Value =
+        serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))?;
+    let instrument = record["instrument"]
+        .as_str()
+        .filter(|i| !i.is_empty())
+        .with_context(|| format!("{} names no instrument", path.display()))?;
+    Ok(Some(instrument.to_string()))
+}
+
 fn write_record(poll_id: &str, record: &Value) -> Result<PathBuf> {
-    let path = record_dir()?.join(format!("{poll_id}.json"));
+    let path = crate::lifecycle::record_path(poll_id)?;
     // Temp-sibling-and-rename, like every other writer of this file: a
     // create cut short by a full disk must not leave a torn record behind,
     // because `open_holds` refuses to compute over one and every `slots
@@ -446,6 +523,10 @@ pub fn create_general(
     spec_toml: &str,
     named: &[Participant],
 ) -> Result<Created> {
+    // Before the box is touched, as `create_meeting` does: an id the local
+    // record cannot be written under would leave an open poll on the box
+    // with no record here and its capability URLs dropped.
+    crate::lifecycle::record_path(poll_id)?;
     let spec = mecha_manifest::PollSpec::from_toml(spec_toml)?;
     let link = spec.audience.kind == mecha_manifest::AudienceKind::Link;
     if link {
@@ -475,17 +556,14 @@ pub fn create_general(
         // record is what the TUI monitor lists.
         let record = write_record(
             poll_id,
-            &json!({
-                "instrument": instrument,
-                "poll_id": poll_id,
-                "title": spec.title,
-                "deadline": spec.deadline,
-                "created_at": created_at,
-                "audience": "link",
-                "max_ballots": spec.audience.max_ballots,
-                "url": url,
-                "screen_url": screen_url,
-            }),
+            &general_record(
+                instrument,
+                poll_id,
+                &spec,
+                &created_at,
+                screen_url.as_deref(),
+                Audience::Link(&url),
+            ),
         )?;
         return Ok(Created::Link {
             poll_id: poll_id.to_string(),
@@ -502,18 +580,14 @@ pub fn create_general(
     let people = invited(named, &urls);
     let record = write_record(
         poll_id,
-        &json!({
-            "instrument": instrument,
-            "poll_id": poll_id,
-            "title": spec.title,
-            "deadline": spec.deadline,
-            "created_at": created_at,
-            "audience": "roster",
-            "screen_url": screen_url,
-            "participants": people.iter().map(|p| json!({
-                "name": p.name, "email": p.email, "url": p.url,
-            })).collect::<Vec<_>>(),
-        }),
+        &general_record(
+            instrument,
+            poll_id,
+            &spec,
+            &created_at,
+            screen_url.as_deref(),
+            Audience::Roster(&people),
+        ),
     )?;
 
     // The class-section artifact: what an LMS mail-merge eats.
@@ -1365,6 +1439,106 @@ end = "17:00"
         for (hold, candidate) in holds.iter().zip(&plan.candidates) {
             assert_eq!((hold.start, hold.end), (candidate.start, candidate.end));
         }
+        std::env::remove_var("MECHA_HOME");
+    }
+
+    /// An id the local record cannot be written under is refused before the
+    /// box is asked — otherwise the poll opens there and its record, and its
+    /// capability URLs, are lost here.
+    #[test]
+    fn a_general_poll_with_an_invalid_id_never_reaches_the_box() {
+        let _guard = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let spec = r#"
+            title = "Retro"
+            [audience]
+            kind = "link"
+            max_ballots = 50
+            [[questions]]
+            id = "notes"
+            prompt = "Anything else?"
+            kind = "text"
+            max_length = 500
+            "#;
+        let err = create_general("seminar", "Has Spaces", spec, &[])
+            .expect_err("an id with spaces is refused")
+            .to_string();
+        assert!(err.contains("is not a poll id"), "{err}");
+        std::env::remove_var("MECHA_HOME");
+    }
+
+    /// `poll_status` answers only for a poll `local_instrument` finds, so
+    /// every create's record must carry its instrument. Measured through the
+    /// real writers — the meeting's `times_record` and both audiences of
+    /// `general_record` — not a hand-built record, because a writer that
+    /// dropped the field would make every such poll unreadable through the
+    /// agent while a hand-built test stayed green.
+    #[test]
+    fn every_created_record_is_readable_through_the_poll_status_gate() {
+        let _guard = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+
+        let policy = crate::availability::Policy::from_toml(POLICY).unwrap();
+        let plan = plan_meeting(&policy, &freebusy(), &[], &lab(60)).unwrap();
+        let life = crate::lifecycle::fresh(&policy, &[], plan.deadline, None, None, "s", "i");
+        write_record(
+            &plan.poll_id,
+            &times_record("book", &lab(60), &plan, "2030-01-28T12:00:00Z", &[], &life),
+        )
+        .unwrap();
+
+        let spec = mecha_manifest::PollSpec::from_toml(
+            r#"
+            title = "Retro"
+            [audience]
+            kind = "link"
+            max_ballots = 50
+            [[questions]]
+            id = "notes"
+            prompt = "Anything else?"
+            kind = "text"
+            max_length = 500
+            "#,
+        )
+        .unwrap();
+        let people = vec![Invited {
+            name: "Priya".into(),
+            email: "priya@example.edu".into(),
+            url: "https://g/p/1".into(),
+        }];
+        for (poll_id, audience) in [
+            ("retro-link", Audience::Link("https://g/l/1")),
+            ("retro-roster", Audience::Roster(&people)),
+        ] {
+            write_record(
+                poll_id,
+                &general_record(
+                    "seminar",
+                    poll_id,
+                    &spec,
+                    "2030-01-28T12:00:00Z",
+                    None,
+                    audience,
+                ),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            local_instrument(&plan.poll_id).unwrap().as_deref(),
+            Some("book")
+        );
+        assert_eq!(
+            local_instrument("retro-link").unwrap().as_deref(),
+            Some("seminar")
+        );
+        assert_eq!(
+            local_instrument("retro-roster").unwrap().as_deref(),
+            Some("seminar")
+        );
+        assert_eq!(local_instrument("never-made").unwrap(), None);
         std::env::remove_var("MECHA_HOME");
     }
 
