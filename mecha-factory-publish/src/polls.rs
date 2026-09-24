@@ -388,6 +388,49 @@ fn record_dir() -> Result<PathBuf> {
     crate::lifecycle::record_dir()
 }
 
+/// Who a general poll's record says it reached: one shared link, or a
+/// roster with a link each.
+enum Audience<'a> {
+    Link(&'a str),
+    Roster(&'a [Invited]),
+}
+
+/// A general poll's record as written — one function for both audiences, as
+/// [`times_record`] is for meetings, so the shape `local_instrument` gates
+/// `poll_status` on is the shape a test can write through the real writer.
+fn general_record(
+    instrument: &str,
+    poll_id: &str,
+    spec: &mecha_manifest::PollSpec,
+    created_at: &str,
+    screen_url: Option<&str>,
+    audience: Audience,
+) -> Value {
+    let mut record = json!({
+        "instrument": instrument,
+        "poll_id": poll_id,
+        "title": spec.title,
+        "deadline": spec.deadline,
+        "created_at": created_at,
+        "screen_url": screen_url,
+    });
+    match audience {
+        Audience::Link(url) => {
+            record["audience"] = json!("link");
+            record["max_ballots"] = json!(spec.audience.max_ballots);
+            record["url"] = json!(url);
+        }
+        Audience::Roster(people) => {
+            record["audience"] = json!("roster");
+            record["participants"] = people
+                .iter()
+                .map(|p| json!({"name": p.name, "email": p.email, "url": p.url}))
+                .collect();
+        }
+    }
+    record
+}
+
 /// The meeting poll's record as written — one function, so the shape
 /// `lifecycle::open_holds` reads is the shape this writes and a test can
 /// run one through the other.
@@ -442,7 +485,7 @@ pub fn local_instrument(poll_id: &str) -> Result<Option<String>> {
 }
 
 fn write_record(poll_id: &str, record: &Value) -> Result<PathBuf> {
-    let path = record_dir()?.join(format!("{poll_id}.json"));
+    let path = crate::lifecycle::record_path(poll_id)?;
     // Temp-sibling-and-rename, like every other writer of this file: a
     // create cut short by a full disk must not leave a torn record behind,
     // because `open_holds` refuses to compute over one and every `slots
@@ -509,17 +552,14 @@ pub fn create_general(
         // record is what the TUI monitor lists.
         let record = write_record(
             poll_id,
-            &json!({
-                "instrument": instrument,
-                "poll_id": poll_id,
-                "title": spec.title,
-                "deadline": spec.deadline,
-                "created_at": created_at,
-                "audience": "link",
-                "max_ballots": spec.audience.max_ballots,
-                "url": url,
-                "screen_url": screen_url,
-            }),
+            &general_record(
+                instrument,
+                poll_id,
+                &spec,
+                &created_at,
+                screen_url.as_deref(),
+                Audience::Link(&url),
+            ),
         )?;
         return Ok(Created::Link {
             poll_id: poll_id.to_string(),
@@ -536,18 +576,14 @@ pub fn create_general(
     let people = invited(named, &urls);
     let record = write_record(
         poll_id,
-        &json!({
-            "instrument": instrument,
-            "poll_id": poll_id,
-            "title": spec.title,
-            "deadline": spec.deadline,
-            "created_at": created_at,
-            "audience": "roster",
-            "screen_url": screen_url,
-            "participants": people.iter().map(|p| json!({
-                "name": p.name, "email": p.email, "url": p.url,
-            })).collect::<Vec<_>>(),
-        }),
+        &general_record(
+            instrument,
+            poll_id,
+            &spec,
+            &created_at,
+            screen_url.as_deref(),
+            Audience::Roster(&people),
+        ),
     )?;
 
     // The class-section artifact: what an LMS mail-merge eats.
@@ -1399,6 +1435,80 @@ end = "17:00"
         for (hold, candidate) in holds.iter().zip(&plan.candidates) {
             assert_eq!((hold.start, hold.end), (candidate.start, candidate.end));
         }
+        std::env::remove_var("MECHA_HOME");
+    }
+
+    /// `poll_status` answers only for a poll `local_instrument` finds, so
+    /// every create's record must carry its instrument. Measured through the
+    /// real writers — the meeting's `times_record` and both audiences of
+    /// `general_record` — not a hand-built record, because a writer that
+    /// dropped the field would make every such poll unreadable through the
+    /// agent while a hand-built test stayed green.
+    #[test]
+    fn every_created_record_is_readable_through_the_poll_status_gate() {
+        let _guard = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+
+        let policy = crate::availability::Policy::from_toml(POLICY).unwrap();
+        let plan = plan_meeting(&policy, &freebusy(), &[], &lab(60)).unwrap();
+        let life = crate::lifecycle::fresh(&policy, &[], plan.deadline, None, None, "s", "i");
+        write_record(
+            &plan.poll_id,
+            &times_record("book", &lab(60), &plan, "2030-01-28T12:00:00Z", &[], &life),
+        )
+        .unwrap();
+
+        let spec = mecha_manifest::PollSpec::from_toml(
+            r#"
+            title = "Retro"
+            [audience]
+            kind = "link"
+            max_ballots = 50
+            [[questions]]
+            id = "notes"
+            prompt = "Anything else?"
+            kind = "text"
+            max_length = 500
+            "#,
+        )
+        .unwrap();
+        let people = vec![Invited {
+            name: "Priya".into(),
+            email: "priya@example.edu".into(),
+            url: "https://g/p/1".into(),
+        }];
+        for (poll_id, audience) in [
+            ("retro-link", Audience::Link("https://g/l/1")),
+            ("retro-roster", Audience::Roster(&people)),
+        ] {
+            write_record(
+                poll_id,
+                &general_record(
+                    "seminar",
+                    poll_id,
+                    &spec,
+                    "2030-01-28T12:00:00Z",
+                    None,
+                    audience,
+                ),
+            )
+            .unwrap();
+        }
+
+        assert_eq!(
+            local_instrument(&plan.poll_id).unwrap().as_deref(),
+            Some("book")
+        );
+        assert_eq!(
+            local_instrument("retro-link").unwrap().as_deref(),
+            Some("seminar")
+        );
+        assert_eq!(
+            local_instrument("retro-roster").unwrap().as_deref(),
+            Some("seminar")
+        );
+        assert_eq!(local_instrument("never-made").unwrap(), None);
         std::env::remove_var("MECHA_HOME");
     }
 

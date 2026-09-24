@@ -709,7 +709,12 @@ pub(crate) fn record_path(poll_id: &str) -> Result<PathBuf> {
 /// [`record_path`] before it reaches the filesystem.
 pub fn record(poll_id: &str) -> Result<Option<Record>> {
     let path = record_path(poll_id)?;
-    if !path.exists() {
+    // Absent is `None`; a record that cannot even be checked is an error,
+    // never "no such poll" — the stance `records` takes above.
+    if !path
+        .try_exists()
+        .with_context(|| format!("checking {}", path.display()))?
+    {
         return Ok(None);
     }
     load(&path)
