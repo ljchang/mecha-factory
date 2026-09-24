@@ -691,11 +691,10 @@ pub fn records() -> Result<(Vec<Record>, Vec<String>)> {
     Ok((found, problems))
 }
 
-/// One record by poll id, if it has a lifecycle. The id becomes a file name
-/// and arrives off a tool argument, so it is checked to the same charset
-/// `plan_meeting` mints — the only id in this crate that reaches the
-/// filesystem, and it must not reach it unchecked.
-pub fn record(poll_id: &str) -> Result<Option<Record>> {
+/// Where a poll's local record lives. The id becomes a file name and
+/// arrives off a tool argument, so it is checked to the charset
+/// `plan_meeting` mints before it reaches the filesystem.
+pub(crate) fn record_path(poll_id: &str) -> Result<PathBuf> {
     anyhow::ensure!(
         !poll_id.is_empty()
             && poll_id
@@ -703,7 +702,13 @@ pub fn record(poll_id: &str) -> Result<Option<Record>> {
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'),
         "`{poll_id}` is not a poll id"
     );
-    let path = record_dir()?.join(format!("{poll_id}.json"));
+    Ok(record_dir()?.join(format!("{poll_id}.json")))
+}
+
+/// One record by poll id, if it has a lifecycle. The id is checked by
+/// [`record_path`] before it reaches the filesystem.
+pub fn record(poll_id: &str) -> Result<Option<Record>> {
+    let path = record_path(poll_id)?;
     if !path.exists() {
         return Ok(None);
     }

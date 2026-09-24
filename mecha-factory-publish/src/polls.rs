@@ -407,6 +407,26 @@ fn times_record(
     })
 }
 
+/// The instrument of a poll this machine made, from its local record, or
+/// `None` when this machine has no record of it. Every create writes one
+/// (named, link and meeting polls alike), so a poll with no record here is
+/// one this machine never made.
+pub fn local_instrument(poll_id: &str) -> Result<Option<String>> {
+    let path = crate::lifecycle::record_path(poll_id)?;
+    if !path.exists() {
+        return Ok(None);
+    }
+    let text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let record: Value =
+        serde_json::from_str(&text).with_context(|| format!("{} is not JSON", path.display()))?;
+    let instrument = record["instrument"]
+        .as_str()
+        .filter(|i| !i.is_empty())
+        .with_context(|| format!("{} names no instrument", path.display()))?;
+    Ok(Some(instrument.to_string()))
+}
+
 fn write_record(poll_id: &str, record: &Value) -> Result<PathBuf> {
     let path = record_dir()?.join(format!("{poll_id}.json"));
     // Temp-sibling-and-rename, like every other writer of this file: a
