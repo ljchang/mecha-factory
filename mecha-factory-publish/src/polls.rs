@@ -27,12 +27,20 @@
 //! cloud that makes text worth collecting lives in the presenter anyway.
 //!
 //! What makes returning it right is that mecha already has a mechanism for
-//! third-party words, and it is not silence: `poll_status` carries
-//! `openWorldHint`, so everything here arrives marked `untrusted_input` and
-//! arms the trifecta interlock — the same treatment as a mail body, a fetched
-//! page, or a pkg retrieval, every one of which the model reads in full.
-//! Withholding on top of that was stricter than how mecha treats the user's own
-//! inbox.
+//! third-party words, and it is not silence: everything here arrives marked
+//! `untrusted_input` and arms the trifecta interlock — the same treatment as a
+//! mail body, a fetched page, or a graph retrieval, every one of which the
+//! model reads in full. Withholding on top of that was stricter than how mecha
+//! treats the user's own inbox.
+//!
+//! **Where that marking comes from changed.** It used to be `poll_status`'s
+//! `openWorldHint`, which also declared the read a way out, so mecha refused
+//! it on its own first call. It is now the operator's
+//! `[mcp.capabilities] untrusted_input = true` on this server, exactly as
+//! mecha-mail's reads get theirs (see `mcp.rs`, "No read of ours is a sink").
+//! No annotation can say "third-party content, but not a way out", so an
+//! operator who leaves that line off gets these answers unmarked. The
+//! argument for returning the prose holds only with it set.
 //!
 //! What survives is the **separation**. Typed tallies are numbers the box
 //! computed from enum answers; prose is sentences somebody typed; they ride in
@@ -171,11 +179,12 @@ pub enum Status {
 /// `{"answers": 7}` is a feature that does not work.
 ///
 /// What makes returning it right is that mecha already has a mechanism for
-/// other people's words, and it is not silence. `poll_status` carries
-/// `openWorldHint`, so everything here arrives marked `untrusted_input` and
-/// arms the trifecta interlock — the same treatment as a mail body, a fetched
-/// page, or a pkg retrieval, every one of which the model reads. Withholding
-/// on top of that was stricter than how mecha treats the user's own inbox.
+/// other people's words, and it is not silence: the operator marks this
+/// server `untrusted_input`, so everything here arrives marked and arms the
+/// trifecta interlock, as a mail body or a fetched page does (the module docs
+/// say where that marking now comes from, and what happens without it).
+/// Withholding on top of that was stricter than how mecha treats the user's
+/// own inbox.
 ///
 /// What survives from the original design is the *separation*: typed tallies
 /// are numbers the box computed from enum answers, prose is other people's
@@ -413,7 +422,12 @@ fn times_record(
 /// one this machine never made.
 pub fn local_instrument(poll_id: &str) -> Result<Option<String>> {
     let path = crate::lifecycle::record_path(poll_id)?;
-    if !path.exists() {
+    // Absent is `None`; a record that cannot even be checked is an error,
+    // never read as absence — the stance `lifecycle::records` takes too.
+    if !path
+        .try_exists()
+        .with_context(|| format!("checking {}", path.display()))?
+    {
         return Ok(None);
     }
     let text =

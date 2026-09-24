@@ -1109,8 +1109,9 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             // here, never a string a model composed.
             let Some(recorded) = crate::polls::local_instrument(&poll_id)? else {
                 anyhow::bail!(
-                    "no poll `{poll_id}` was made from this machine, and poll_status reads only \
-                     those. The user can read any poll with `factory-publish polls status`."
+                    "this machine holds no record of a poll `{poll_id}`, and poll_status reads \
+                     only polls it has a record of. The user can read any poll with \
+                     `factory-publish polls status`."
                 );
             };
             anyhow::ensure!(
@@ -1657,8 +1658,9 @@ mod tests {
         };
 
         let refused = ask("lab", "never-made").unwrap_err().to_string();
-        assert!(refused.contains("was made from this machine"), "{refused}");
-        assert!(ask("lab", "../escape").is_err());
+        assert!(refused.contains("holds no record of a poll"), "{refused}");
+        let traversal = ask("lab", "../escape").unwrap_err().to_string();
+        assert!(traversal.contains("is not a poll id"), "{traversal}");
 
         let dir = crate::lifecycle::record_dir().unwrap();
         std::fs::write(
