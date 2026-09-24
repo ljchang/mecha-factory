@@ -523,6 +523,10 @@ pub fn create_general(
     spec_toml: &str,
     named: &[Participant],
 ) -> Result<Created> {
+    // Before the box is touched, as `create_meeting` does: an id the local
+    // record cannot be written under would leave an open poll on the box
+    // with no record here and its capability URLs dropped.
+    crate::lifecycle::record_path(poll_id)?;
     let spec = mecha_manifest::PollSpec::from_toml(spec_toml)?;
     let link = spec.audience.kind == mecha_manifest::AudienceKind::Link;
     if link {
@@ -1435,6 +1439,32 @@ end = "17:00"
         for (hold, candidate) in holds.iter().zip(&plan.candidates) {
             assert_eq!((hold.start, hold.end), (candidate.start, candidate.end));
         }
+        std::env::remove_var("MECHA_HOME");
+    }
+
+    /// An id the local record cannot be written under is refused before the
+    /// box is asked — otherwise the poll opens there and its record, and its
+    /// capability URLs, are lost here.
+    #[test]
+    fn a_general_poll_with_an_unwritable_id_never_reaches_the_box() {
+        let _guard = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let spec = r#"
+            title = "Retro"
+            [audience]
+            kind = "link"
+            max_ballots = 50
+            [[questions]]
+            id = "notes"
+            prompt = "Anything else?"
+            kind = "text"
+            max_length = 500
+            "#;
+        let err = create_general("seminar", "Has Spaces", spec, &[])
+            .expect_err("an id with spaces is refused")
+            .to_string();
+        assert!(err.contains("is not a poll id"), "{err}");
         std::env::remove_var("MECHA_HOME");
     }
 

@@ -48,10 +48,13 @@
 //! independently from here.
 //!
 //! **No read of ours is a sink.** A read carries `readOnlyHint` alone, and
-//! where it asks the box anything, what it asks with comes from this machine,
-//! never from a string the model composed: `surface_list` and `type_list` take
-//! no arguments, and `poll_status` answers only for a poll this machine's own
-//! record names. The reads once carried `openWorldHint` to get the untrusted
+//! where it asks the box anything, what it asks with comes from this machine
+//! rather than from the call: `surface_list` and `type_list` take no
+//! arguments, and `poll_status` answers only for a poll this machine's own
+//! record names. That id may once have been a model's, through `poll_create`
+//! — but `poll_create` is open-world and routed, so it reached the box only
+//! after a human released it, and a batch that tried to launder an id
+//! through it would declare the way out and arm the interlock. The reads once carried `openWorldHint` to get the untrusted
 //! marking, and paid for it: a read that declares private data, untrusted
 //! content and a way out arms the interlock by itself, so mecha refused
 //! `poll_status` on its own first call in every session.
@@ -1130,8 +1133,11 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             // Where the lifecycle stands, from the record at home — the
             // invitations, the verdict, the booking — beside the box's tally.
             // Three worlds, kept apart as the CLI keeps them: a lifecycle,
-            // none, and a local record that could not be read — which is
-            // named, and never the reason the box's tally goes unreported.
+            // none, and a lifecycle that could not be read — which is named,
+            // and never the reason the box's tally goes unreported. (A record
+            // file that cannot be read at all never gets this far: the gate
+            // above refuses it, because it cannot prove the poll is ours, and
+            // the CLI still reads the box without it.)
             match crate::lifecycle::record(&poll_id) {
                 Ok(Some(record)) => {
                     out.push_str(&format!("lifecycle: {}\n", record.lifecycle.summary()));
