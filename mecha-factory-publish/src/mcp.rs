@@ -54,7 +54,11 @@
 //! record names. That id may once have been a model's, through `poll_create`
 //! — but `poll_create` is open-world and routed, so it reached the box only
 //! after a human released it, and a batch that tried to launder an id
-//! through it would declare the way out and arm the interlock. The reads once carried `openWorldHint` to get the untrusted
+//! through it would declare the way out and arm the interlock. The records
+//! themselves (`~/.mecha/factory/polls/`) are out of a model's reach: mecha
+//! jails its file tools to the run's workspace and refuses a workspace that
+//! contains the mecha home, and this server confines every model-supplied
+//! path to `--root`. The reads once carried `openWorldHint` to get the untrusted
 //! marking, and paid for it: a read that declares private data, untrusted
 //! content and a way out arms the interlock by itself, so mecha refused
 //! `poll_status` on its own first call in every session.
@@ -392,10 +396,13 @@ fn tools() -> Vec<ToolSpec> {
                 json!({
                     "type": "object",
                     "properties": {
-                        "instrument": {"type": "string"},
+                        "instrument": {
+                            "type": "string",
+                            "description": "Optional: the poll's own record names it. Given, it must match."
+                        },
                         "poll_id": {"type": "string"}
                     },
-                    "required": ["instrument", "poll_id"],
+                    "required": ["poll_id"],
                     "additionalProperties": false
                 })
             },
@@ -1105,11 +1112,13 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
         }
         "poll_status" => {
             let poll_id = string("poll_id")?;
-            let instrument = string("instrument")?;
             // Only a poll this machine made, and the box is asked with the
             // instrument from its record. That is what makes this call a read
             // and not a sink: what reaches the box is an id already on disk
-            // here, never a string a model composed.
+            // here, never a string a model composed. The record is the
+            // authority, so the argument is optional — `poll_meeting_create`
+            // lets a model omit the instrument and never says which it chose,
+            // and a required one here made the first status call a refusal.
             let Some(recorded) = crate::polls::local_instrument(&poll_id)? else {
                 anyhow::bail!(
                     "this machine holds no record of a poll `{poll_id}`, and poll_status reads \
@@ -1117,10 +1126,12 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                      `factory-publish polls status`."
                 );
             };
-            anyhow::ensure!(
-                recorded == instrument,
-                "poll `{poll_id}` belongs to instrument `{recorded}`, not `{instrument}`"
-            );
+            if let Some(given) = args.get("instrument").and_then(Value::as_str) {
+                anyhow::ensure!(
+                    given == recorded,
+                    "poll `{poll_id}` belongs to instrument `{recorded}`, not `{given}`"
+                );
+            }
             let status = crate::polls::status(&recorded, &poll_id)?;
             let view = status.for_agent();
             let mut out = format!(
@@ -1135,9 +1146,10 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             // Three worlds, kept apart as the CLI keeps them: a lifecycle,
             // none, and a lifecycle that could not be read — which is named,
             // and never the reason the box's tally goes unreported. (A record
-            // file that cannot be read at all never gets this far: the gate
-            // above refuses it, because it cannot prove the poll is ours, and
-            // the CLI still reads the box without it.)
+            // whose JSON or instrument cannot be read never gets this far: the
+            // gate above refuses it, because it cannot prove the poll is ours,
+            // and the CLI still reads the box without it. A readable record
+            // with a malformed lifecycle does get here, and is the `Err` arm.)
             match crate::lifecycle::record(&poll_id) {
                 Ok(Some(record)) => {
                     out.push_str(&format!("lifecycle: {}\n", record.lifecycle.summary()));
@@ -1682,6 +1694,25 @@ mod tests {
         );
         let wrong = ask("other", "made-here").unwrap_err().to_string();
         assert!(wrong.contains("belongs to instrument `lab`"), "{wrong}");
+
+        // A poll this machine made gets through the gate — with its own
+        // instrument, and with none, since the record names it. Past the gate
+        // the box is asked, and with no box configured here that is the
+        // error, which is how this test knows the gate let it by.
+        std::env::remove_var("FACTORY_GATE");
+        for passed in [
+            ask("lab", "made-here").unwrap_err().to_string(),
+            dispatch(
+                "poll_status",
+                &json!({"poll_id": "made-here"}),
+                None,
+                root.path(),
+            )
+            .unwrap_err()
+            .to_string(),
+        ] {
+            assert!(passed.contains("no factory gate configured"), "{passed}");
+        }
         std::env::remove_var("MECHA_HOME");
     }
 

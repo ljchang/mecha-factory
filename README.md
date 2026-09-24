@@ -203,9 +203,19 @@ args = ["mcp"]
 # model-supplied path to `--root` itself, so forgetting this line narrows the
 # boundary rather than removing it.
 sandbox = true
+# Required for the reads. `poll_status` returns other people's words (a link
+# poll's, anyone's), and no MCP annotation can say "third-party content, but
+# not a way out" — so the untrusted marking comes from here, on this server's
+# entry (a sub-table of the `[[mcp]]` element just above). Without it, poll
+# answers arrive unmarked and arm nothing.
+[mcp.capabilities]
+untrusted_input = true
 
 [outbox]
-tools        = ["factory__bundle_publish", "factory__bundle_alias", "factory__bundle_unpublish"]
+tools = [
+  "factory__bundle_publish", "factory__bundle_alias", "factory__bundle_unpublish",
+  "factory__poll_create", "factory__poll_meeting_create", "factory__poll_close",
+]
 publish_tools = ["factory__bundle_publish", "factory__bundle_alias", "factory__bundle_unpublish"]
 ```
 

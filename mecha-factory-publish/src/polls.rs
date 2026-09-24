@@ -1446,7 +1446,7 @@ end = "17:00"
     /// box is asked — otherwise the poll opens there and its record, and its
     /// capability URLs, are lost here.
     #[test]
-    fn a_general_poll_with_an_unwritable_id_never_reaches_the_box() {
+    fn a_general_poll_with_an_invalid_id_never_reaches_the_box() {
         let _guard = crate::env_lock();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("MECHA_HOME", home.path());
