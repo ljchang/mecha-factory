@@ -231,6 +231,56 @@ pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
     )
 }
 
+/// The splash's poster: the assembly-hall concept schematic, in the binary
+/// like every other gate asset, because a page that renders differently
+/// depending on what is on the box is a page nobody could check — and
+/// `img-src 'self'` means it could not come from anywhere else anyway. Two
+/// widths, so a phone is not sent the laptop's bytes.
+pub(crate) const ASSEMBLY_HALL: [(&str, &[u8]); 2] = [
+    (
+        "assembly-hall-1536.webp",
+        include_bytes!("../../assets/assembly-hall-1536.webp"),
+    ),
+    (
+        "assembly-hall-960.webp",
+        include_bytes!("../../assets/assembly-hall-960.webp"),
+    ),
+];
+
+/// The splash's own layout: the poster breaks out of the 46rem reading
+/// measure to the 72rem the ledger pages use, because a drawing this dense
+/// is illegible at the width of a paragraph. Colours are the theme's tokens,
+/// so it follows whichever theme the box is configured with.
+pub(crate) const GATE_CSS: &str = r#".poster {
+  width: min(72rem, calc(100vw - 3rem));
+  margin: -1rem 0 2.5rem calc(50% - min(36rem, 50vw - 1.5rem));
+}
+.poster img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+@media (max-width: 30rem) {
+  .poster {
+    width: calc(100vw - 2.5rem);
+    margin: -1rem 0 2rem calc(50% - 50vw + 1.25rem);
+  }
+}
+"#;
+
 /// The account dropdown's one behaviour: close on an outside click or
 /// Escape, which a bare `<details>` does not do. Served as its own file
 /// under `script-src 'self'` — never inline — and referenced only by pages
@@ -251,13 +301,33 @@ pub(crate) const MENU_JS: &str = r#"(function () {
 "#;
 
 pub(crate) fn shell_with(title: &str, body: &str, assets: &str, chrome: &Chrome) -> String {
+    shell_with_sheets(title, body, assets, chrome, &[])
+}
+
+/// `shell_with`, plus stylesheets of the gate's own after `form.css` — the
+/// splash's poster layout is this server's chrome, like `menu.js`, so it is
+/// named here rather than added to the manifest's sheet that every published
+/// bundle also draws from. Ignored on a page that opted out of assets.
+pub(crate) fn shell_with_sheets(
+    title: &str,
+    body: &str,
+    assets: &str,
+    chrome: &Chrome,
+    sheets: &[&str],
+) -> String {
     let style = if assets.is_empty() {
         String::new()
     } else {
-        format!(
-            "<link rel=\"stylesheet\" href=\"{}form.css\">",
-            mecha_manifest::escape_text(assets)
-        )
+        std::iter::once("form.css")
+            .chain(sheets.iter().copied())
+            .map(|sheet| {
+                format!(
+                    "<link rel=\"stylesheet\" href=\"{}{}\">",
+                    mecha_manifest::escape_text(assets),
+                    mecha_manifest::escape_text(sheet)
+                )
+            })
+            .collect()
     };
     // The dropdown's close-on-outside-click, only where a dropdown is.
     let has_dropdown = matches!(chrome, Chrome::Account { .. })
@@ -415,6 +485,31 @@ pub(crate) fn serve_asset(app: &Shared, origin: &Origin, name: &str) -> Response
                 mecha_manifest::content_type("menu.js"),
             )],
             MENU_JS.to_string(),
+        )
+            .into_response();
+    }
+    if name == "gate.css" {
+        return (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                mecha_manifest::content_type("gate.css"),
+            )],
+            GATE_CSS.to_string(),
+        )
+            .into_response();
+    }
+    // The poster is the one asset here big enough for a repeat visit to
+    // notice, so it is the one given a cache lifetime: a day, since the name
+    // does not change when the bytes do.
+    if let Some((_, bytes)) = ASSEMBLY_HALL.iter().find(|(file, _)| *file == name) {
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, mecha_manifest::content_type(name)),
+                (header::CACHE_CONTROL, "public, max-age=86400"),
+            ],
+            *bytes,
         )
             .into_response();
     }

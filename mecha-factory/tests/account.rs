@@ -511,6 +511,59 @@ fn the_header_knows_who_it_is_for() {
     assert!(!missing.body.contains("form.css"));
 }
 
+/// The splash leads with the assembly-hall poster, and everything it
+/// references is served by the box itself — `img-src 'self'` and
+/// `style-src 'self'` leave no other source — at exactly the bytes the
+/// binary carries.
+#[test]
+fn the_splash_poster_is_served_from_the_box() {
+    let server = common::start();
+    let splash = server.get(server.gate, "/");
+    assert_eq!(splash.status, 200);
+    for referenced in [
+        "/account/a/gate.css",
+        "/account/a/assembly-hall-1536.webp",
+        "/account/a/assembly-hall-960.webp",
+    ] {
+        assert!(splash.body.contains(referenced), "{}", splash.body);
+    }
+    // The name is on the poster; the heading stays for the outline.
+    assert!(splash
+        .body
+        .contains("<h1 class=\"visually-hidden\">mecha factory</h1>"));
+
+    let sheet = server.get(server.gate, "/account/a/gate.css");
+    assert_eq!(sheet.status, 200);
+    assert!(sheet
+        .header("content-type")
+        .unwrap()
+        .starts_with("text/css"));
+    assert!(sheet.body.contains(".poster"));
+
+    for (file, on_disk) in [
+        (
+            "assembly-hall-1536.webp",
+            include_bytes!("../assets/assembly-hall-1536.webp").len(),
+        ),
+        (
+            "assembly-hall-960.webp",
+            include_bytes!("../assets/assembly-hall-960.webp").len(),
+        ),
+    ] {
+        let image = server.get(server.gate, &format!("/account/a/{file}"));
+        assert_eq!(image.status, 200, "{file}");
+        assert_eq!(image.header("content-type").as_deref(), Some("image/webp"));
+        assert_eq!(
+            image.header("content-length"),
+            Some(on_disk.to_string()),
+            "{file} is served whole"
+        );
+        // The body is decoded lossily, so the four size bytes after `RIFF`
+        // may not survive as bytes — the ASCII either side of them does.
+        assert!(image.body.starts_with("RIFF") && image.body.contains("WEBPVP8"));
+    }
+}
+
 /// The gate viewer wears the session: owner sees the Manage menu and the
 /// account dropdown; its controls post the same release endpoint and come
 /// back to the viewer; a return address that is not a viewer path is
