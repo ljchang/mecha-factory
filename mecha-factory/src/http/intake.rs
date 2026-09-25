@@ -235,7 +235,9 @@ pub(crate) fn shell(title: &str, body: &str, assets: &str) -> String {
 /// like every other gate asset, because a page that renders differently
 /// depending on what is on the box is a page nobody could check — and
 /// `img-src 'self'` means it could not come from anywhere else anyway. Two
-/// widths, so a phone is not sent the laptop's bytes.
+/// widths, chosen by `srcset` in *device* pixels: a small or 1x screen gets
+/// the 960, while a phone at 2-3x density needs ~700-1050 px and rightly
+/// takes the 1536.
 pub(crate) const ASSEMBLY_HALL: [(&str, &[u8]); 2] = [
     (
         "assembly-hall-1536.webp",
