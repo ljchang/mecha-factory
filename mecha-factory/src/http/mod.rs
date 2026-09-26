@@ -483,8 +483,23 @@ async fn root(
         ),
         None => String::new(),
     };
+    // The poster leads, and it carries the name — MECHA over FACTORY /
+    // ASSEMBLY HALL — so the <h1> stays for the outline and screen readers
+    // without being said twice on screen.
     let body = format!(
-        "<h1>mecha factory</h1>\
+        "<figure class=\"poster\"><img \
+         src=\"/account/a/assembly-hall-1536.webp\" \
+         srcset=\"/account/a/assembly-hall-960.webp 960w, \
+         /account/a/assembly-hall-1536.webp 1536w\" \
+         sizes=\"(max-width: 75rem) calc(100vw - 3rem), 72rem\" \
+         width=\"1536\" height=\"1024\" fetchpriority=\"high\" \
+         alt=\"Concept schematic of the mecha factory assembly hall: an \
+         overhead crane lowering an upper chassis onto a frame, robot arms \
+         fitting armour, a rack of pilot-interface modules, a calibration \
+         platform, and a finished suit walking out of the dispatch bay; a \
+         strip below shows the five stages from frame assembly to final \
+         inspection.\"></figure>\
+         <h1 class=\"visually-hidden\">mecha factory</h1>\
          <p class=\"intro\">The public surface for <strong>mecha</strong>, an \
          agent harness: a place for what an agent makes to live, and a typed \
          way for the outside world to get in.</p>\
@@ -510,7 +525,13 @@ async fn root(
     // form to everybody else, so it varies on the cookie like the rest.
     intake::session_page(
         StatusCode::OK,
-        intake::shell_with("mecha factory", &body, "/account/a/", &chrome),
+        intake::shell_with_sheets(
+            "mecha factory",
+            &body,
+            "/account/a/",
+            &chrome,
+            &["gate.css"],
+        ),
     )
 }
 
