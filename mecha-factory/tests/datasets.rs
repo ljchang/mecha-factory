@@ -563,3 +563,51 @@ fn a_withheld_release_takes_no_pushes() {
     assert_eq!(reply.status, 409, "{}", reply.body);
     assert_eq!(reply.json()["code"], "withheld");
 }
+
+/// A new release's first push drops the old release's rows — including a
+/// dataset the new release no longer declares, which would otherwise sit
+/// unserved against the budget.
+#[test]
+fn a_new_releases_first_push_drops_the_old_releases_rows() {
+    let server = start();
+    dashboard(&server, "lab", 1, Visibility::Public);
+    let key = server.key(Scope::Data);
+    assert_eq!(
+        put(&server, &key, "lab", "visits", push(1, 1, 7)).status,
+        200
+    );
+    // A stranded row from a dataset the next release drops.
+    server
+        .db
+        .dataset_put(&mecha_factory::db::DatasetRow {
+            user_id: server.user.id.clone(),
+            bundle_id: "lab".into(),
+            name: "retired".into(),
+            release: 1,
+            generation: 1,
+            digest: "d".into(),
+            generated_at: "2031-04-17T09:00:00Z".into(),
+            body: "{}".into(),
+            received_at: "2031-04-17T09:00:00Z".into(),
+        })
+        .unwrap();
+    dashboard(&server, "lab", 2, Visibility::Public);
+    assert_eq!(
+        put(&server, &key, "lab", "visits", push(2, 1, 3)).status,
+        200
+    );
+    assert!(server
+        .db
+        .dataset_get(&server.user.id, "lab", "retired")
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        server
+            .db
+            .dataset_get(&server.user.id, "lab", "visits")
+            .unwrap()
+            .unwrap()
+            .release,
+        2
+    );
+}

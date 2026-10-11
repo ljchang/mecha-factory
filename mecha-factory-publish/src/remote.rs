@@ -603,6 +603,12 @@ impl Remote {
                 "the box refused the data key ({status}) pushing `{name}` of `{id}`: {message}"
             ),
             _ if code == "stale" => DatasetPushed::Stale(message),
+            // Over the route's own body limit, before the handler could say
+            // `size`: the same refusal, said once, never retried.
+            413 if code.is_empty() => DatasetPushed::Refused {
+                code: "size".into(),
+                message: format!("`{name}` is over the box's limit on one dataset"),
+            },
             // A 4xx with no code is not this channel's refusal (a box without
             // the route, a proxy): it fails every push, so it fails loudly —
             // never a green timer over a frozen dashboard (review of #24).

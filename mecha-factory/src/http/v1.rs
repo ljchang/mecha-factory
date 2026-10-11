@@ -911,6 +911,11 @@ pub async fn put_dataset(
         tracing::error!(%id, %name, error = %e, "storing a dataset");
         return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
     }
+    if let Err(e) = app.db.datasets_drop_other_releases(&user.id, &id, release) {
+        // The push landed; a leftover from an older release is never served
+        // (rows answer only under the current release), so it is logged.
+        tracing::error!(%id, error = %e, "dropping an older release's datasets");
+    }
     tracing::info!(%id, %name, release, generation = push.generation, rows = push.rows.len(), "dataset replaced");
     (
         StatusCode::OK,

@@ -2021,6 +2021,25 @@ impl Db {
         })
     }
 
+    /// Drop a dashboard's rows pushed under any release but `release` — the
+    /// previous release's bytes, including datasets the new release no
+    /// longer declares, which would otherwise sit unserved and unpushable
+    /// against the tenant's budget (review of #24). Run on every push, so
+    /// the first push under a new release clears the old one.
+    pub fn datasets_drop_other_releases(
+        &self,
+        user_id: &str,
+        bundle_id: &str,
+        release: u32,
+    ) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM datasets WHERE user_id = ?1 AND bundle_id = ?2 AND release != ?3",
+                params![user_id, bundle_id, release],
+            )?)
+        })
+    }
+
     /// Dataset bytes a tenant holds, every dashboard together, leaving out
     /// the one row a push is about to replace.
     pub fn dataset_bytes(&self, user_id: &str, except: (&str, &str)) -> Result<u64> {
