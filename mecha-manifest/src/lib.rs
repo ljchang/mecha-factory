@@ -63,6 +63,7 @@ mod condition;
 mod csp;
 mod digest;
 mod form;
+pub mod hud;
 mod media;
 mod poll;
 mod poll_render;

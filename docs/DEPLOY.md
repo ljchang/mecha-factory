@@ -27,11 +27,12 @@ forgetting is not "the site is down", it is "the site is someone else's".
 > renewal it finds nothing to do.
 
 Everything below assumes the box is **assumed lost**. Nothing on it reaches
-home, and every key it knows — publish, release, drain, slots, operate —
-is an Argon2id hash of a token it can never reproduce. (`slots` is the
-narrowest: it can only replace a booking instrument's availability cache,
-and it exists apart from `publish` because it lives beside a systemd timer
-with no human near it.)
+home, and every key it knows — publish, release, drain, slots, data, operate —
+is an Argon2id hash of a token it can never reproduce. (`slots` and `data`
+are the narrowest: `slots` can only replace a booking instrument's
+availability cache, and `data` only a released dashboard's datasets, in the
+shape and from the loader the owner released. Both exist apart from
+`publish` because they live beside a systemd timer with no human near them.)
 
 ## What runs where
 
@@ -717,3 +718,32 @@ Polls: `mecha-mail freebusy --days 60 --json | factory-publish polls create
 book <id> --policy … --title … --duration 60 --participant "Name=email"`,
 send each person their URL, watch `polls status`, and book the winner when
 it names one.
+
+## Live dashboards, once the box is up
+
+A released dashboard (the `hud` template) is a versioned page plus datasets
+home pushes beside it (`mecha/docs/LIVE-DASHBOARD-DESIGN.md` §6.2):
+
+1. **A data key.** On the box: `factory --config … key create --handle <you>
+   --scope data`, installed at `~/.mecha/factory/data.key` (0600) at home.
+   It can replace the datasets of a dashboard the owner released — only in
+   the columns and from the loader that release declared in its
+   `datasets.json` — and nothing else.
+2. **Home pushes after each refresh.** `factory-publish dataset push <id>
+   <name> <file>` prints one JSON line (`stored`, `unchanged`, `stale`,
+   `refused`) and exits non-zero for a failure — one worth retrying (the
+   network, a 5xx), or a data key the box rejects. A push
+   names the release it was made under; one for a release the alias has
+   moved past is `stale` and is dropped, never retried.
+3. **The page reads** `/b/<id>/data/<name>.json` (public) or
+   `/g/<cap>/data/<name>.json` under a viewing grant, with an `ETag`. The
+   capability lasts sixty minutes: a page open longer stops refreshing and
+   says so — a reload mints a new one while the reader's viewer session
+   lasts, and signing in again is needed only once that has ended.
+4. **Recovery.** A home that lost its generation counters is refused as
+   `order` until `factory-publish dataset reset <id>` (with `release.key`:
+   emptying a published page is a person's act) empties the dashboard's
+   datasets; the next refresh then starts over.
+
+Limits (`[limits]`): `max_dataset_bytes` (4 MiB per push) and
+`dataset_bytes_per_user` (64 MiB across a tenant's dashboards).

@@ -1,7 +1,8 @@
 //! The API, on the gate origin only.
 //!
-//! Six endpoints, JSON in and out, bearer token. Deliberately boring — the
-//! interesting decisions are all in what they refuse.
+//! JSON in and out, bearer token, every route listed in `http::router`.
+//! Deliberately boring — the interesting decisions are all in what they
+//! refuse.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -614,6 +615,371 @@ struct PushedSlot {
     start: String,
     end: String,
     duration_minutes: u32,
+}
+
+// ---- dashboard datasets ------------------------------------------------
+
+/// A refusal a pushing client can act on: `code` says which, so home can tell
+/// a stale push (drop it) from a forked one (stop and say so) from a 5xx
+/// (retry), without parsing prose.
+fn dataset_refusal(status: StatusCode, code: &str, message: String) -> Response {
+    (
+        status,
+        Json(serde_json::json!({ "error": message, "code": code })),
+    )
+        .into_response()
+}
+
+/// The release a dashboard is at now, and what that release declared it may
+/// be fed — or the refusal that says why there is none.
+fn released(
+    app: &Shared,
+    user_id: &str,
+    id: &str,
+) -> Result<(u32, mecha_manifest::hud::DatasetsManifest), Box<Response>> {
+    use mecha_manifest::hud::{DatasetsManifest, DATASETS_FILE};
+    let alias = match app.db.alias(user_id, id) {
+        Ok(Some(alias)) => alias,
+        Ok(None) => {
+            return Err(Box::new(dataset_refusal(
+                StatusCode::NOT_FOUND,
+                "unreleased",
+                format!("no released dashboard `{id}`"),
+            )))
+        }
+        Err(e) => {
+            tracing::error!(%id, error = %e, "reading an alias");
+            return Err(Box::new(
+                Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+            ));
+        }
+    };
+    let Some(release) = alias.version else {
+        return Err(Box::new(dataset_refusal(
+            StatusCode::CONFLICT,
+            "stale",
+            format!("dashboard `{id}` has been taken down"),
+        )));
+    };
+    // Only an interactive dashboard takes datasets: its rows are served on
+    // the origin its class belongs on, under the one policy its page runs
+    // under (review of mecha-factory#24).
+    match app.db.bundle(user_id, id, release) {
+        // Withheld after a report: served to nobody, so fed by nobody either.
+        Ok(Some(bundle)) if bundle.withheld_at.is_some() => {
+            return Err(Box::new(dataset_refusal(
+                StatusCode::CONFLICT,
+                "withheld",
+                format!("release {release} of `{id}` is withheld"),
+            )))
+        }
+        Ok(Some(bundle)) if bundle.class == mecha_manifest::ContentClass::Interactive => {}
+        Ok(_) => {
+            return Err(Box::new(dataset_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "undeclared",
+                format!("version {release} of `{id}` is not an interactive dashboard"),
+            )))
+        }
+        Err(e) => {
+            tracing::error!(%id, error = %e, "reading a bundle row");
+            return Err(Box::new(
+                Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+            ));
+        }
+    }
+    // Absent, unreadable and unparseable are three answers: only the first
+    // is "not a dashboard" (review of #24).
+    let Some(path) = app.files.resolve(user_id, id, release, DATASETS_FILE) else {
+        return Err(Box::new(dataset_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "undeclared",
+            format!("version {release} of `{id}` is not a dashboard: it declares no datasets"),
+        )));
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!(%id, release, error = %e, "reading a release's datasets.json");
+            return Err(Box::new(
+                Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+            ));
+        }
+    };
+    match serde_json::from_slice::<DatasetsManifest>(&bytes) {
+        Ok(manifest) => Ok((release, manifest)),
+        Err(e) => Err(Box::new(dataset_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "manifest",
+            format!("version {release} of `{id}` has a datasets.json that does not parse: {e}"),
+        ))),
+    }
+}
+
+/// `PUT /v1/bundles/{id}/datasets/{name}` — replace one dataset of a released
+/// dashboard (`mecha/docs/LIVE-DASHBOARD-DESIGN.md` §6.2).
+///
+/// `Scope::Data` only: the key lives beside home's refresh timer. What it can
+/// write is bounded by what the owner released:
+/// - **the release** — a push names the version the alias is at, or it is
+///   **stale** (`409`, code `stale`) and home drops it rather than retrying;
+/// - **the shape and the loader** — its columns and loader digest must equal
+///   the ones the release's `datasets.json` declared;
+/// - **the order** — within a release, a lower generation is refused
+///   (`order`), an equal one with the same bytes is an idempotent success, and
+///   an equal one with different bytes is refused (`forked`);
+/// - **the size** — one push and the tenant's datasets together are capped.
+pub async fn put_dataset(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((id, name)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    use mecha_manifest::hud::{valid_dataset_name, DatasetPush};
+    use sha2::Digest;
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match authorised(&app, &headers, Scope::Data) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    let bad = |message: String| Failure::json(StatusCode::BAD_REQUEST, message).into_response();
+    if let Err(e) = mecha_manifest::valid_id(&id, "bundle id") {
+        return bad(e.to_string());
+    }
+    if !valid_dataset_name(&name) {
+        return bad(format!(
+            "dataset name `{name}` must be [a-z][a-z0-9_]{{0,63}}"
+        ));
+    }
+    let push: DatasetPush = match serde_json::from_str(&body) {
+        Ok(push) => push,
+        Err(e) => return bad(format!("dataset push: {e}")),
+    };
+    if chrono::DateTime::parse_from_rfc3339(&push.generated_at).is_err() {
+        return bad(format!(
+            "generated_at `{}` is not RFC 3339",
+            push.generated_at
+        ));
+    }
+
+    let (release, manifest) = match released(&app, &user.id, &id) {
+        Ok(found) => found,
+        Err(refusal) => return *refusal,
+    };
+    if push.release != release {
+        return dataset_refusal(
+            StatusCode::CONFLICT,
+            "stale",
+            format!(
+                "the push names release {}, and `{id}` is at release {release}",
+                push.release
+            ),
+        );
+    }
+    let Some(declared) = manifest.datasets.get(&name) else {
+        return dataset_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "undeclared",
+            format!("release {release} of `{id}` declares no dataset `{name}`"),
+        );
+    };
+    if push.loader_digest != declared.loader_digest {
+        return dataset_refusal(
+            StatusCode::CONFLICT,
+            "loader",
+            format!(
+                "`{name}` was pushed by a loader other than the one released; \
+                 a changed loader is a new publish"
+            ),
+        );
+    }
+    if push.columns != declared.columns {
+        return dataset_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "shape",
+            format!("`{name}`'s columns differ from the ones released"),
+        );
+    }
+    if let Some(i) = push.rows.iter().position(|r| r.len() != push.columns.len()) {
+        return dataset_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "shape",
+            format!(
+                "`{name}` row {i} does not have {} cells",
+                push.columns.len()
+            ),
+        );
+    }
+    // Each cell is what its column declares, or null: the shape the owner
+    // released reaches the values, not only the header row (review of #24).
+    for (i, row) in push.rows.iter().enumerate() {
+        for (cell, column) in row.iter().zip(&push.columns) {
+            let fits = match (column.kind.as_str(), cell) {
+                (_, serde_json::Value::Null) => true,
+                ("integer", v) => v.is_i64() || v.is_u64(),
+                ("float", v) => v.is_number(),
+                ("boolean", v) => v.is_boolean(),
+                ("string" | "date" | "timestamp", v) => v.is_string(),
+                _ => false,
+            };
+            if !fits {
+                return dataset_refusal(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "shape",
+                    format!(
+                        "`{name}` row {i}: `{}` is not a {}",
+                        column.name, column.kind
+                    ),
+                );
+            }
+        }
+    }
+
+    // What the page reads: home's dataset shape, without the release.
+    let stored = serde_json::json!({
+        "name": name,
+        "generated_at": push.generated_at,
+        "generation": push.generation,
+        "loader_digest": push.loader_digest,
+        "columns": push.columns,
+        "rows": push.rows,
+        "external": push.external,
+    })
+    .to_string();
+    let limits = &app.config.limits;
+    if stored.len() as u64 > limits.max_dataset_bytes {
+        return dataset_refusal(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "size",
+            format!(
+                "`{name}` is {} bytes, over the {}-byte cap on one dataset",
+                stored.len(),
+                limits.max_dataset_bytes
+            ),
+        );
+    }
+    let digest = crate::keys::hex(&sha2::Sha256::digest(stored.as_bytes()));
+
+    match app.db.dataset_get(&user.id, &id, &name) {
+        Ok(Some(prev)) if prev.release == release => {
+            if push.generation < prev.generation {
+                return dataset_refusal(
+                    StatusCode::CONFLICT,
+                    "order",
+                    format!(
+                        "generation {} is older than the stored {}",
+                        push.generation, prev.generation
+                    ),
+                );
+            }
+            if push.generation == prev.generation {
+                return if prev.digest == digest {
+                    (
+                        StatusCode::OK,
+                        Json(serde_json::json!({ "stored": false, "release": release,
+                                                  "generation": push.generation })),
+                    )
+                        .into_response()
+                } else {
+                    dataset_refusal(
+                        StatusCode::CONFLICT,
+                        "forked",
+                        format!(
+                            "generation {} is already stored with different rows",
+                            push.generation
+                        ),
+                    )
+                };
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(%id, %name, error = %e, "reading a dataset");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    }
+
+    match app.db.dataset_bytes(&user.id, (&id, &name), release) {
+        Ok(held) if held + stored.len() as u64 > limits.dataset_bytes_per_user => {
+            return dataset_refusal(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "budget",
+                format!(
+                    "this push would take your datasets past their {}-byte budget",
+                    limits.dataset_bytes_per_user
+                ),
+            )
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "summing dataset bytes");
+            return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+        }
+    }
+
+    let row = crate::db::DatasetRow {
+        user_id: user.id.clone(),
+        bundle_id: id.clone(),
+        name: name.clone(),
+        release,
+        generation: push.generation,
+        digest,
+        generated_at: push.generated_at.clone(),
+        body: stored,
+        received_at: crate::db::now(),
+    };
+    if let Err(e) = app.db.dataset_put(&row) {
+        tracing::error!(%id, %name, error = %e, "storing a dataset");
+        return Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response();
+    }
+    if let Err(e) = app.db.datasets_drop_other_releases(&user.id, &id, release) {
+        // The push landed; a leftover from an older release is never served
+        // (rows answer only under the current release), so it is logged.
+        tracing::error!(%id, error = %e, "dropping an older release's datasets");
+    }
+    tracing::info!(%id, %name, release, generation = push.generation, rows = push.rows.len(), "dataset replaced");
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "stored": true, "release": release,
+                                  "generation": push.generation })),
+    )
+        .into_response()
+}
+
+/// `DELETE /v1/bundles/{id}/datasets` — drop every dataset of a dashboard,
+/// so the next push from any generation is accepted. The owner's recovery for
+/// a home that lost its counters, which would otherwise be refused as `order`
+/// forever while the page stopped moving.
+///
+/// `Scope::Release`: emptying a published page is a person's act, and the
+/// timer's own `data` key must not be able to blank what it feeds (review of
+/// #24).
+pub async fn reset_datasets(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Some(refusal) = not_on_gate(&origin) {
+        return refusal;
+    }
+    let user = match authorised(&app, &headers, Scope::Release) {
+        Ok((_, user)) => user,
+        Err(refusal) => return *refusal,
+    };
+    if let Err(e) = mecha_manifest::valid_id(&id, "bundle id") {
+        return Failure::json(StatusCode::BAD_REQUEST, e.to_string()).into_response();
+    }
+    match app.db.datasets_reset(&user.id, &id) {
+        Ok(n) => Json(serde_json::json!({ "removed": n })).into_response(),
+        Err(e) => {
+            tracing::error!(%id, error = %e, "resetting datasets");
+            Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+        }
+    }
 }
 
 /// More slots than a dense two-month horizon could honestly produce; above

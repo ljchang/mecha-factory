@@ -27,9 +27,10 @@ use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
 ///
-/// 14 adds `signup_budget`, which the additive `IF NOT EXISTS` batch creates
-/// on its own — the bump is what makes an existing ledger run that batch.
-const SCHEMA: i64 = 15;
+/// 16 adds `datasets` (a released dashboard's rows), which the additive
+/// `IF NOT EXISTS` batch creates on its own — the bump is what makes an
+/// existing ledger run that batch, as it did for 14's `signup_budget`.
+const SCHEMA: i64 = 16;
 
 #[derive(Clone)]
 pub struct Db {
@@ -259,6 +260,12 @@ pub enum Scope {
     /// free, and it must not also be able to write versions, move aliases,
     /// or read anything at all.
     Slots,
+    /// Replace a released dashboard's datasets. `Slots`' reason, for a
+    /// dashboard: the key sits beside home's refresh timer with no human near
+    /// it, so the worst a stolen one does is misstate a dashboard's numbers —
+    /// and only in the shape, and from the loader, the owner released. It
+    /// cannot write versions, move aliases, or read anything.
+    Data,
     /// Run the box: users, invites, every key, withholds, queue depths.
     ///
     /// The operator's credential — what retires the SSH session from routine
@@ -277,11 +284,12 @@ impl Scope {
     /// adding a third minted tokens that nothing could parse: the key
     /// authenticated as no scope at all and the endpoint answered 401. A match
     /// would have caught it; a hand-copied list did not.
-    pub const ALL: [Scope; 5] = [
+    pub const ALL: [Scope; 6] = [
         Scope::Publish,
         Scope::Release,
         Scope::Drain,
         Scope::Slots,
+        Scope::Data,
         Scope::Operate,
     ];
 
@@ -291,6 +299,7 @@ impl Scope {
             Scope::Release => "release",
             Scope::Drain => "drain",
             Scope::Slots => "slots",
+            Scope::Data => "data",
             Scope::Operate => "operate",
         }
     }
@@ -301,9 +310,10 @@ impl Scope {
             "release" => Ok(Scope::Release),
             "drain" => Ok(Scope::Drain),
             "slots" => Ok(Scope::Slots),
+            "data" => Ok(Scope::Data),
             "operate" => Ok(Scope::Operate),
             other => anyhow::bail!(
-                "unknown scope `{other}` (publish | release | drain | slots | operate)"
+                "unknown scope `{other}` (publish | release | drain | slots | data | operate)"
             ),
         }
     }
@@ -316,6 +326,7 @@ impl Scope {
             Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
             Scope::Slots => "mk_slt_",
+            Scope::Data => "mk_dat_",
             Scope::Operate => "mk_opr_",
         }
     }
@@ -387,6 +398,22 @@ pub struct TypeRow {
     pub manifest: String,
     pub schema: String,
     pub updated_at: String,
+}
+
+/// One dashboard dataset, as stored.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DatasetRow {
+    pub user_id: String,
+    pub bundle_id: String,
+    pub name: String,
+    pub release: u32,
+    pub generation: u64,
+    /// sha256 of `body`, hex: the ETag, and the idempotency check.
+    pub digest: String,
+    pub generated_at: String,
+    /// The JSON the page reads.
+    pub body: String,
+    pub received_at: String,
 }
 
 /// One instrument's cached availability, exactly as home pushed it.
@@ -1932,6 +1959,117 @@ impl Db {
         })
     }
 
+    // ---- dashboard datasets ---------------------------------------------
+
+    /// Replace a dataset. One statement, so a reader never sees half of one,
+    /// and the previous release's bytes are gone the moment a new release's
+    /// first push lands.
+    pub fn dataset_put(&self, row: &DatasetRow) -> Result<()> {
+        self.with(|conn| {
+            conn.execute(
+                "INSERT INTO datasets \
+                 (user_id, bundle_id, name, release, generation, digest, generated_at, body, \
+                  received_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+                 ON CONFLICT(user_id, bundle_id, name) DO UPDATE SET \
+                 release = ?4, generation = ?5, digest = ?6, generated_at = ?7, body = ?8, \
+                 received_at = ?9",
+                params![
+                    row.user_id,
+                    row.bundle_id,
+                    row.name,
+                    row.release,
+                    row.generation,
+                    row.digest,
+                    row.generated_at,
+                    row.body,
+                    row.received_at
+                ],
+            )?;
+            Ok(())
+        })
+    }
+
+    pub fn dataset_get(
+        &self,
+        user_id: &str,
+        bundle_id: &str,
+        name: &str,
+    ) -> Result<Option<DatasetRow>> {
+        self.with(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT user_id, bundle_id, name, release, generation, digest, generated_at, \
+                     body, received_at FROM datasets \
+                     WHERE user_id = ?1 AND bundle_id = ?2 AND name = ?3",
+                    params![user_id, bundle_id, name],
+                    |r| {
+                        Ok(DatasetRow {
+                            user_id: r.get(0)?,
+                            bundle_id: r.get(1)?,
+                            name: r.get(2)?,
+                            release: r.get(3)?,
+                            generation: r.get(4)?,
+                            digest: r.get(5)?,
+                            generated_at: r.get(6)?,
+                            body: r.get(7)?,
+                            received_at: r.get(8)?,
+                        })
+                    },
+                )
+                .optional()?)
+        })
+    }
+
+    /// Drop a dashboard's rows pushed under any release but `release` — the
+    /// previous release's bytes, including datasets the new release no
+    /// longer declares, which would otherwise sit unserved and unpushable
+    /// against the tenant's budget (review of #24). Run on every push, so
+    /// the first push under a new release clears the old one.
+    pub fn datasets_drop_other_releases(
+        &self,
+        user_id: &str,
+        bundle_id: &str,
+        release: u32,
+    ) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM datasets WHERE user_id = ?1 AND bundle_id = ?2 AND release != ?3",
+                params![user_id, bundle_id, release],
+            )?)
+        })
+    }
+
+    /// Dataset bytes a tenant holds, every dashboard together, leaving out
+    /// what a push under `release` will replace or drop: the row it replaces,
+    /// and this dashboard's rows from any other release, which the push
+    /// clears (`datasets_drop_other_releases`) — so a dashboard near its
+    /// budget is never refused the first push of a new release over bytes
+    /// that push frees (review of #24).
+    pub fn dataset_bytes(&self, user_id: &str, except: (&str, &str), release: u32) -> Result<u64> {
+        self.with(|conn| {
+            let n: i64 = conn.query_row(
+                "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM datasets \
+                 WHERE user_id = ?1 \
+                 AND NOT (bundle_id = ?2 AND (name = ?3 OR release != ?4))",
+                params![user_id, except.0, except.1, release],
+                |r| r.get(0),
+            )?;
+            Ok(n.max(0) as u64)
+        })
+    }
+
+    /// Drop every dataset of one dashboard — the owner's recovery for a home
+    /// that lost its generation counter. How many went.
+    pub fn datasets_reset(&self, user_id: &str, bundle_id: &str) -> Result<usize> {
+        self.with(|conn| {
+            Ok(conn.execute(
+                "DELETE FROM datasets WHERE user_id = ?1 AND bundle_id = ?2",
+                params![user_id, bundle_id],
+            )?)
+        })
+    }
+
     // ---- slot caches ----------------------------------------------------
 
     /// Replace an instrument's slot cache. One statement, so a reader never
@@ -3445,6 +3583,23 @@ fn migrate(conn: &Connection) -> Result<()> {
             created_at  TEXT NOT NULL,
             expires_at  TEXT NOT NULL,
             used_at     TEXT
+        );
+
+        -- A released dashboard's datasets: the latest push of each, kept
+        -- beside the immutable versions, never inside one. One row per
+        -- (bundle, dataset); the release and generation order pushes, the
+        -- digest makes an equal-generation retry an idempotent success.
+        CREATE TABLE IF NOT EXISTS datasets (
+            user_id      TEXT NOT NULL,
+            bundle_id    TEXT NOT NULL,
+            name         TEXT NOT NULL,
+            release      INTEGER NOT NULL,
+            generation   INTEGER NOT NULL,
+            digest       TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            body         TEXT NOT NULL,
+            received_at  TEXT NOT NULL,
+            PRIMARY KEY (user_id, bundle_id, name)
         );
 
         -- One instrument's availability, replaced wholesale on every push
