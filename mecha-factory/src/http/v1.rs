@@ -878,7 +878,7 @@ pub async fn put_dataset(
         }
     }
 
-    match app.db.dataset_bytes(&user.id, (&id, &name)) {
+    match app.db.dataset_bytes(&user.id, (&id, &name), release) {
         Ok(held) if held + stored.len() as u64 > limits.dataset_bytes_per_user => {
             return dataset_refusal(
                 StatusCode::PAYLOAD_TOO_LARGE,

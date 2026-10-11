@@ -2041,13 +2041,18 @@ impl Db {
     }
 
     /// Dataset bytes a tenant holds, every dashboard together, leaving out
-    /// the one row a push is about to replace.
-    pub fn dataset_bytes(&self, user_id: &str, except: (&str, &str)) -> Result<u64> {
+    /// what a push under `release` will replace or drop: the row it replaces,
+    /// and this dashboard's rows from any other release, which the push
+    /// clears (`datasets_drop_other_releases`) — so a dashboard near its
+    /// budget is never refused the first push of a new release over bytes
+    /// that push frees (review of #24).
+    pub fn dataset_bytes(&self, user_id: &str, except: (&str, &str), release: u32) -> Result<u64> {
         self.with(|conn| {
             let n: i64 = conn.query_row(
                 "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM datasets \
-                 WHERE user_id = ?1 AND NOT (bundle_id = ?2 AND name = ?3)",
-                params![user_id, except.0, except.1],
+                 WHERE user_id = ?1 \
+                 AND NOT (bundle_id = ?2 AND (name = ?3 OR release != ?4))",
+                params![user_id, except.0, except.1, release],
                 |r| r.get(0),
             )?;
             Ok(n.max(0) as u64)

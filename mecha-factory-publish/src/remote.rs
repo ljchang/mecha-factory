@@ -588,10 +588,13 @@ impl Remote {
             .unwrap_or_else(|| parsed.to_string());
         let code = parsed["code"].as_str().unwrap_or_default().to_string();
         Ok(match status {
+            // Said by the box, never assumed: a 2xx that names neither is
+            // not a push this client can claim landed (review of #24).
+            200..=299 if parsed["stored"] == serde_json::Value::Bool(true) => DatasetPushed::Stored,
             200..=299 if parsed["stored"] == serde_json::Value::Bool(false) => {
                 DatasetPushed::Unchanged
             }
-            200..=299 => DatasetPushed::Stored,
+            200..=299 => bail!("the box answered {status} for `{name}` of `{id}` without saying whether it stored it"),
             500..=599 => bail!("the box answered {status} for `{name}` of `{id}`: {message}"),
             // A key the box does not accept is not a refusal of this push on
             // its merits: it fails every push, so it fails loudly — an exit a

@@ -112,6 +112,12 @@ fn a_data_key_replaces_a_dataset_and_the_page_reads_it_beside_the_version() {
         page.header("cache-control").as_deref(),
         Some("public, no-cache")
     );
+    // The class's policy, as on a version's own bytes.
+    let csp = page
+        .header("content-security-policy")
+        .expect("the class's policy");
+    assert!(csp.contains("script-src 'self'"), "{csp}");
+    assert!(csp.contains("connect-src 'self'"), "{csp}");
 
     // Revalidated by the tag: unchanged rows cost a 304.
     let again = Request::new(
@@ -610,4 +616,40 @@ fn a_new_releases_first_push_drops_the_old_releases_rows() {
             .release,
         2
     );
+}
+
+/// A dashboard near its budget is not refused the first push of a new release
+/// over the old release's bytes, which that push frees.
+#[test]
+fn a_new_releases_first_push_is_not_charged_for_the_old_releases_bytes() {
+    let server = start();
+    dashboard(&server, "lab", 1, Visibility::Public);
+    server
+        .db
+        .dataset_put(&mecha_factory::db::DatasetRow {
+            user_id: server.user.id.clone(),
+            bundle_id: "lab".into(),
+            name: "retired".into(),
+            release: 1,
+            generation: 1,
+            digest: "d".into(),
+            generated_at: "2031-04-17T09:00:00Z".into(),
+            body: "x".repeat(64 * 1024 * 1024 - 64),
+            received_at: "2031-04-17T09:00:00Z".into(),
+        })
+        .unwrap();
+    dashboard(&server, "lab", 2, Visibility::Public);
+    let reply = put(
+        &server,
+        &server.key(Scope::Data),
+        "lab",
+        "visits",
+        push(2, 1, 3),
+    );
+    assert_eq!(reply.status, 200, "{}", reply.body);
+    assert!(server
+        .db
+        .dataset_get(&server.user.id, "lab", "retired")
+        .unwrap()
+        .is_none());
 }
