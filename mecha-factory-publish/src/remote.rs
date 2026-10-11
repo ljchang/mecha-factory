@@ -582,7 +582,10 @@ impl Remote {
                 "application/json",
             )
             .with_context(|| format!("pushing dataset `{name}` of `{id}`"))?;
-        let message = parsed["error"].as_str().unwrap_or_default().to_string();
+        let message = parsed["error"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| parsed.to_string());
         let code = parsed["code"].as_str().unwrap_or_default().to_string();
         Ok(match status {
             200..=299 if parsed["stored"] == serde_json::Value::Bool(false) => {
@@ -747,7 +750,10 @@ impl Remote {
             // surfaced rather than replaced with the status code.
             bail!(
                 "{url} answered {status}: {}",
-                parsed["error"].as_str().unwrap_or_default()
+                parsed["error"]
+                    .as_str()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| parsed.to_string())
             );
         }
         Ok(parsed)

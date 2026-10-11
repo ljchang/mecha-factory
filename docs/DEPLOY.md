@@ -731,7 +731,8 @@ home pushes beside it (`mecha/docs/LIVE-DASHBOARD-DESIGN.md` §6.2):
    `datasets.json` — and nothing else.
 2. **Home pushes after each refresh.** `factory-publish dataset push <id>
    <name> <file>` prints one JSON line (`stored`, `unchanged`, `stale`,
-   `refused`) and exits non-zero only for a failure worth retrying. A push
+   `refused`) and exits non-zero for a failure — one worth retrying (the
+   network, a 5xx), or a data key the box rejects. A push
    names the release it was made under; one for a release the alias has
    moved past is `stale` and is dropped, never retried.
 3. **The page reads** `/b/<id>/data/<name>.json` (public) or

@@ -398,8 +398,8 @@ enum DatasetAction {
     /// Prints one JSON line — `{"outcome": "stored" | "unchanged" | "stale" |
     /// "refused", "code", "message"}` — and exits 0 for all four, because each
     /// is an answer the caller acts on: a stale push is dropped, a refusal is
-    /// said. Only a failure worth retrying (the network, a 5xx) exits
-    /// non-zero. Uses `data.key`.
+    /// said. A failure exits non-zero: one worth retrying (the network, a
+    /// 5xx), or a data key the box does not accept. Uses `data.key`.
     Push {
         /// The dashboard's bundle id.
         id: String,

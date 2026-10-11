@@ -1,7 +1,8 @@
 //! The API, on the gate origin only.
 //!
-//! Six endpoints, JSON in and out, bearer token. Deliberately boring — the
-//! interesting decisions are all in what they refuse.
+//! JSON in and out, bearer token, every route listed in `http::router`.
+//! Deliberately boring — the interesting decisions are all in what they
+//! refuse.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
@@ -664,6 +665,14 @@ fn released(
     // the origin its class belongs on, under the one policy its page runs
     // under (review of mecha-factory#24).
     match app.db.bundle(user_id, id, release) {
+        // Withheld after a report: served to nobody, so fed by nobody either.
+        Ok(Some(bundle)) if bundle.withheld_at.is_some() => {
+            return Err(Box::new(dataset_refusal(
+                StatusCode::CONFLICT,
+                "withheld",
+                format!("release {release} of `{id}` is withheld"),
+            )))
+        }
         Ok(Some(bundle)) if bundle.class == mecha_manifest::ContentClass::Interactive => {}
         Ok(_) => {
             return Err(Box::new(dataset_refusal(
@@ -679,17 +688,30 @@ fn released(
             ));
         }
     }
-    let declared = app
-        .files
-        .resolve(user_id, id, release, DATASETS_FILE)
-        .and_then(|path| std::fs::read(path).ok())
-        .and_then(|bytes| serde_json::from_slice::<DatasetsManifest>(&bytes).ok());
-    match declared {
-        Some(manifest) => Ok((release, manifest)),
-        None => Err(Box::new(dataset_refusal(
+    // Absent, unreadable and unparseable are three answers: only the first
+    // is "not a dashboard" (review of #24).
+    let Some(path) = app.files.resolve(user_id, id, release, DATASETS_FILE) else {
+        return Err(Box::new(dataset_refusal(
             StatusCode::UNPROCESSABLE_ENTITY,
             "undeclared",
             format!("version {release} of `{id}` is not a dashboard: it declares no datasets"),
+        )));
+    };
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            tracing::error!(%id, release, error = %e, "reading a release's datasets.json");
+            return Err(Box::new(
+                Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+            ));
+        }
+    };
+    match serde_json::from_slice::<DatasetsManifest>(&bytes) {
+        Ok(manifest) => Ok((release, manifest)),
+        Err(e) => Err(Box::new(dataset_refusal(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "manifest",
+            format!("version {release} of `{id}` has a datasets.json that does not parse: {e}"),
         ))),
     }
 }

@@ -493,3 +493,64 @@ fn a_withheld_release_s_rows_are_not_read_through_an_older_grant() {
         .unwrap();
     assert_eq!(read(&server, &path).status, 404);
 }
+
+/// A version that declares no datasets keeps its own `data/` files, under a
+/// grant as on the public path: the dataset route falls through.
+#[test]
+fn a_version_that_declares_no_datasets_serves_its_own_data_files_under_a_grant() {
+    let server = start();
+    dashboard(&server, "lab", 1, Visibility::Private);
+    let version = server
+        .dir
+        .path()
+        .join("bundles")
+        .join(&server.user.id)
+        .join("lab/1");
+    std::fs::remove_file(version.join(mecha_manifest::hud::DATASETS_FILE)).unwrap();
+    std::fs::create_dir_all(version.join("data")).unwrap();
+    std::fs::write(version.join("data/table.json"), r#"{"own":"file"}"#).unwrap();
+    let cap = "ef".repeat(16);
+    server
+        .db
+        .view_cap_create(
+            &ViewCapRow {
+                user_id: server.user.id.clone(),
+                bundle_id: "lab".into(),
+                version: 1,
+                email: String::new(),
+            },
+            &mecha_factory::intake::hash_token(&cap),
+            "2031-04-17T07:00:00Z",
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap();
+    let page = read(&server, &format!("/g/{cap}/data/table.json"));
+    assert_eq!(page.status, 200, "{}", page.head);
+    assert!(page.body.contains("own"), "{}", page.body);
+}
+
+/// A withheld release is fed by nobody, as it is served to nobody.
+#[test]
+fn a_withheld_release_takes_no_pushes() {
+    let server = start();
+    dashboard(&server, "lab", 1, Visibility::Public);
+    server
+        .db
+        .bundle_withhold(
+            &server.user.id,
+            "lab",
+            1,
+            Some("a report"),
+            Some("2031-04-17T10:00:00Z"),
+        )
+        .unwrap();
+    let reply = put(
+        &server,
+        &server.key(Scope::Data),
+        "lab",
+        "visits",
+        push(1, 1, 7),
+    );
+    assert_eq!(reply.status, 409, "{}", reply.body);
+    assert_eq!(reply.json()["code"], "withheld");
+}
