@@ -359,6 +359,12 @@ async fn serve(
 // ones pushed under the **current** release: an older version, still
 // addressable, reads today's data, and a panel bound to a column that changed
 // fails in place rather than showing stale numbers.
+//
+// The two paths are not relative to each other: under a grant the rows are a
+// sibling of the page (`/g/<cap>/` → `data/x.json`), but a public page lives
+// at `/b/<id>/v/<n>/` and its rows at `/b/<id>/data/` — `./data/` there would
+// resolve inside the version. The renderer computes the URL from the path's
+// shape (mecha's `web/src/lib/hud/source.js`).
 
 /// What a request under a dashboard's `data/` came to.
 enum DataAnswer {
@@ -480,10 +486,19 @@ pub async fn data_file(
     let Some(user) = owner(&app, &origin) else {
         return missing();
     };
-    let release = match access(&app, &user.id, &id) {
-        Access::Nothing => return missing(),
-        Access::Gone => return gone(&id),
-        Access::Current(version) => version,
+    // `access`'s answers, with a ledger error kept apart: it is a 500 on a
+    // path a page polls, never "no rows" (review of #24).
+    let release = match app.db.alias(&user.id, &id) {
+        Ok(None) => return missing(),
+        Ok(Some(alias)) => match (alias.version, alias.visibility) {
+            (_, Visibility::Private) => return missing(),
+            (None, _) => return gone(&id),
+            (Some(version), Visibility::Public) => version,
+        },
+        Err(e) => {
+            tracing::error!(%id, error = %e, "reading an alias");
+            return unavailable();
+        }
     };
     let seen = headers
         .get(header::IF_NONE_MATCH)

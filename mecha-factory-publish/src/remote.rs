@@ -596,6 +596,9 @@ impl Remote {
             // A key the box does not accept is not a refusal of this push on
             // its merits: it fails every push, so it fails loudly — an exit a
             // timer reports, never a frozen dashboard behind a healthy unit.
+            // Too many requests: worth retrying next tick, never a refusal of
+            // this push on its merits (review of #24).
+            429 => bail!("the box asked for fewer requests (429) pushing `{name}` of `{id}`"),
             401 | 403 => bail!(
                 "the box refused the data key ({status}) pushing `{name}` of `{id}`: {message}"
             ),

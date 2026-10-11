@@ -740,7 +740,8 @@ home pushes beside it (`mecha/docs/LIVE-DASHBOARD-DESIGN.md` §6.2):
    private page that outlives its sixty-minute grant asks the reader to sign
    in again.
 4. **Recovery.** A home that lost its generation counters is refused as
-   `order` until `factory-publish dataset reset <id>` empties the dashboard's
+   `order` until `factory-publish dataset reset <id>` (with `release.key`:
+   emptying a published page is a person's act) empties the dashboard's
    datasets; the next refresh then starts over.
 
 Limits (`[limits]`): `max_dataset_bytes` (4 MiB per push) and

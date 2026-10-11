@@ -410,6 +410,7 @@ enum DatasetAction {
     },
     /// Drop every dataset of a dashboard, so the next push from any
     /// generation is accepted: the recovery for a home that lost its counters.
+    /// Uses `release.key` — a person's act, not the timer's.
     Reset {
         /// The dashboard's bundle id.
         id: String,
@@ -1691,10 +1692,17 @@ fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool, wait: u64) -> 
 }
 
 fn dataset_command(action: DatasetAction) -> Result<()> {
-    let Some(remote) = remote::Remote::configured_for(remote::Scope::Data)? else {
+    // Pushing is the timer's (`data.key`); emptying a published page is a
+    // person's (`release.key`).
+    let scope = match action {
+        DatasetAction::Push { .. } => remote::Scope::Data,
+        DatasetAction::Reset { .. } => remote::Scope::Release,
+    };
+    let Some(remote) = remote::Remote::configured_for(scope)? else {
         bail!(
             "no factory gate configured — write `gate = \"https://…\"` to \
-             ~/.mecha/factory/config.toml and install data.key beside it"
+             ~/.mecha/factory/config.toml and install {}.key beside it",
+            scope.as_str()
         );
     };
     match action {

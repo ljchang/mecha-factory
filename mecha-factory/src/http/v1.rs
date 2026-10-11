@@ -924,6 +924,10 @@ pub async fn put_dataset(
 /// so the next push from any generation is accepted. The owner's recovery for
 /// a home that lost its counters, which would otherwise be refused as `order`
 /// forever while the page stopped moving.
+///
+/// `Scope::Release`: emptying a published page is a person's act, and the
+/// timer's own `data` key must not be able to blank what it feeds (review of
+/// #24).
 pub async fn reset_datasets(
     State(app): State<Shared>,
     Extension(origin): Extension<Origin>,
@@ -933,7 +937,7 @@ pub async fn reset_datasets(
     if let Some(refusal) = not_on_gate(&origin) {
         return refusal;
     }
-    let user = match authorised(&app, &headers, Scope::Data) {
+    let user = match authorised(&app, &headers, Scope::Release) {
         Ok((_, user)) => user,
         Err(refusal) => return *refusal,
     };

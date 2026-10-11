@@ -137,7 +137,7 @@ fn a_data_key_replaces_a_dataset_and_the_page_reads_it_beside_the_version() {
 fn every_other_scope_is_refused_and_so_is_no_key() {
     let server = start();
     dashboard(&server, "lab", 1, Visibility::Public);
-    for scope in [Scope::Publish, Scope::Release, Scope::Drain, Scope::Slots] {
+    for scope in Scope::ALL.iter().copied().filter(|s| *s != Scope::Data) {
         let reply = put(&server, &server.key(scope), "lab", "visits", push(1, 1, 7));
         assert_eq!(reply.status, 403, "{}: {}", scope.as_str(), reply.body);
     }
@@ -366,12 +366,21 @@ fn a_reset_drops_a_dashboards_datasets() {
         put(&server, &key, "lab", "visits", push(1, 9, 7)).status,
         200
     );
-    let reply = Request::new(
+    // The timer's own key cannot empty what it feeds.
+    let refused = Request::new(
         "DELETE",
         "/v1/bundles/lab/datasets",
         server.gate.to_string(),
     )
     .auth(&key)
+    .send(server.gate);
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    let reply = Request::new(
+        "DELETE",
+        "/v1/bundles/lab/datasets",
+        server.gate.to_string(),
+    )
+    .auth(&server.key(Scope::Release))
     .send(server.gate);
     assert_eq!(reply.status, 200, "{}", reply.body);
     assert_eq!(reply.json()["removed"], 1);
