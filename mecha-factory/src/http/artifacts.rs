@@ -417,10 +417,14 @@ fn dataset_response(
             return DataAnswer::Answer(unavailable());
         }
     };
-    if app
-        .files
-        .resolve(user_id, id, version, mecha_manifest::hud::DATASETS_FILE)
-        .is_none()
+    // A dashboard is an interactive bundle that declares datasets, exactly
+    // as `released()` takes pushes for one: anything else keeps its own
+    // `data/` files (review of #24).
+    if bundle.class != mecha_manifest::ContentClass::Interactive
+        || app
+            .files
+            .resolve(user_id, id, version, mecha_manifest::hud::DATASETS_FILE)
+            .is_none()
     {
         return DataAnswer::NotData;
     }
@@ -650,6 +654,10 @@ async fn serve_cap(
                 release,
                 file,
                 seen,
+                // `no-cache`, not the file path's `no-store`: the rows still
+                // never rest in a shared cache (`private`), but the page must
+                // be able to revalidate by ETag, and `no-store` keeps no
+                // validator to send.
                 "private, no-cache",
             ) {
                 return response;

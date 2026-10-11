@@ -603,14 +603,13 @@ impl Remote {
                 "the box refused the data key ({status}) pushing `{name}` of `{id}`: {message}"
             ),
             _ if code == "stale" => DatasetPushed::Stale(message),
-            _ => DatasetPushed::Refused {
-                code: if code.is_empty() {
-                    status.to_string()
-                } else {
-                    code
-                },
-                message,
-            },
+            // A 4xx with no code is not this channel's refusal (a box without
+            // the route, a proxy): it fails every push, so it fails loudly —
+            // never a green timer over a frozen dashboard (review of #24).
+            _ if code.is_empty() => bail!(
+                "the box answered {status} for `{name}` of `{id}` without a dataset code: {message}"
+            ),
+            _ => DatasetPushed::Refused { code, message },
         })
     }
 
