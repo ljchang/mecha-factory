@@ -118,6 +118,18 @@ pub fn router(app: Shared) -> Router {
             )),
         )
         .route("/v1/bundles/{id}/alias", post(v1::alias))
+        // A released dashboard's rows, pushed by home's refresh timer. Its own
+        // body limit: a dataset is not a bundle, and not a 2 MB form either.
+        .route(
+            "/v1/bundles/{id}/datasets/{name}",
+            axum::routing::put(v1::put_dataset).layer(axum::extract::DefaultBodyLimit::max(
+                app.config.limits.max_dataset_bytes as usize + 64 * 1024,
+            )),
+        )
+        .route(
+            "/v1/bundles/{id}/datasets",
+            axum::routing::delete(v1::reset_datasets),
+        )
         .route(
             "/v1/instruments/{id}/slots",
             axum::routing::put(v1::put_slots),
@@ -320,6 +332,8 @@ pub fn router(app: Shared) -> Router {
         .route("/b/{id}/", get(artifacts::share))
         // The version switcher sits at the bare `v/`, a path the version
         // scheme reserves and no bundle file can occupy.
+        // A dashboard's rows sit beside its versions, never inside one.
+        .route("/b/{id}/data/{file}", get(artifacts::data_file))
         .route("/b/{id}/v", get(artifacts::versions_index))
         .route("/b/{id}/v/", get(artifacts::versions_index))
         // The signed-in viewer lives on the GATE — where the session is —

@@ -349,6 +349,111 @@ async fn serve(
     response
 }
 
+// ---- dashboard datasets ---------------------------------------------------
+//
+// A dashboard's rows live beside its versions, never inside one (a version is
+// immutable and content-addressed), so they have their own path: `/b/<id>/data/
+// <name>.json` for a public page, and `/g/<cap>/data/<name>.json` under a grant
+// — the grant covers the data of the bundle it opens (R16 of the dashboard
+// design), not only the version's files. Either way the rows served are the
+// ones pushed under the **current** release: an older version, still
+// addressable, reads today's data, and a panel bound to a column that changed
+// fails in place rather than showing stale numbers.
+
+/// The dataset `file` (`<name>.json`) of dashboard `id` at `release`, for a
+/// reader already allowed to see `version`'s bytes. `None` is a 404: no such
+/// dataset, not a dashboard, withheld, or nothing pushed under this release
+/// yet — the same answer, so it says nothing about which.
+#[allow(clippy::too_many_arguments)]
+fn dataset_response(
+    app: &Shared,
+    user_id: &str,
+    id: &str,
+    version: u32,
+    release: u32,
+    file: &str,
+    seen: Option<&str>,
+    cache: &'static str,
+) -> Option<Response> {
+    let name = file.strip_suffix(".json")?;
+    if !mecha_manifest::hud::valid_dataset_name(name) {
+        return None;
+    }
+    let bundle = app.db.bundle(user_id, id, version).ok()??;
+    if bundle.withheld_at.is_some() {
+        return None;
+    }
+    // Only a dashboard has datasets: a version that declares none keeps every
+    // path to its own files, `data/` included.
+    app.files
+        .resolve(user_id, id, version, mecha_manifest::hud::DATASETS_FILE)?;
+    let row = app.db.dataset_get(user_id, id, name).ok()??;
+    if row.release != release {
+        return None;
+    }
+    let tag = format!("\"{}\"", row.digest);
+    let mut response = if seen.is_some_and(|s| s.split(',').any(|t| t.trim() == tag)) {
+        StatusCode::NOT_MODIFIED.into_response()
+    } else {
+        (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            row.body,
+        )
+            .into_response()
+    };
+    let headers = response.headers_mut();
+    for (name, value) in bundle
+        .class
+        .headers_framed_by(Some(&app.config.base_url(crate::config::Role::Gate)))
+    {
+        if let Ok(value) = HeaderValue::from_str(&value) {
+            headers.insert(name, value);
+        }
+    }
+    if let Ok(value) = HeaderValue::from_str(&tag) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
+    Some(response)
+}
+
+/// `/b/<id>/data/<name>.json` — a public dashboard's dataset, under the
+/// current release, revalidated by `ETag`.
+pub async fn data_file(
+    State(app): State<Shared>,
+    Extension(origin): Extension<Origin>,
+    Path((id, file)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    if origin.role == Role::Gate || mecha_manifest::valid_id(&id, "bundle id").is_err() {
+        return missing();
+    }
+    let Some(user) = owner(&app, &origin) else {
+        return missing();
+    };
+    let release = match access(&app, &user.id, &id) {
+        Access::Nothing => return missing(),
+        Access::Gone => return gone(&id),
+        Access::Current(version) => version,
+    };
+    let seen = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
+    // Rows change with every refresh: revalidate every time, by ETag.
+    dataset_response(
+        &app,
+        &user.id,
+        &id,
+        release,
+        release,
+        &file,
+        seen,
+        "public, no-cache",
+    )
+    .unwrap_or_else(missing)
+}
+
 // ---- the capability path -------------------------------------------------
 //
 // `/g/<cap>/…` serves one version's bytes to whoever presents the token —
@@ -381,8 +486,9 @@ pub async fn grant_root(
     state: State<Shared>,
     origin: Extension<Origin>,
     Path(cap): Path<String>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    serve_cap(state, origin, cap, String::new()).await
+    serve_cap(state, origin, cap, String::new(), headers).await
 }
 
 /// `/g/<cap>/<path>` — a file inside the version.
@@ -390,8 +496,9 @@ pub async fn grant_file(
     state: State<Shared>,
     origin: Extension<Origin>,
     Path((cap, path)): Path<(String, String)>,
+    headers: axum::http::HeaderMap,
 ) -> Response {
-    serve_cap(state, origin, cap, path).await
+    serve_cap(state, origin, cap, path, headers).await
 }
 
 async fn serve_cap(
@@ -399,6 +506,7 @@ async fn serve_cap(
     Extension(origin): Extension<Origin>,
     cap: String,
     path: String,
+    headers: axum::http::HeaderMap,
 ) -> Response {
     if origin.role == Role::Gate {
         return missing();
@@ -451,6 +559,34 @@ async fn serve_cap(
             ],
         )
             .into_response();
+    }
+
+    // A dashboard's data, under the grant that opened its page (R16): the rows
+    // of the release the alias is at now, private like the page.
+    if let Some(file) = path.strip_prefix("data/") {
+        let current = app
+            .db
+            .alias(&user.id, &row.bundle_id)
+            .ok()
+            .flatten()
+            .and_then(|a| a.version);
+        if let Some(release) = current {
+            let seen = headers
+                .get(header::IF_NONE_MATCH)
+                .and_then(|v| v.to_str().ok());
+            if let Some(response) = dataset_response(
+                &app,
+                &user.id,
+                &row.bundle_id,
+                row.version,
+                release,
+                file,
+                seen,
+                "private, no-cache",
+            ) {
+                return response;
+            }
+        }
     }
 
     let Some(file) = app

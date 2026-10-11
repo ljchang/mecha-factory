@@ -48,6 +48,10 @@ pub enum Scope {
     /// it exists apart from `Publish`: the credential that lives in a
     /// systemd unit's environment should open one narrow door.
     Slots,
+    /// Replace a released dashboard's datasets. Held by home's dashboard
+    /// refresh timer, `Slots`' shape for a dashboard: the box takes only the
+    /// shape and the loader the owner released.
+    Data,
     /// Run the box. Held by the operator's own machine and never installed
     /// by pairing — `connect` mints publish and drain, full stop. The verbs
     /// behind it are CLI-only, never MCP tools: operator power stays off the
@@ -65,6 +69,7 @@ impl Scope {
             Scope::Release => "mk_rel_",
             Scope::Drain => "mk_drn_",
             Scope::Slots => "mk_slt_",
+            Scope::Data => "mk_dat_",
             Scope::Operate => "mk_opr_",
         }
     }
@@ -75,6 +80,7 @@ impl Scope {
             Scope::Release => "release.key",
             Scope::Drain => "drain.key",
             Scope::Slots => "slots.key",
+            Scope::Data => "data.key",
             Scope::Operate => "operate.key",
         }
     }
@@ -87,6 +93,7 @@ impl Scope {
             Scope::Release => "FACTORY_RELEASE_KEY",
             Scope::Drain => "FACTORY_DRAIN_KEY",
             Scope::Slots => "FACTORY_SLOTS_KEY",
+            Scope::Data => "FACTORY_DATA_KEY",
             Scope::Operate => "FACTORY_OPERATE_KEY",
         }
     }
@@ -97,9 +104,26 @@ impl Scope {
             Scope::Release => "release",
             Scope::Drain => "drain",
             Scope::Slots => "slots",
+            Scope::Data => "data",
             Scope::Operate => "operate",
         }
     }
+}
+
+/// What the box did with a dataset push. Typed, because home acts on which:
+/// a stale push is dropped (the release moved on), a refusal is said and not
+/// retried, and only a transport failure or a 5xx — an `Err` — is retried.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DatasetPushed {
+    /// Replaced.
+    Stored,
+    /// The same generation and bytes were already there: a retry that landed.
+    Unchanged,
+    /// The push named a release the dashboard is no longer at.
+    Stale(String),
+    /// Refused on its merits — `code` is the box's (`order`, `forked`,
+    /// `loader`, `shape`, `undeclared`, `size`, `budget`, `unreleased`).
+    Refused { code: String, message: String },
 }
 
 /// Where the box is, and what to present to it.
@@ -541,6 +565,53 @@ impl Remote {
         .with_context(|| format!("pushing slots for `{instrument_id}`"))
     }
 
+    /// Replace one dataset of a released dashboard
+    /// (`PUT /v1/bundles/{id}/datasets/{name}`).
+    pub fn dataset_push(
+        &self,
+        id: &str,
+        name: &str,
+        push: &mecha_manifest::hud::DatasetPush,
+    ) -> Result<DatasetPushed> {
+        let body = serde_json::to_vec(push)?;
+        let (status, parsed) = self
+            .exchange(
+                "PUT",
+                &format!("/v1/bundles/{id}/datasets/{name}"),
+                Some(&body),
+                "application/json",
+            )
+            .with_context(|| format!("pushing dataset `{name}` of `{id}`"))?;
+        let message = parsed["error"].as_str().unwrap_or_default().to_string();
+        let code = parsed["code"].as_str().unwrap_or_default().to_string();
+        Ok(match status {
+            200..=299 if parsed["stored"] == serde_json::Value::Bool(false) => {
+                DatasetPushed::Unchanged
+            }
+            200..=299 => DatasetPushed::Stored,
+            500..=599 => bail!("the box answered {status} for `{name}` of `{id}`: {message}"),
+            _ if code == "stale" => DatasetPushed::Stale(message),
+            _ => DatasetPushed::Refused {
+                code: if code.is_empty() {
+                    status.to_string()
+                } else {
+                    code
+                },
+                message,
+            },
+        })
+    }
+
+    /// Drop every dataset of a dashboard, so the next push from any
+    /// generation is accepted — the recovery for a home that lost its
+    /// counters (`DELETE /v1/bundles/{id}/datasets`).
+    pub fn dataset_reset(&self, id: &str) -> Result<u64> {
+        let reply = self
+            .send("DELETE", &format!("/v1/bundles/{id}/datasets"), None, "")
+            .with_context(|| format!("resetting the datasets of `{id}`"))?;
+        Ok(reply["removed"].as_u64().unwrap_or(0))
+    }
+
     /// Take everything verified and not yet acknowledged, from `since` on.
     ///
     /// A **pure read**: the box marks nothing, so a response that never
@@ -663,6 +734,29 @@ impl Remote {
         content_type: &str,
     ) -> Result<serde_json::Value> {
         let url = format!("{}{path}", self.gate);
+        let (status, parsed) = self.exchange(method, path, body, content_type)?;
+        if !(200..300).contains(&status) {
+            // The server's message is the actionable part — which file had an
+            // external reference, which version already exists — so it is
+            // surfaced rather than replaced with the status code.
+            bail!(
+                "{url} answered {status}: {}",
+                parsed["error"].as_str().unwrap_or_default()
+            );
+        }
+        Ok(parsed)
+    }
+
+    /// One request, with its status and body for the caller to read — `send`
+    /// for callers that act on *which* refusal it was.
+    fn exchange(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        content_type: &str,
+    ) -> Result<(u16, serde_json::Value)> {
+        let url = format!("{}{path}", self.gate);
         let auth = format!("Bearer {}", self.key);
         // ureq 3 types a request by whether it carries a body, so the verb
         // cannot be a runtime string — which is just as well, since it makes
@@ -689,8 +783,14 @@ impl Remote {
                 .http_status_as_error(false)
                 .build()
                 .send(bytes),
+            ("DELETE", None) => ureq::delete(&url)
+                .header("Authorization", &auth)
+                .config()
+                .http_status_as_error(false)
+                .build()
+                .call(),
             (method, body) => bail!(
-                "this client speaks GET, POST and PUT; `{method}` with {} body is not one of them",
+                "this client speaks GET, POST, PUT and DELETE; `{method}` with {} body is not one of them",
                 if body.is_some() { "a" } else { "no" }
             ),
         }
@@ -704,16 +804,7 @@ impl Remote {
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({
             "error": text
         }));
-        if !(200..300).contains(&status) {
-            // The server's message is the actionable part — which file had an
-            // external reference, which version already exists — so it is
-            // surfaced rather than replaced with the status code.
-            bail!(
-                "{url} answered {status}: {}",
-                parsed["error"].as_str().unwrap_or(&text)
-            );
-        }
-        Ok(parsed)
+        Ok((status, parsed))
     }
 }
 

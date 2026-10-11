@@ -253,6 +253,10 @@ enum Command {
     /// An instrument's availability: computed here, served by the box.
     #[command(subcommand)]
     Slots(SlotsAction),
+    /// A released dashboard's rows: produced at home, served beside the
+    /// dashboard's versions.
+    #[command(subcommand)]
+    Dataset(DatasetAction),
     /// Group polls: seeded candidates out, tri-state answers back.
     #[command(subcommand)]
     Polls(PollsAction),
@@ -382,6 +386,33 @@ enum PollsAction {
         /// Where to write the manifest (default: mecha-polls.xml here).
         #[arg(long)]
         out: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DatasetAction {
+    /// Replace one dataset of a released dashboard with the push in FILE
+    /// (`-` for stdin): `{release, generation, generated_at, loader_digest,
+    /// columns, rows, external}`.
+    ///
+    /// Prints one JSON line — `{"outcome": "stored" | "unchanged" | "stale" |
+    /// "refused", "code", "message"}` — and exits 0 for all four, because each
+    /// is an answer the caller acts on: a stale push is dropped, a refusal is
+    /// said. Only a failure worth retrying (the network, a 5xx) exits
+    /// non-zero. Uses `data.key`.
+    Push {
+        /// The dashboard's bundle id.
+        id: String,
+        /// The dataset's name, as the dashboard declares it.
+        name: String,
+        /// The push, as JSON; `-` reads stdin.
+        file: std::path::PathBuf,
+    },
+    /// Drop every dataset of a dashboard, so the next push from any
+    /// generation is accepted: the recovery for a home that lost its counters.
+    Reset {
+        /// The dashboard's bundle id.
+        id: String,
     },
 }
 
@@ -710,6 +741,7 @@ fn main() -> Result<()> {
             policy,
             dry_run,
         }) => slots_push_command(&id, &policy, dry_run)?,
+        Command::Dataset(action) => dataset_command(action)?,
         Command::Polls(action) => polls_command(action)?,
         Command::Profile(action) => record_command(Record::Profile, action)?,
         Command::Hangar(action) => record_command(Record::Hangar, action)?,
@@ -1658,6 +1690,45 @@ fn drain_command(out: Option<PathBuf>, dry_run: bool, json: bool, wait: u64) -> 
     Ok(())
 }
 
+fn dataset_command(action: DatasetAction) -> Result<()> {
+    let Some(remote) = remote::Remote::configured_for(remote::Scope::Data)? else {
+        bail!(
+            "no factory gate configured — write `gate = \"https://…\"` to \
+             ~/.mecha/factory/config.toml and install data.key beside it"
+        );
+    };
+    match action {
+        DatasetAction::Push { id, name, file } => {
+            let text = if file.as_os_str() == "-" {
+                let mut text = String::new();
+                std::io::Read::read_to_string(&mut std::io::stdin(), &mut text)?;
+                text
+            } else {
+                std::fs::read_to_string(&file)
+                    .with_context(|| format!("reading {}", file.display()))?
+            };
+            let push: mecha_manifest::hud::DatasetPush =
+                serde_json::from_str(&text).context("the push is not a dataset push")?;
+            let line = match remote.dataset_push(&id, &name, &push)? {
+                remote::DatasetPushed::Stored => serde_json::json!({ "outcome": "stored" }),
+                remote::DatasetPushed::Unchanged => serde_json::json!({ "outcome": "unchanged" }),
+                remote::DatasetPushed::Stale(message) => {
+                    serde_json::json!({ "outcome": "stale", "code": "stale", "message": message })
+                }
+                remote::DatasetPushed::Refused { code, message } => {
+                    serde_json::json!({ "outcome": "refused", "code": code, "message": message })
+                }
+            };
+            println!("{line}");
+        }
+        DatasetAction::Reset { id } => {
+            let removed = remote.dataset_reset(&id)?;
+            println!("{removed} dataset(s) of `{id}` removed; the next push starts over");
+        }
+    }
+    Ok(())
+}
+
 /// Compute an instrument's slots from stdin's busy intervals and replace its
 /// cache on the box. Everything here fails closed: partial knowledge of the
 /// calendar must never become "free" on a public page.
@@ -2449,6 +2520,24 @@ mod surface {
             NotATool(
                 "it writes an Office add-in manifest to be sideloaded once per machine — \
                  setting up the operator's laptop, not doing their work.",
+            ),
+        ),
+        ("dataset", Descend),
+        (
+            "dataset push",
+            NotATool(
+                "a scheduled command with no model in it: home's dashboard refresh runs it \
+                 after each refresh, and the box takes only the shape and the loader the \
+                 owner released. A model pushing rows would be writing the numbers on a \
+                 published page, which is exactly what the release review was of.",
+            ),
+        ),
+        (
+            "dataset reset",
+            NotATool(
+                "the owner's recovery for a home that lost its counters: it empties a \
+                 published dashboard until the next refresh, an act for a person who \
+                 knows why.",
             ),
         ),
         ("slots", Descend),
