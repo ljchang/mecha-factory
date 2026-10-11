@@ -660,6 +660,25 @@ fn released(
             format!("dashboard `{id}` has been taken down"),
         )));
     };
+    // Only an interactive dashboard takes datasets: its rows are served on
+    // the origin its class belongs on, under the one policy its page runs
+    // under (review of mecha-factory#24).
+    match app.db.bundle(user_id, id, release) {
+        Ok(Some(bundle)) if bundle.class == mecha_manifest::ContentClass::Interactive => {}
+        Ok(_) => {
+            return Err(Box::new(dataset_refusal(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "undeclared",
+                format!("version {release} of `{id}` is not an interactive dashboard"),
+            )))
+        }
+        Err(e) => {
+            tracing::error!(%id, error = %e, "reading a bundle row");
+            return Err(Box::new(
+                Failure::json(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response(),
+            ));
+        }
+    }
     let declared = app
         .files
         .resolve(user_id, id, release, DATASETS_FILE)

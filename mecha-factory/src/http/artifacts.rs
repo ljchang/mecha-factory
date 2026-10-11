@@ -360,13 +360,35 @@ async fn serve(
 // addressable, reads today's data, and a panel bound to a column that changed
 // fails in place rather than showing stale numbers.
 
+/// What a request under a dashboard's `data/` came to.
+enum DataAnswer {
+    /// A response to send: the rows, a 304, a 404 or a 500.
+    Answer(Response),
+    /// Not a dataset path of a dashboard — a version that declares no
+    /// datasets keeps every path to its own files, `data/` included.
+    NotData,
+}
+
+fn unavailable() -> Response {
+    Failure::text(StatusCode::INTERNAL_SERVER_ERROR, "unavailable").into_response()
+}
+
 /// The dataset `file` (`<name>.json`) of dashboard `id` at `release`, for a
-/// reader already allowed to see `version`'s bytes. `None` is a 404: no such
-/// dataset, not a dashboard, withheld, or nothing pushed under this release
-/// yet — the same answer, so it says nothing about which.
+/// reader already allowed to see `version`'s bytes, on `role`'s origin.
+///
+/// - **No such dataset, nothing pushed under this release yet, withheld: one
+///   404**, so the answer says nothing about which. A ledger that cannot be
+///   read is a 500 — never "no rows" on a path a page polls (review of
+///   mecha-factory#24).
+/// - **The class decides the origin, for the rows as for the page.** A
+///   dataset is served only on the origin its bundle's class belongs on, so
+///   one dataset never answers under two policies.
+/// - **A withhold covers the rows** of the release they belong to, so a grant
+///   minted for an older version cannot read what a withheld release pushed.
 #[allow(clippy::too_many_arguments)]
 fn dataset_response(
     app: &Shared,
+    role: Role,
     user_id: &str,
     id: &str,
     version: u32,
@@ -374,23 +396,49 @@ fn dataset_response(
     file: &str,
     seen: Option<&str>,
     cache: &'static str,
-) -> Option<Response> {
-    let name = file.strip_suffix(".json")?;
+) -> DataAnswer {
+    let Some(name) = file.strip_suffix(".json") else {
+        return DataAnswer::NotData;
+    };
     if !mecha_manifest::hud::valid_dataset_name(name) {
-        return None;
+        return DataAnswer::NotData;
     }
-    let bundle = app.db.bundle(user_id, id, version).ok()??;
-    if bundle.withheld_at.is_some() {
-        return None;
+    let bundle = match app.db.bundle(user_id, id, version) {
+        Ok(Some(bundle)) => bundle,
+        Ok(None) => return DataAnswer::NotData,
+        Err(e) => {
+            tracing::error!(%id, version, error = %e, "reading a bundle row");
+            return DataAnswer::Answer(unavailable());
+        }
+    };
+    if app
+        .files
+        .resolve(user_id, id, version, mecha_manifest::hud::DATASETS_FILE)
+        .is_none()
+    {
+        return DataAnswer::NotData;
     }
-    // Only a dashboard has datasets: a version that declares none keeps every
-    // path to its own files, `data/` included.
-    app.files
-        .resolve(user_id, id, version, mecha_manifest::hud::DATASETS_FILE)?;
-    let row = app.db.dataset_get(user_id, id, name).ok()??;
-    if row.release != release {
-        return None;
+    if bundle.withheld_at.is_some() || Role::for_class(bundle.class) != role {
+        return DataAnswer::Answer(missing());
     }
+    if release != version {
+        match app.db.bundle(user_id, id, release) {
+            Ok(Some(current)) if current.withheld_at.is_none() => {}
+            Ok(_) => return DataAnswer::Answer(missing()),
+            Err(e) => {
+                tracing::error!(%id, release, error = %e, "reading a bundle row");
+                return DataAnswer::Answer(unavailable());
+            }
+        }
+    }
+    let row = match app.db.dataset_get(user_id, id, name) {
+        Ok(Some(row)) if row.release == release => row,
+        Ok(_) => return DataAnswer::Answer(missing()),
+        Err(e) => {
+            tracing::error!(%id, %name, error = %e, "reading a dataset");
+            return DataAnswer::Answer(unavailable());
+        }
+    };
     let tag = format!("\"{}\"", row.digest);
     let mut response = if seen.is_some_and(|s| s.split(',').any(|t| t.trim() == tag)) {
         StatusCode::NOT_MODIFIED.into_response()
@@ -415,7 +463,7 @@ fn dataset_response(
         headers.insert(header::ETAG, value);
     }
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static(cache));
-    Some(response)
+    DataAnswer::Answer(response)
 }
 
 /// `/b/<id>/data/<name>.json` — a public dashboard's dataset, under the
@@ -441,8 +489,9 @@ pub async fn data_file(
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok());
     // Rows change with every refresh: revalidate every time, by ETag.
-    dataset_response(
+    match dataset_response(
         &app,
+        origin.role,
         &user.id,
         &id,
         release,
@@ -450,8 +499,10 @@ pub async fn data_file(
         &file,
         seen,
         "public, no-cache",
-    )
-    .unwrap_or_else(missing)
+    ) {
+        DataAnswer::Answer(response) => response,
+        DataAnswer::NotData => missing(),
+    }
 }
 
 // ---- the capability path -------------------------------------------------
@@ -564,18 +615,20 @@ async fn serve_cap(
     // A dashboard's data, under the grant that opened its page (R16): the rows
     // of the release the alias is at now, private like the page.
     if let Some(file) = path.strip_prefix("data/") {
-        let current = app
-            .db
-            .alias(&user.id, &row.bundle_id)
-            .ok()
-            .flatten()
-            .and_then(|a| a.version);
+        let current = match app.db.alias(&user.id, &row.bundle_id) {
+            Ok(alias) => alias.and_then(|a| a.version),
+            Err(e) => {
+                tracing::error!(error = %e, "reading an alias");
+                return unavailable();
+            }
+        };
         if let Some(release) = current {
             let seen = headers
                 .get(header::IF_NONE_MATCH)
                 .and_then(|v| v.to_str().ok());
-            if let Some(response) = dataset_response(
+            if let DataAnswer::Answer(response) = dataset_response(
                 &app,
+                origin.role,
                 &user.id,
                 &row.bundle_id,
                 row.version,

@@ -27,8 +27,9 @@ use std::sync::{Arc, Mutex};
 
 /// The current schema version. Bumped alongside a migration in [`migrate`].
 ///
-/// 14 adds `signup_budget`, which the additive `IF NOT EXISTS` batch creates
-/// on its own — the bump is what makes an existing ledger run that batch.
+/// 16 adds `datasets` (a released dashboard's rows), which the additive
+/// `IF NOT EXISTS` batch creates on its own — the bump is what makes an
+/// existing ledger run that batch, as it did for 14's `signup_budget`.
 const SCHEMA: i64 = 16;
 
 #[derive(Clone)]
@@ -3560,12 +3561,6 @@ fn migrate(conn: &Connection) -> Result<()> {
             used_at     TEXT
         );
 
-        -- One instrument's availability, replaced wholesale on every push
-        -- from home and never computed here: the box subtracts from this
-        -- cache (its own holds and bookings), it may never add to it. The
-        -- slots column is a JSON array the endpoint shape-validated on the
-        -- way in; generated_at is home's stamp, served beside the slots so
-        -- a page can state its own staleness.
         -- A released dashboard's datasets: the latest push of each, kept
         -- beside the immutable versions, never inside one. One row per
         -- (bundle, dataset); the release and generation order pushes, the
@@ -3583,6 +3578,12 @@ fn migrate(conn: &Connection) -> Result<()> {
             PRIMARY KEY (user_id, bundle_id, name)
         );
 
+        -- One instrument's availability, replaced wholesale on every push
+        -- from home and never computed here: the box subtracts from this
+        -- cache (its own holds and bookings), it may never add to it. The
+        -- slots column is a JSON array the endpoint shape-validated on the
+        -- way in; generated_at is home's stamp, served beside the slots so
+        -- a page can state its own staleness.
         CREATE TABLE IF NOT EXISTS slot_cache (
             user_id       TEXT NOT NULL,
             instrument_id TEXT NOT NULL,

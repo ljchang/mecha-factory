@@ -13,6 +13,10 @@ const LOADER: &str = "sha256:loader-v1";
 /// A dashboard version on disk and in the ledger, declaring one dataset
 /// `visits` (day, visits) released from `LOADER`, aliased at `version`.
 fn dashboard(server: &Server, id: &str, version: u32, visibility: Visibility) {
+    bundle_of(server, id, version, visibility, ContentClass::Interactive)
+}
+
+fn bundle_of(server: &Server, id: &str, version: u32, visibility: Visibility, class: ContentClass) {
     let dir = server
         .dir
         .path()
@@ -38,7 +42,7 @@ fn dashboard(server: &Server, id: &str, version: u32, visibility: Visibility) {
             id: id.into(),
             version,
             digest: format!("sha256:{id}{version}"),
-            class: ContentClass::Interactive,
+            class,
             title: id.into(),
             description: None,
             template: "hud".into(),
@@ -376,4 +380,116 @@ fn a_reset_drops_a_dashboards_datasets() {
         put(&server, &key, "lab", "visits", push(1, 1, 3)).status,
         200
     );
+}
+
+/// The class decides the origin for the rows as for the page: an interactive
+/// dashboard's data is not served on the compute origin, and a bundle that is
+/// not an interactive dashboard takes no pushes (review of #24).
+#[test]
+fn a_dashboards_rows_answer_only_on_its_classs_origin() {
+    let server = start();
+    dashboard(&server, "lab", 1, Visibility::Public);
+    let key = server.key(Scope::Data);
+    assert_eq!(
+        put(&server, &key, "lab", "visits", push(1, 1, 7)).status,
+        200
+    );
+    assert_eq!(read(&server, "/b/lab/data/visits.json").status, 200);
+    let compute = server.get_as(
+        server.compute,
+        &server.user.handle,
+        "/b/lab/data/visits.json",
+    );
+    assert_eq!(compute.status, 404, "{}", compute.head);
+
+    bundle_of(
+        &server,
+        "report",
+        1,
+        Visibility::Public,
+        ContentClass::Static,
+    );
+    let reply = put(&server, &key, "report", "visits", push(1, 1, 7));
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert_eq!(reply.json()["code"], "undeclared");
+}
+
+/// The tenant's datasets together are capped: the budget that bounds a key
+/// pushing unattended.
+#[test]
+fn a_push_past_the_tenants_dataset_budget_is_refused() {
+    let server = start();
+    dashboard(&server, "lab", 1, Visibility::Public);
+    // Another dashboard's rows already hold all but a few bytes of the
+    // 64 MiB budget.
+    server
+        .db
+        .dataset_put(&mecha_factory::db::DatasetRow {
+            user_id: server.user.id.clone(),
+            bundle_id: "other".into(),
+            name: "big".into(),
+            release: 1,
+            generation: 1,
+            digest: "d".into(),
+            generated_at: "2031-04-17T09:00:00Z".into(),
+            body: "x".repeat(64 * 1024 * 1024 - 64),
+            received_at: "2031-04-17T09:00:00Z".into(),
+        })
+        .unwrap();
+    let reply = put(
+        &server,
+        &server.key(Scope::Data),
+        "lab",
+        "visits",
+        push(1, 1, 7),
+    );
+    assert_eq!(reply.status, 413, "{}", reply.body);
+    assert_eq!(reply.json()["code"], "budget");
+}
+
+/// A withhold covers the rows of the release they belong to: a grant minted
+/// for an older version cannot read what a withheld release pushed.
+#[test]
+fn a_withheld_release_s_rows_are_not_read_through_an_older_grant() {
+    let server = start();
+    dashboard(&server, "lab", 1, Visibility::Private);
+    let cap = "cd".repeat(16);
+    server
+        .db
+        .view_cap_create(
+            &ViewCapRow {
+                user_id: server.user.id.clone(),
+                bundle_id: "lab".into(),
+                version: 1,
+                email: String::new(),
+            },
+            &mecha_factory::intake::hash_token(&cap),
+            "2031-04-17T07:00:00Z",
+            "2999-01-01T00:00:00Z",
+        )
+        .unwrap();
+    dashboard(&server, "lab", 2, Visibility::Private);
+    let key = server.key(Scope::Data);
+    assert_eq!(
+        put(&server, &key, "lab", "visits", push(2, 1, 7)).status,
+        200
+    );
+    let path = format!("/g/{cap}/data/visits.json");
+    assert_eq!(
+        read(&server, &path).status,
+        200,
+        "the grant reads the current release"
+    );
+
+    server
+        .db
+        .bundle_withhold(
+            &server.user.id,
+            "lab",
+            2,
+            Some("a report"),
+            Some("2031-04-17T10:00:00Z"),
+        )
+        .unwrap();
+    assert_eq!(read(&server, &path).status, 404);
 }

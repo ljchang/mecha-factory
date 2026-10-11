@@ -590,6 +590,12 @@ impl Remote {
             }
             200..=299 => DatasetPushed::Stored,
             500..=599 => bail!("the box answered {status} for `{name}` of `{id}`: {message}"),
+            // A key the box does not accept is not a refusal of this push on
+            // its merits: it fails every push, so it fails loudly — an exit a
+            // timer reports, never a frozen dashboard behind a healthy unit.
+            401 | 403 => bail!(
+                "the box refused the data key ({status}) pushing `{name}` of `{id}`: {message}"
+            ),
             _ if code == "stale" => DatasetPushed::Stale(message),
             _ => DatasetPushed::Refused {
                 code: if code.is_empty() {
