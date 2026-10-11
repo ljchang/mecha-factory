@@ -813,6 +813,30 @@ pub async fn put_dataset(
             ),
         );
     }
+    // Each cell is what its column declares, or null: the shape the owner
+    // released reaches the values, not only the header row (review of #24).
+    for (i, row) in push.rows.iter().enumerate() {
+        for (cell, column) in row.iter().zip(&push.columns) {
+            let fits = match (column.kind.as_str(), cell) {
+                (_, serde_json::Value::Null) => true,
+                ("integer", v) => v.is_i64() || v.is_u64(),
+                ("float", v) => v.is_number(),
+                ("boolean", v) => v.is_boolean(),
+                ("string" | "date" | "timestamp", v) => v.is_string(),
+                _ => false,
+            };
+            if !fits {
+                return dataset_refusal(
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    "shape",
+                    format!(
+                        "`{name}` row {i}: `{}` is not a {}",
+                        column.name, column.kind
+                    ),
+                );
+            }
+        }
+    }
 
     // What the page reads: home's dataset shape, without the release.
     let stored = serde_json::json!({

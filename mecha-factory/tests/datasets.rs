@@ -244,6 +244,11 @@ fn a_push_off_the_released_loader_or_shape_is_refused() {
     let reply = put(&server, &key, "lab", "visits", short_row);
     assert_eq!(reply.status, 422, "{}", reply.body);
 
+    let wrong_cell = push(1, 1, 7).replace("[\"2031-04-17\",7]", "[\"2031-04-17\",{\"x\":1}]");
+    let reply = put(&server, &key, "lab", "visits", wrong_cell);
+    assert_eq!(reply.status, 422, "{}", reply.body);
+    assert_eq!(reply.json()["code"], "shape");
+
     let reply = put(&server, &key, "lab", "instruments", push(1, 1, 7));
     assert_eq!(reply.status, 422, "{}", reply.body);
     assert_eq!(reply.json()["code"], "undeclared");

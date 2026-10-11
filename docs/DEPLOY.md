@@ -736,9 +736,10 @@ home pushes beside it (`mecha/docs/LIVE-DASHBOARD-DESIGN.md` §6.2):
    names the release it was made under; one for a release the alias has
    moved past is `stale` and is dropped, never retried.
 3. **The page reads** `/b/<id>/data/<name>.json` (public) or
-   `/g/<cap>/data/<name>.json` under a viewing grant, with an `ETag`. A
-   private page that outlives its sixty-minute grant asks the reader to sign
-   in again.
+   `/g/<cap>/data/<name>.json` under a viewing grant, with an `ETag`. The
+   capability lasts sixty minutes: a page open longer stops refreshing and
+   says so — a reload mints a new one while the reader's viewer session
+   lasts, and signing in again is needed only once that has ended.
 4. **Recovery.** A home that lost its generation counters is refused as
    `order` until `factory-publish dataset reset <id>` (with `release.key`:
    emptying a published page is a person's act) empties the dashboard's
