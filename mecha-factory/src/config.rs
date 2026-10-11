@@ -359,6 +359,24 @@ pub struct Limits {
     /// the refusal is loud and temporary.
     #[serde(default = "default_min_free_bytes")]
     pub min_free_bytes: u64,
+    /// The largest one dashboard dataset push may be. A dataset is the one
+    /// thing a held `data` key rewrites forever, on a timer, so it is a
+    /// number rather than the 2 MB route default it would otherwise get.
+    #[serde(default = "default_max_dataset_bytes")]
+    pub max_dataset_bytes: u64,
+    /// Dataset bytes one tenant may hold across every dashboard — the
+    /// per-tenant budget `PUBLIC-SURFACE-DESIGN.md` §14.9.3 owes, made
+    /// urgent by a key that pushes unattended.
+    #[serde(default = "default_dataset_bytes_per_user")]
+    pub dataset_bytes_per_user: u64,
+}
+
+fn default_max_dataset_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+fn default_dataset_bytes_per_user() -> u64 {
+    64 * 1024 * 1024
 }
 
 fn default_max_submission_bytes() -> u64 {
@@ -383,6 +401,8 @@ impl Default for Limits {
             max_submission_bytes: default_max_submission_bytes(),
             daily_upload_bytes_per_ip: default_daily_upload_bytes(),
             min_free_bytes: default_min_free_bytes(),
+            max_dataset_bytes: default_max_dataset_bytes(),
+            dataset_bytes_per_user: default_dataset_bytes_per_user(),
         }
     }
 }

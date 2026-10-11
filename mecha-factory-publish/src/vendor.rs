@@ -222,6 +222,9 @@ pub fn gate(bundle: &Path) -> Result<()> {
     gate_with(bundle, &[])
 }
 
+/// Where a dashboard bundle keeps its vendored renderer.
+pub const HUD_RENDERER_DIR: &str = "renderer";
+
 /// The third-party trees a bundle of this class is reviewed as pinned units.
 ///
 /// **Derived from the class, in code.** The alternative — letting a bundle
@@ -239,6 +242,23 @@ pub fn gate(bundle: &Path) -> Result<()> {
 /// none of which is a resource the page fetches, and all of which would have to
 /// be dismissed by hand before anything could ever be published.
 pub fn pins_for(bundle: &Path, class: mecha_manifest::ContentClass) -> Result<Vec<Vendored>> {
+    // A dashboard (the `hud` template) carries its renderer — mecha's own
+    // build, with Vega inside — in `renderer/`. A script is scanned bluntly
+    // and a chart library is full of address strings it never fetches (an SVG
+    // namespace, its schema's URL), so the tree is pinned by digest instead:
+    // a new renderer build is a digest change a review sees. Its CSP is the
+    // control on what it runs (`mecha/docs/LIVE-DASHBOARD-DESIGN.md` §6.1).
+    if class == mecha_manifest::ContentClass::Interactive {
+        let renderer = bundle.join(HUD_RENDERER_DIR);
+        if renderer.is_dir() {
+            return Ok(vec![Vendored {
+                path: PathBuf::from(HUD_RENDERER_DIR),
+                digest: crate::store::digest_tree(&renderer)?,
+                description: "mecha hud renderer (Vega)".to_string(),
+            }]);
+        }
+        return Ok(Vec::new());
+    }
     if class != mecha_manifest::ContentClass::Compute {
         return Ok(Vec::new());
     }
@@ -754,6 +774,37 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A dashboard's renderer is pinned by digest, not scanned: a chart
+    /// library is full of address strings it never fetches. The pin covers
+    /// `renderer/` alone, and only for an interactive bundle — anything else
+    /// the bundle carries is still scanned.
+    #[test]
+    fn a_dashboards_renderer_is_pinned_and_nothing_else_is() {
+        let s = Scratch::new("hud-pin");
+        s.write(
+            "index.html",
+            r#"<link rel="stylesheet" href="renderer/hud.css"><div id="hud"></div><script type="module" src="renderer/hud.js"></script>"#,
+        )
+        // A string the real build carries (Svelte's error docs): never fetched,
+        // and refused by a blunt scan of a script — which is why it is pinned.
+        .write("renderer/hud.js", r#"throw new Error("https://svelte.dev/e/effect_orphan");"#)
+        .write("renderer/hud.css", ".hud{}")
+        .write("hud.json", r#"{"version":1}"#);
+        let interactive = mecha_manifest::ContentClass::Interactive;
+        gate_for_publish(&s.0, interactive).expect("the pinned renderer passes");
+        let pins = pins_for(&s.0, interactive).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].path, PathBuf::from(HUD_RENDERER_DIR));
+        assert!(pins[0].digest.starts_with("sha256:"), "{}", pins[0].digest);
+
+        // Not an interactive bundle: the same tree is scanned, and refused.
+        assert!(gate_for_publish(&s.0, mecha_manifest::ContentClass::Static).is_err());
+
+        // A script outside `renderer/` is scanned like any other.
+        s.write("extra.js", r#"fetch("https://tracker.example/x")"#);
+        assert!(gate_for_publish(&s.0, interactive).is_err());
     }
 
     /// The distinction the whole gate turns on. A briefing that could not link
