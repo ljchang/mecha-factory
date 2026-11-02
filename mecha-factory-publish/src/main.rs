@@ -1257,11 +1257,16 @@ fn type_command(action: TypeAction) -> Result<()> {
             // Only after the box accepted it. The local copy is what a later
             // drain validates against, so it must be the manifest actually
             // being served — not one that failed on the way there.
+            // Missing is the only silent case; a file that would not read is
+            // passed on as an error, for the note to say so.
             let kept = mecha_factory_publish::requests::types_dir()
                 .ok()
-                .and_then(|d| std::fs::read_to_string(d.join(format!("{}.toml", parsed.id))).ok());
-            let displaced =
-                mecha_factory_publish::requests::hours_displaced(kept.as_deref(), &parsed);
+                .map(|d| d.join(format!("{}.toml", parsed.id)))
+                .and_then(|path| match std::fs::read_to_string(path) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    read => Some(read),
+                });
+            let displaced = mecha_factory_publish::requests::hours_displaced(kept, &parsed);
             let local = mecha_factory_publish::requests::remember_type(&text, &parsed.id)?;
             if let Some(note) = displaced {
                 eprintln!("note: {note}");

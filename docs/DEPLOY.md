@@ -723,8 +723,10 @@ deployment, all home-side except the first:
    box does read `timezone`, to label the week grid and the confirmation's
    times, so a timezone change is a `type push`. A later `type push` replaces
    the whole file, hours included, and prints a note when the hours it
-   replaced differ from the ones it pushed: carry any hours set at home into
-   your working copy first. (`--policy <file>` still reads a standalone copy
+   replaced differ from the ones it pushed (or when the home copy would not
+   read or parse). The note cannot tell which side is newer: if you set
+   hours at home since your last push, carry them into your working copy
+   before pushing it. (`--policy <file>` still reads a standalone copy
    of the section, the older two-file shape.)
 4. **The two user timers.** `mecha-slots.{service,timer}` (the two-minute
    slot refresh + booking sweep) and the existing frontdoor timer. Both:

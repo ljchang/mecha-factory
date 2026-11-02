@@ -286,17 +286,48 @@ pub fn local_type(id: &str) -> Result<Option<RequestType>> {
 /// before it replaces the file. A push from a working copy taken before such an edit would put the
 /// old hours back silently; this is what says so, the way a profile push
 /// says what it displaced.
-pub fn hours_displaced(kept: Option<&str>, pushed: &RequestType) -> Option<String> {
-    let kept = RequestType::from_toml(kept?).ok()?;
+pub fn hours_displaced(
+    kept: Option<std::io::Result<String>>,
+    pushed: &RequestType,
+) -> Option<String> {
+    // Three cases, never collapsed: no home copy is silence; a home copy
+    // that cannot be read or parsed is said, since it may hold hours set at
+    // home (an in-place edit that does not parse is the failure this file is
+    // exposed to) and the push is about to replace it unread.
+    let text = match kept? {
+        Ok(text) => text,
+        Err(e) => {
+            return Some(format!(
+                "home's `{}.toml` could not be read ({e}), so any hours it held are \
+                 replaced by this push's",
+                pushed.id
+            ))
+        }
+    };
+    let kept = match RequestType::from_toml(&text) {
+        Ok(kept) => kept,
+        Err(e) => {
+            return Some(format!(
+                "home's `{}.toml` did not parse ({e}), so any hours it held are replaced \
+                 by this push's",
+                pushed.id
+            ))
+        }
+    };
     let before = kept.availability_toml()?.ok()?;
     let after = pushed.availability_toml()?.ok()?;
     if before == after {
         return None;
     }
+    // Only the difference is known, not its direction: the home copy is
+    // both the record of the last push and the in-place edit target, so a
+    // deliberate change in the working copy and hours set at home since the
+    // push look the same from here.
     Some(format!(
-        "this push replaced the hours home had for `{}`, which differed from the \
-         pushed file's [availability] (set since the last push — perhaps in the web \
-         Factory view). The slot timer now computes from the pushed hours.",
+        "the hours home had for `{}` differed from the ones this push replaced them \
+         with. If they were set at home since the last push (the web Factory view, or \
+         an edit in place), they are gone — the slot timer now computes from the \
+         pushed hours.",
         pushed.id
     ))
 }
@@ -799,14 +830,24 @@ field = "requester_email"
         let base = include_str!("../../mecha-manifest/types/book.toml");
         let pushed = RequestType::from_toml(base).unwrap();
         // Same hours: nothing to say. No home copy, or a form: nothing to say.
-        assert!(hours_displaced(Some(base), &pushed).is_none());
+        let kept = |t: &str| Some(Ok(t.to_string()));
+        assert!(hours_displaced(kept(base), &pushed).is_none());
         assert!(hours_displaced(None, &pushed).is_none());
         let letter = include_str!("../../mecha-manifest/types/letter.toml");
-        assert!(hours_displaced(Some(letter), &RequestType::from_toml(letter).unwrap()).is_none());
-        // Hours edited at home since: the push names what it put back.
+        assert!(hours_displaced(kept(letter), &RequestType::from_toml(letter).unwrap()).is_none());
+        // Hours that differ: named, without claiming which side is newer.
         let edited = base.replacen("start = \"13:00\"", "start = \"14:00\"", 1);
         assert_ne!(edited, base);
-        let said = hours_displaced(Some(&edited), &pushed).expect("a changed window is named");
-        assert!(said.contains("replaced the hours"), "{said}");
+        let said = hours_displaced(kept(&edited), &pushed).expect("a changed window is named");
+        assert!(
+            said.contains("differed") && said.contains("If they were set at home"),
+            "{said}"
+        );
+        // A home copy that would not parse or read is said, never silent.
+        let said = hours_displaced(kept("id = ["), &pushed).expect("unparseable is named");
+        assert!(said.contains("did not parse"), "{said}");
+        let unreadable = Some(Err(std::io::Error::other("permission denied")));
+        let said = hours_displaced(unreadable, &pushed).expect("unreadable is named");
+        assert!(said.contains("could not be read"), "{said}");
     }
 }
