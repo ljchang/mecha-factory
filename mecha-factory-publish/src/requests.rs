@@ -331,8 +331,10 @@ pub fn hours_displaced(
     // is the displacement this exists to name, not a case to skip.
     let Some(after) = pushed.availability_toml() else {
         return Some(format!(
-            "home's `{}` was a booking page with hours; this push makes it a form, so \
-             those hours are gone and the slot pipeline has nothing to compute from",
+            "home's `{0}` was a booking page with hours; this push makes it a form, so \
+             the slot pipeline has nothing to compute from. The hours it last pushed \
+             are in ~/.mecha/factory/freebusy/{0}.json (`.policy`) until the next \
+             slot push",
             pushed.id
         ));
     };
@@ -354,10 +356,12 @@ pub fn hours_displaced(
     // deliberate change in the working copy and hours set at home since the
     // push look the same from here.
     Some(format!(
-        "the hours home had for `{}` differed from the ones this push replaced them \
-         with. If they were set at home since the last push (the web Factory view, or \
-         an edit in place), they are gone — the slot timer now computes from the \
-         pushed hours.",
+        "the hours home had for `{0}` differed from the ones this push replaced them \
+         with, and the slot timer now computes from the pushed hours. If the old ones \
+         were set at home since the last push (the web Factory view, or an edit in \
+         place), the last slot push kept a copy in ~/.mecha/factory/freebusy/{0}.json \
+         (`.policy`) — copy it out now: the timer's next push, within two minutes, \
+         replaces it with these.",
         pushed.id
     ))
 }
@@ -898,7 +902,7 @@ field = "requester_email"
         assert_ne!(edited, base);
         let said = hours_displaced(kept(&edited), &pushed).expect("a changed window is named");
         assert!(
-            said.contains("differed") && said.contains("If they were set at home"),
+            said.contains("differed") && said.contains("freebusy/book.json"),
             "{said}"
         );
         // A home copy that would not parse or read is said, never silent.

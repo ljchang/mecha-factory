@@ -737,8 +737,9 @@ deployment, all home-side except the first:
 Then book a slot yourself, end to end, before sending the link to anyone:
 the confirmation invite should arrive from your own mailbox, the manage
 link in its description should cancel, and the withdrawal should follow.
-Polls: `mecha-mail freebusy --days 60 --json | factory-publish polls create
-book <id> --policy … --title … --duration 60 --participant "Name=email"`,
+Polls: `factory-publish polls create book <id> --title … --duration 60
+--participant "Name=email"` (the hours and busy time come from what the slot
+timer last pushed; `--policy` plus piped freebusy is the older override),
 send each person their URL, watch `polls status`, and book the winner when
 it names one.
 

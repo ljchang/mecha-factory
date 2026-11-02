@@ -2850,7 +2850,9 @@ mod tests {
             Some(cache(now - chrono::Duration::days(3), 15)),
             "mecha-slots.timer",
         );
-        refuse(Some(cache(fresh, 7)), "short of the 14-day horizon");
+        // The cache is refreshed only by the timer, so its coverage refusal
+        // names the timer's --days rather than a command that cannot help.
+        refuse(Some(cache(fresh, 7)), "mecha-slots.service");
     }
 
     /// `slots push` takes its policy from exactly one place, and a manifest

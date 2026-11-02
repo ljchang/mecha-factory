@@ -970,13 +970,27 @@ pub fn check_busy(
             local(time_min)
         );
         let horizon_end = generated_at + chrono::Duration::days(i64::from(horizon_days));
-        anyhow::ensure!(
-            time_max >= horizon_end,
-            "the busy time ends {}, short of the {horizon_days}-day horizon ({}) — run \
-             `mecha-mail freebusy --days {horizon_days}` or more",
-            local(time_max),
-            local(horizon_end)
-        );
+        // The remedy depends on whose data it is, as the freshness refusal's
+        // does: piped busy time is re-fetched by hand, but the cache is only
+        // refreshed by the timer, whose `--days` is what has to grow.
+        if time_max < horizon_end {
+            match cached_at {
+                Some(_) => anyhow::bail!(
+                    "the slots pipeline fetched busy time to {}, short of a \
+                     {horizon_days}-day horizon ({}) — the timer's `mecha-mail freebusy \
+                     --days` (mecha-slots.service) must be at least {horizon_days} before a \
+                     horizon this long can be previewed or pushed",
+                    local(time_max),
+                    local(horizon_end)
+                ),
+                None => anyhow::bail!(
+                    "the busy time ends {}, short of the {horizon_days}-day horizon ({}) — run \
+                     `mecha-mail freebusy --days {horizon_days}` or more",
+                    local(time_max),
+                    local(horizon_end)
+                ),
+            }
+        }
     }
     Ok(())
 }
@@ -1789,6 +1803,11 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("short of the 60-day horizon"), "{err}");
+        // The cache's short window names the timer, which is what fetches it.
+        let err = check_busy(fresh, Some(fresh), window(30), tz, now)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("mecha-slots.service"), "{err}");
         let late = Some((
             fresh + chrono::Duration::minutes(5),
             fresh + chrono::Duration::days(61),
