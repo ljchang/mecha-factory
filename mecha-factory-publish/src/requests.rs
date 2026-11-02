@@ -272,6 +272,30 @@ pub fn local_type(id: &str) -> Result<Option<RequestType>> {
     Ok(Some(RequestType::from_toml(&text)?))
 }
 
+/// Whether recording `pushed` over `kept` (the home copy, or nothing) would
+/// replace hours that differ — a sentence for the owner, or `None`.
+///
+/// The home copy's `[availability]` is the one part of it edited in place:
+/// the box never computes from it and the drain never validates against it,
+/// so the slot timer and the web Factory view read and write the hours
+/// there. A push from a working copy taken before such an edit would put the
+/// old hours back silently; this is what says so, the way a profile push
+/// says what it displaced.
+pub fn hours_displaced(kept: Option<&str>, pushed: &RequestType) -> Option<String> {
+    let kept = RequestType::from_toml(kept?).ok()?;
+    let before = kept.availability_toml()?.ok()?;
+    let after = pushed.availability_toml()?.ok()?;
+    if before == after {
+        return None;
+    }
+    Some(format!(
+        "this push replaced the hours home had for `{}`, which differed from the \
+         pushed file's [availability] (set since the last push — perhaps in the web \
+         Factory view). The slot timer now computes from the pushed hours.",
+        pushed.id
+    ))
+}
+
 /// Record a pushed manifest, so a later drain can validate against it.
 pub fn remember_type(manifest: &str, id: &str) -> Result<PathBuf> {
     let dir = types_dir()?;
@@ -763,5 +787,21 @@ field = "requester_email"
             "machinery is typed data, never swept prose: {:?}",
             record.free_text
         );
+    }
+
+    #[test]
+    fn a_push_says_when_it_replaces_hours_home_had() {
+        let base = include_str!("../../mecha-manifest/types/book.toml");
+        let pushed = RequestType::from_toml(base).unwrap();
+        // Same hours: nothing to say. No home copy, or a form: nothing to say.
+        assert!(hours_displaced(Some(base), &pushed).is_none());
+        assert!(hours_displaced(None, &pushed).is_none());
+        let letter = include_str!("../../mecha-manifest/types/letter.toml");
+        assert!(hours_displaced(Some(letter), &RequestType::from_toml(letter).unwrap()).is_none());
+        // Hours edited at home since: the push names what it put back.
+        let edited = base.replacen("start = \"13:00\"", "start = \"14:00\"", 1);
+        assert_ne!(edited, base);
+        let said = hours_displaced(Some(&edited), &pushed).expect("a changed window is named");
+        assert!(said.contains("replaced the hours"), "{said}");
     }
 }

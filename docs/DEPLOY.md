@@ -699,21 +699,27 @@ deployment, all home-side except the first:
    at home. The narrowest credential the box knows: it can replace an
    instrument's slot cache and run its polls, nothing else — sized for the
    systemd timer it lives beside.
-2. **The booking type, from the file home keeps.** Copy the starter to
-   `~/.mecha/factory/types/book.toml`, edit the windows (they are your
-   week), and `factory-publish type push ~/.mecha/factory/types/book.toml`.
-   The page is then live at `https://<gate>/s/<handle>/book`, honestly empty
-   until the first slot push. Push from that path, not the repo's starter:
-   it is the one file the pipeline and the web Factory view read.
-3. **What each side reads of it.** The slot pipeline computes from
-   `[availability]` (`slots push book --manifest ~/.mecha/factory/types/book.toml`).
-   The box never computes from it, but it does read one field:
-   `timezone`, which labels the week grid and the confirmation's times. So
-   an hours edit (windows, dates off, lengths, notice, horizon, cap) reaches
-   the page with the next slot push alone, and **a timezone edit needs a
-   `type push` too**, or the page labels new-zone slots in the old zone.
-   (`--policy <file>` still reads a standalone copy of the section, the
-   older two-file shape.)
+2. **The booking type.** Edit a working copy of
+   `mecha-manifest/types/book.toml` (the windows are your week) and
+   `factory-publish type push` it. The page is then live at
+   `https://<gate>/s/<handle>/book`, honestly empty until the first slot
+   push, and the push records what the box accepted at
+   `~/.mecha/factory/types/book.toml`. That file is the record of what is
+   being **served**, and the drain validates strangers' submissions against
+   it, so its fields are never edited in place: a field change is an edit to
+   your working copy and another `type push`.
+3. **The hours live in that served copy.** One part of it is edited in
+   place: `[availability]`, other than `timezone`. The box never computes
+   from those keys and the drain never validates against them, so the slot
+   pipeline reads them there (`slots push book --manifest
+   ~/.mecha/factory/types/book.toml`) and the web Factory view writes them
+   there. An hours edit reaches the page with the next slot push alone. The
+   box does read `timezone`, to label the week grid and the confirmation's
+   times, so a timezone change is a `type push`. A later `type push` replaces
+   the whole file, hours included, and prints a note when the hours it
+   replaced differ from the ones it pushed: carry any hours set at home into
+   your working copy first. (`--policy <file>` still reads a standalone copy
+   of the section, the older two-file shape.)
 4. **The two user timers.** `mecha-slots.{service,timer}` (the 15-minute
    slot refresh + booking sweep) and the existing frontdoor timer. Both:
    `cp scripts/mecha-slots.* ~/.config/systemd/user/ && systemctl --user

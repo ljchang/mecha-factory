@@ -1257,7 +1257,15 @@ fn type_command(action: TypeAction) -> Result<()> {
             // Only after the box accepted it. The local copy is what a later
             // drain validates against, so it must be the manifest actually
             // being served — not one that failed on the way there.
+            let kept = mecha_factory_publish::requests::types_dir()
+                .ok()
+                .and_then(|d| std::fs::read_to_string(d.join(format!("{}.toml", parsed.id))).ok());
+            let displaced =
+                mecha_factory_publish::requests::hours_displaced(kept.as_deref(), &parsed);
             let local = mecha_factory_publish::requests::remember_type(&text, &parsed.id)?;
+            if let Some(note) = displaced {
+                eprintln!("note: {note}");
+            }
 
             println!(
                 "{} — {} field(s) — is live at",
@@ -1811,30 +1819,15 @@ fn slots_push_command(
     // `--days 60` structurally unable to satisfy a 60-day horizon (found by
     // running the documented pipeline, not by reading it) — and the anchor
     // buys the property the timer unit promises anyway: the same input
-    // produces the same slots. Staleness of the anchor is bounded first.
-    anyhow::ensure!(
-        chrono::Utc::now() - generated_at <= chrono::Duration::hours(1),
-        "this freebusy answer is from {generated_at}, over an hour old — refusing to \
-         push stale availability; re-run the pipeline"
-    );
-
-    // The busy data has to cover everything the policy would offer. Data
-    // that stops short of the horizon says nothing about the far weeks, and
-    // "nothing known" rendered as "nothing busy" is exactly the lie this
-    // refuses to tell.
-    let horizon_end = generated_at + chrono::Duration::days(i64::from(policy.horizon_days));
-    anyhow::ensure!(
-        time_max >= horizon_end,
-        "the freebusy window ends {time_max}, short of the {}-day horizon ({horizon_end}) — \
-         run `mecha-mail freebusy --days {}` or more",
-        policy.horizon_days,
-        policy.horizon_days
-    );
-    anyhow::ensure!(
-        time_min <= generated_at,
-        "the freebusy window starts at {time_min}, after its own generated_at — \
-         the busy data must cover the present"
-    );
+    // produces the same slots. Its staleness and its coverage are bounded
+    // first, by the check every reader of busy time shares.
+    mecha_factory_publish::lifecycle::check_busy(
+        generated_at,
+        None,
+        Some((time_min, time_max, policy.horizon_days)),
+        policy.timezone,
+        chrono::Utc::now(),
+    )?;
 
     // Open meeting polls hold their candidates (SCHEDULING-DESIGN.md §5.5):
     // the page must not sell a slot a poll is still asking about. Bookings
@@ -1897,81 +1890,23 @@ fn slots_push_command(
 
 /// `slots preview`: the draft's slots over the pipeline's cached busy time.
 fn slots_preview_command(id: &str, manifest: &std::path::Path, json: bool) -> Result<()> {
-    use mecha_factory_publish::availability::{self, Interval};
-
     let (path, policy_text) = slots_policy_source(id, None, Some(manifest))?;
-    let policy = availability::Policy::from_toml(&policy_text)
+    let policy = mecha_factory_publish::availability::Policy::from_toml(&policy_text)
         .with_context(|| format!("{}", path.display()))?;
-    let Some(cached) = mecha_factory_publish::lifecycle::cached_freebusy(id)? else {
-        bail!(
-            "the slots pipeline has never pushed `{id}` on this machine, so there is no busy \
-             time to preview against — check mecha-slots.timer"
-        );
-    };
-    #[derive(serde::Deserialize)]
-    struct FreebusyDoc {
-        generated_at: chrono::DateTime<chrono::Utc>,
-        time_max: chrono::DateTime<chrono::Utc>,
-        busy: Vec<Interval>,
-    }
-    let doc: FreebusyDoc = serde_json::from_value(cached.freebusy)
-        .context("the cached freebusy is not `mecha-mail freebusy --json` output")?;
-    // Everything below is anchored to the cache's own stamp, as the push
-    // is — which is only honest while that stamp is recent. A cache from a
-    // timer that stopped days ago would preview slots measured from then,
-    // some already past, with nothing in the answer saying so. The same
-    // bound and sentence the push and a meeting poll's creation use.
-    let age = chrono::Utc::now() - doc.generated_at;
-    if age > chrono::Duration::hours(1) {
-        bail!(
-            "the slots pipeline's busy time is from {} (it last ran {}) — over an hour old; \
-             check `systemctl --user status mecha-slots.timer`",
-            doc.generated_at
-                .with_timezone(&policy.timezone)
-                .format("%a %H:%M %Z"),
-            cached
-                .cached_at
-                .with_timezone(&policy.timezone)
-                .format("%a %H:%M %Z")
-        );
-    }
-    // The same refusal the push makes, for the same reason: past the end of
-    // the busy data, "nothing known" would preview as "nothing busy".
-    let horizon_end = doc.generated_at + chrono::Duration::days(i64::from(policy.horizon_days));
-    anyhow::ensure!(
-        doc.time_max >= horizon_end,
-        "the cached busy time ends {}, short of a {}-day horizon — the pipeline fetches \
-         fewer days than this draft would offer",
-        doc.time_max,
-        policy.horizon_days
-    );
+    let cached = mecha_factory_publish::lifecycle::cached_freebusy(id)?;
     let holds = mecha_factory_publish::lifecycle::open_holds()?;
-    let slots = availability::availability(&policy, &doc.busy, &holds, &[], doc.generated_at);
+    let answer = slots_preview(id, &policy, cached, &holds, chrono::Utc::now())?;
     if json {
-        println!(
-            "{}",
-            serde_json::json!({
-                "instrument": id,
-                "timezone": policy.timezone.name(),
-                "horizon_days": policy.horizon_days,
-                "busy_generated_at": doc.generated_at,
-                "busy_age_seconds": age.num_seconds(),
-                "last_pushed_at": cached.cached_at,
-                "held_by_polls": holds.len(),
-                "slots": slots,
-            })
-        );
+        println!("{answer}");
         return Ok(());
     }
+    let slots: Vec<mecha_factory_publish::availability::Slot> =
+        serde_json::from_value(answer["slots"].clone())?;
     println!(
-        "{} slot(s) for `{id}` over {} days, from busy time {} min old (last push {})",
+        "{} slot(s) for `{id}` over {} days, from busy time {} min old",
         slots.len(),
         policy.horizon_days,
-        age.num_minutes(),
-        cached
-            .cached_at
-            .with_timezone(&policy.timezone)
-            .format("%a %H:%M %Z")
+        answer["busy_age_seconds"].as_i64().unwrap_or(0) / 60,
     );
     for slot in &slots {
         let local = slot.start.with_timezone(&policy.timezone);
@@ -1982,6 +1917,56 @@ fn slots_preview_command(id: &str, manifest: &std::path::Path, json: bool) -> Re
         );
     }
     Ok(())
+}
+
+/// The preview's answer from its inputs — the cache, the holds and the
+/// clock passed in, so the refusals and the shape are testable without a
+/// home directory.
+fn slots_preview(
+    id: &str,
+    policy: &mecha_factory_publish::availability::Policy,
+    cached: Option<mecha_factory_publish::lifecycle::CachedFreebusy>,
+    holds: &[mecha_factory_publish::availability::Interval],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<serde_json::Value> {
+    use mecha_factory_publish::availability::{self, Interval};
+    let Some(cached) = cached else {
+        bail!(
+            "the slots pipeline has never pushed `{id}` on this machine, so there is no busy \
+             time to preview against — check mecha-slots.timer"
+        );
+    };
+    #[derive(serde::Deserialize)]
+    struct FreebusyDoc {
+        generated_at: chrono::DateTime<chrono::Utc>,
+        time_min: chrono::DateTime<chrono::Utc>,
+        time_max: chrono::DateTime<chrono::Utc>,
+        busy: Vec<Interval>,
+    }
+    let doc: FreebusyDoc = serde_json::from_value(cached.freebusy)
+        .context("the cached freebusy is not `mecha-mail freebusy --json` output")?;
+    // Anchored to the cache's own stamp, as the push is — so the same
+    // freshness and coverage the push demands, by the same check: a cache
+    // from a timer stopped days ago would otherwise preview slots measured
+    // from then, some already past.
+    mecha_factory_publish::lifecycle::check_busy(
+        doc.generated_at,
+        Some(cached.cached_at),
+        Some((doc.time_min, doc.time_max, policy.horizon_days)),
+        policy.timezone,
+        now,
+    )?;
+    let slots = availability::availability(policy, &doc.busy, holds, &[], doc.generated_at);
+    Ok(serde_json::json!({
+        "instrument": id,
+        "timezone": policy.timezone.name(),
+        "horizon_days": policy.horizon_days,
+        "busy_generated_at": doc.generated_at,
+        "busy_age_seconds": (now - doc.generated_at).num_seconds(),
+        "last_pushed_at": cached.cached_at,
+        "held_by_polls": holds.len(),
+        "slots": slots,
+    }))
 }
 
 /// Where the slot pipeline's policy comes from, as the standalone text a
@@ -2010,6 +1995,14 @@ fn slots_policy_source(
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     let manifest = mecha_manifest::RequestType::from_toml(&text)
         .with_context(|| format!("{}", path.display()))?;
+    // The bar `type push` sets, both halves: a booking page nobody could
+    // submit has no business offering strangers its hours either.
+    manifest.servable().with_context(|| {
+        format!(
+            "`{}` cannot be served as a form, so it offers no slots",
+            manifest.id
+        )
+    })?;
     anyhow::ensure!(
         manifest.id == id,
         "{} is the manifest for `{}`, not `{id}`",
@@ -2717,7 +2710,7 @@ mod surface {
             "slots push",
             NotATool(
                 "a scheduled command with no model anywhere: a systemd timer runs it every \
-                 two minutes against live freebusy. An agent calling it would race the \
+                 fifteen minutes against live freebusy. An agent calling it would race the \
                  timer to publish availability, and everything it refuses it refuses \
                  loudly because the failure mode is offering strangers time the user does \
                  not have.",
@@ -2801,6 +2794,61 @@ mod tests {
     use super::Reach;
     use clap::CommandFactory;
     use std::collections::BTreeSet;
+
+    /// The preview's answer: the shape the web editor reads, and the three
+    /// refusals — never pushed, stale, short of the horizon.
+    #[test]
+    fn the_preview_answers_in_its_shape_and_refuses_what_the_push_would() {
+        use chrono::TimeZone;
+        use mecha_factory_publish::lifecycle::CachedFreebusy;
+        let policy = mecha_factory_publish::availability::Policy::from_toml(
+            "timezone = \"America/New_York\"\ndurations = [30]\nmin_notice_hours = 0\n\
+             horizon_days = 14\n[[windows]]\nday = \"tue\"\nstart = \"13:00\"\nend = \"14:00\"\n",
+        )
+        .unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 11, 2, 18, 0, 0).unwrap();
+        let cache = |generated: chrono::DateTime<chrono::Utc>, days: i64| CachedFreebusy {
+            instrument: "book".into(),
+            policy_path: "book.toml".into(),
+            policy: String::new(),
+            cached_at: generated,
+            freebusy: serde_json::json!({
+                "generated_at": generated,
+                "time_min": generated,
+                "time_max": generated + chrono::Duration::days(days),
+                "busy": [],
+            }),
+        };
+        let fresh = now - chrono::Duration::minutes(5);
+        let answer =
+            super::slots_preview("book", &policy, Some(cache(fresh, 15)), &[], now).unwrap();
+        for key in [
+            "timezone",
+            "horizon_days",
+            "busy_age_seconds",
+            "last_pushed_at",
+            "held_by_polls",
+        ] {
+            assert!(answer.get(key).is_some(), "{key} missing: {answer}");
+        }
+        assert_eq!(answer["busy_age_seconds"], 300);
+        // Two Tuesdays in fourteen days, two half-hour starts each.
+        assert_eq!(answer["slots"].as_array().unwrap().len(), 4, "{answer}");
+
+        let refuse = |cached: Option<CachedFreebusy>, says: &str| {
+            let err = super::slots_preview("book", &policy, cached, &[], now).unwrap_err();
+            assert!(
+                err.to_string().contains(says),
+                "`{err}` should say `{says}`"
+            );
+        };
+        refuse(None, "never pushed");
+        refuse(
+            Some(cache(now - chrono::Duration::days(3), 15)),
+            "mecha-slots.timer",
+        );
+        refuse(Some(cache(fresh, 7)), "short of the 14-day horizon");
+    }
 
     /// `slots push` takes its policy from exactly one place, and a manifest
     /// for one instrument never computes another's slots.

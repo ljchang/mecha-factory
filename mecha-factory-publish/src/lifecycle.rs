@@ -39,7 +39,7 @@
 //! `poll_meeting_create` is outbox-routed and executes at *release*, a file
 //! that was an hour old by the time anyone approved the poll. The
 //! `mecha-slots` timer already pipes fresh busy time through `slots push`
-//! every two minutes; `slots push` now writes what it saw, policy included,
+//! every fifteen minutes; `slots push` now writes what it saw, policy included,
 //! and a poll created without an explicit `freebusy` reads that. The
 //! freshness refusal is unchanged; it is now a statement about the timer.
 
@@ -898,6 +898,73 @@ pub fn cached_freebusy(instrument: &str) -> Result<Option<CachedFreebusy>> {
     ))
 }
 
+/// How old the slot pipeline's busy time may be before nothing may compute
+/// from it. Fifteen minutes is the timer's cadence; an hour is four missed
+/// ticks.
+pub const BUSY_MAX_AGE: chrono::Duration = chrono::Duration::hours(1);
+
+/// Whether busy time is fit to compute slots from — the one check every
+/// reader runs: the push, the editor's preview, and a meeting poll's
+/// creation. Three hand-written copies of this bound were three places to
+/// disagree about when stale busy time stops being publishable.
+///
+/// - **Fresh**: `generated_at` within [`BUSY_MAX_AGE`] of `now`. Everything
+///   downstream is anchored to that stamp, which is only honest while it is
+///   recent. With `cached_at` (the pipeline's own cache) the refusal names
+///   the timer, since that is what has stopped; without it, the answer that
+///   was piped in.
+/// - **Covering**, when `window` is given: the data starts no later than its
+///   own stamp and reaches the horizon. Past its end "nothing known" would
+///   read as "nothing busy", which is the lie offering strangers time is.
+///
+/// Stamps in refusals are in the page's zone (`tz`), the clock the slots
+/// themselves are read in.
+pub fn check_busy(
+    generated_at: DateTime<Utc>,
+    cached_at: Option<DateTime<Utc>>,
+    window: Option<(DateTime<Utc>, DateTime<Utc>, u32)>,
+    tz: chrono_tz::Tz,
+    now: DateTime<Utc>,
+) -> Result<()> {
+    let local = |t: DateTime<Utc>| {
+        t.with_timezone(&tz)
+            .format("%a %b %-d %H:%M %Z")
+            .to_string()
+    };
+    if now - generated_at > BUSY_MAX_AGE {
+        match cached_at {
+            Some(ran) => anyhow::bail!(
+                "the slots pipeline's busy time is from {} (it last ran {}) — over an hour \
+                 old; check `systemctl --user status mecha-slots.timer`",
+                local(generated_at),
+                local(ran)
+            ),
+            None => anyhow::bail!(
+                "this freebusy answer is from {}, over an hour old — refusing to compute \
+                 availability from it; re-run the pipeline",
+                local(generated_at)
+            ),
+        }
+    }
+    if let Some((time_min, time_max, horizon_days)) = window {
+        anyhow::ensure!(
+            time_min <= generated_at,
+            "the freebusy window starts at {}, after its own generated_at — the busy data \
+             must cover the present",
+            local(time_min)
+        );
+        let horizon_end = generated_at + chrono::Duration::days(i64::from(horizon_days));
+        anyhow::ensure!(
+            time_max >= horizon_end,
+            "the busy time ends {}, short of the {horizon_days}-day horizon ({}) — run \
+             `mecha-mail freebusy --days {horizon_days}` or more",
+            local(time_max),
+            local(horizon_end)
+        );
+    }
+    Ok(())
+}
+
 /// Every instrument the pipeline has cached for — the default when a create
 /// names none and there is exactly one.
 pub fn cached_instruments() -> Result<Vec<String>> {
@@ -1662,5 +1729,58 @@ mod tests {
             at: t("2030-01-30T10:03:00Z"),
         });
         assert_eq!(life.summary(), "booked (your pick)");
+    }
+
+    #[test]
+    fn busy_time_is_refused_when_stale_or_short_and_named_by_whose_it_is() {
+        use chrono::TimeZone;
+        let tz: chrono_tz::Tz = "America/New_York".parse().unwrap();
+        let now = Utc.with_ymd_and_hms(2026, 11, 2, 18, 0, 0).unwrap();
+        let fresh = now - chrono::Duration::minutes(10);
+        let window = |days: i64| {
+            Some((
+                fresh - chrono::Duration::minutes(1),
+                fresh + chrono::Duration::days(days),
+                60,
+            ))
+        };
+        assert!(check_busy(fresh, Some(fresh), window(60), tz, now).is_ok());
+        assert!(
+            check_busy(fresh, None, None, tz, now).is_ok(),
+            "no window, no coverage check"
+        );
+
+        // Over the bound: the cache's refusal names the timer, a piped
+        // answer's says to re-run, and both read in the page's zone.
+        let stale = now - chrono::Duration::days(3);
+        let err = check_busy(stale, Some(stale), window(60), tz, now)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("over an hour old") && err.contains("mecha-slots.timer"),
+            "{err}"
+        );
+        assert!(err.contains("EDT") || err.contains("EST"), "{err}");
+        let err = check_busy(stale, None, None, tz, now)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("re-run the pipeline"), "{err}");
+        // Just inside the bound is fresh.
+        assert!(check_busy(now - BUSY_MAX_AGE, None, None, tz, now).is_ok());
+
+        // Short of the horizon, and starting after its own stamp.
+        let err = check_busy(fresh, None, window(30), tz, now)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("short of the 60-day horizon"), "{err}");
+        let late = Some((
+            fresh + chrono::Duration::minutes(5),
+            fresh + chrono::Duration::days(61),
+            60,
+        ));
+        let err = check_busy(fresh, None, late, tz, now)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("must cover the present"), "{err}");
     }
 }
