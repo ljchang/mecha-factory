@@ -455,7 +455,8 @@ enum SlotsAction {
     /// The editor's preview: a person changing their hours sees the page
     /// their change would serve before it serves it. The busy time is the
     /// pipeline's own cache (fifteen minutes old at most while the timer
-    /// runs), and its age is in the answer rather than hidden behind it.
+    /// runs); over an hour old it is refused, naming the timer, as the push
+    /// refuses it.
     Preview {
         /// The instrument whose cached busy time to read.
         id: String,
@@ -1915,6 +1916,25 @@ fn slots_preview_command(id: &str, manifest: &std::path::Path, json: bool) -> Re
     }
     let doc: FreebusyDoc = serde_json::from_value(cached.freebusy)
         .context("the cached freebusy is not `mecha-mail freebusy --json` output")?;
+    // Everything below is anchored to the cache's own stamp, as the push
+    // is — which is only honest while that stamp is recent. A cache from a
+    // timer that stopped days ago would preview slots measured from then,
+    // some already past, with nothing in the answer saying so. The same
+    // bound and sentence the push and a meeting poll's creation use.
+    let age = chrono::Utc::now() - doc.generated_at;
+    if age > chrono::Duration::hours(1) {
+        bail!(
+            "the slots pipeline's busy time is from {} (it last ran {}) — over an hour old; \
+             check `systemctl --user status mecha-slots.timer`",
+            doc.generated_at
+                .with_timezone(&policy.timezone)
+                .format("%a %H:%M %Z"),
+            cached
+                .cached_at
+                .with_timezone(&policy.timezone)
+                .format("%a %H:%M %Z")
+        );
+    }
     // The same refusal the push makes, for the same reason: past the end of
     // the busy data, "nothing known" would preview as "nothing busy".
     let horizon_end = doc.generated_at + chrono::Duration::days(i64::from(policy.horizon_days));
@@ -1935,6 +1955,7 @@ fn slots_preview_command(id: &str, manifest: &std::path::Path, json: bool) -> Re
                 "timezone": policy.timezone.name(),
                 "horizon_days": policy.horizon_days,
                 "busy_generated_at": doc.generated_at,
+                "busy_age_seconds": age.num_seconds(),
                 "last_pushed_at": cached.cached_at,
                 "held_by_polls": holds.len(),
                 "slots": slots,
@@ -1943,11 +1964,14 @@ fn slots_preview_command(id: &str, manifest: &std::path::Path, json: bool) -> Re
         return Ok(());
     }
     println!(
-        "{} slot(s) for `{id}` over {} days, from busy time generated {} (last push {})",
+        "{} slot(s) for `{id}` over {} days, from busy time {} min old (last push {})",
         slots.len(),
         policy.horizon_days,
-        doc.generated_at,
-        cached.cached_at
+        age.num_minutes(),
+        cached
+            .cached_at
+            .with_timezone(&policy.timezone)
+            .format("%a %H:%M %Z")
     );
     for slot in &slots {
         let local = slot.start.with_timezone(&policy.timezone);

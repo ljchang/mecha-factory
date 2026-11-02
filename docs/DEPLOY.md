@@ -699,16 +699,21 @@ deployment, all home-side except the first:
    at home. The narrowest credential the box knows: it can replace an
    instrument's slot cache and run its polls, nothing else — sized for the
    systemd timer it lives beside.
-2. **The booking type.** `factory-publish type push
-   mecha-manifest/types/book.toml` (edit the windows first — they are your
-   week). The page is then live at `https://<gate>/s/<handle>/book`,
-   honestly empty until the first slot push.
-3. **The manifest at home.** Keep that book.toml at
-   `~/.mecha/factory/types/book.toml`: the slot pipeline reads its
-   `[availability]` section with `slots push book --manifest …`, and the box
-   ignores that section entirely. One file, so the hours the page offers and
-   the hours the pipeline computes cannot disagree. (`--policy <file>` still
-   reads a standalone copy of the section — the older two-file shape.)
+2. **The booking type, from the file home keeps.** Copy the starter to
+   `~/.mecha/factory/types/book.toml`, edit the windows (they are your
+   week), and `factory-publish type push ~/.mecha/factory/types/book.toml`.
+   The page is then live at `https://<gate>/s/<handle>/book`, honestly empty
+   until the first slot push. Push from that path, not the repo's starter:
+   it is the one file the pipeline and the web Factory view read.
+3. **What each side reads of it.** The slot pipeline computes from
+   `[availability]` (`slots push book --manifest ~/.mecha/factory/types/book.toml`).
+   The box never computes from it, but it does read one field:
+   `timezone`, which labels the week grid and the confirmation's times. So
+   an hours edit (windows, dates off, lengths, notice, horizon, cap) reaches
+   the page with the next slot push alone, and **a timezone edit needs a
+   `type push` too**, or the page labels new-zone slots in the old zone.
+   (`--policy <file>` still reads a standalone copy of the section, the
+   older two-file shape.)
 4. **The two user timers.** `mecha-slots.{service,timer}` (the 15-minute
    slot refresh + booking sweep) and the existing frontdoor timer. Both:
    `cp scripts/mecha-slots.* ~/.config/systemd/user/ && systemctl --user
