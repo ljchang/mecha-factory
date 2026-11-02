@@ -327,14 +327,18 @@ pub fn hours_displaced(
             ))
         }
     };
+    // The replaced hours travel in the note itself, so they can be put back
+    // without pointing anyone — on the MCP path, a model — at another file:
+    // the only other copy is the slot pipeline's cache, which is the owner's
+    // whole busy calendar, and it may not exist on a machine that only
+    // pushes types.
+    let survives = format!(" The replaced hours, as they were:\n{}", before.trim_end());
     // A booking pushed over as a form: the hours are replaced by none, which
     // is the displacement this exists to name, not a case to skip.
     let Some(after) = pushed.availability_toml() else {
         return Some(format!(
-            "home's `{0}` was a booking page with hours; this push makes it a form, so \
-             the slot pipeline has nothing to compute from. The hours it last pushed \
-             are in ~/.mecha/factory/freebusy/{0}.json (`.policy`) until the next \
-             slot push",
+            "home's `{}` was a booking page with hours; this push makes it a form, so \
+             there are no hours left to compute slots from.{survives}",
             pushed.id
         ));
     };
@@ -343,7 +347,7 @@ pub fn hours_displaced(
         Err(e) => {
             return Some(format!(
                 "the pushed hours for `{}` could not be compared with home's ({e}); \
-                 home's are replaced by them",
+                 home's are replaced by them.{survives}",
                 pushed.id
             ))
         }
@@ -356,12 +360,10 @@ pub fn hours_displaced(
     // deliberate change in the working copy and hours set at home since the
     // push look the same from here.
     Some(format!(
-        "the hours home had for `{0}` differed from the ones this push replaced them \
-         with, and the slot timer now computes from the pushed hours. If the old ones \
-         were set at home since the last push (the web Factory view, or an edit in \
-         place), the last slot push kept a copy in ~/.mecha/factory/freebusy/{0}.json \
-         (`.policy`) — copy it out now: the timer's next push, within two minutes, \
-         replaces it with these.",
+        "the hours home had for `{}` differed from the ones this push replaced them \
+         with; anything computing slots from the served copy now uses the pushed \
+         hours. If the old ones were set at home since the last push (the web Factory \
+         view, or an edit in place), they were not in this push.{survives}",
         pushed.id
     ))
 }
@@ -901,8 +903,9 @@ field = "requester_email"
         let edited = base.replacen("start = \"13:00\"", "start = \"14:00\"", 1);
         assert_ne!(edited, base);
         let said = hours_displaced(kept(&edited), &pushed).expect("a changed window is named");
+        // The replaced hours are in the note itself, to be put back from.
         assert!(
-            said.contains("differed") && said.contains("freebusy/book.json"),
+            said.contains("differed") && said.contains("start = \"14:00\""),
             "{said}"
         );
         // A home copy that would not parse or read is said, never silent.
@@ -918,7 +921,7 @@ field = "requester_email"
     }
 
     #[test]
-    fn recording_a_push_notes_hours_set_at_home_on_either_path() {
+    fn recording_a_push_notes_hours_set_at_home() {
         let _env = crate::env_lock();
         let home = tempfile::tempdir().unwrap();
         std::env::set_var("MECHA_HOME", home.path());
