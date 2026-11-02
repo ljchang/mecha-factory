@@ -891,22 +891,16 @@ pub fn create_meeting(
     let generated_at = chrono::DateTime::parse_from_rfc3339(&freebusy.generated_at)
         .context("generated_at")?
         .with_timezone(&chrono::Utc);
-    let age = chrono::Utc::now() - generated_at;
-    if age > chrono::Duration::hours(1) {
-        // The sentence is about the timer, so it reports when `slots push`
-        // ran — not the freebusy document's own stamp, seconds earlier.
-        if let Some(ran) = cached_at {
-            bail!(
-                "the slots pipeline's busy time is from {} (it last ran {}) — over an hour \
-                 old; check `systemctl --user status mecha-slots.timer`",
-                generated_at
-                    .with_timezone(&policy.timezone)
-                    .format("%a %H:%M %Z"),
-                ran.with_timezone(&policy.timezone).format("%a %H:%M %Z")
-            );
-        }
-        bail!("this freebusy answer is over an hour old; re-run the pipeline");
-    }
+    // The check every reader of busy time shares; with the pipeline's cache
+    // its refusal names the timer, since the timer is what stopped.
+    // Coverage is `plan_meeting`'s to judge against the poll's own window.
+    lifecycle::check_busy(
+        generated_at,
+        cached_at,
+        None,
+        policy.timezone,
+        chrono::Utc::now(),
+    )?;
 
     let holds = lifecycle::open_holds()?;
     let plan = plan_meeting(&policy, &freebusy, &holds, request)?;

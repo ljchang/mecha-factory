@@ -423,23 +423,51 @@ enum SlotsAction {
     ///
     /// The write half of the slot-refresh pipeline:
     ///
-    ///   mecha-mail freebusy --days 60 --json | factory-publish slots push book --policy …
+    ///   mecha-mail freebusy --days 60 --json | factory-publish slots push book --manifest book.toml
     ///
     /// stdin is `mecha-mail freebusy --json` output. A scheduled command
-    /// with no model anywhere — a systemd timer runs it every fifteen
-    /// minutes, and everything it refuses (a stale answer, busy data that
+    /// with no model anywhere — a systemd timer runs it every two minutes
+    /// (`mecha-slots.timer`), and everything it refuses (a stale answer, busy data that
     /// stops short of the horizon) it refuses loudly, because the failure
     /// mode of pushing anyway is offering strangers time the user does not
     /// have.
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["policy", "manifest"])))]
     Push {
         /// The instrument whose cache to replace.
         id: String,
-        /// The availability policy TOML (the `[availability]` vocabulary).
+        /// A standalone availability policy TOML (the `[availability]`
+        /// vocabulary). The older shape: a second copy of what the manifest
+        /// says, kept in agreement by hand.
         #[arg(long)]
-        policy: PathBuf,
+        policy: Option<PathBuf>,
+        /// The booking manifest itself — its `[availability]` section is the
+        /// policy. One file for the page and the slots, so the two cannot
+        /// disagree; its `id` must be the instrument being pushed.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
         /// Compute and print the slots, pushing nothing.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// What a draft manifest would offer, from the busy time the last push
+    /// saw — no provider call, nothing pushed, nothing written.
+    ///
+    /// The editor's preview: a person changing their hours sees the slots
+    /// their change would push before it pushes them. The page then narrows
+    /// them by the bookings the box already holds, so a confirmed meeting's
+    /// time shows here and not there. The busy time is the
+    /// pipeline's own cache (two minutes old at most while the timer
+    /// runs); over an hour old it is refused, naming the timer, as the push
+    /// refuses it.
+    Preview {
+        /// The instrument whose cached busy time to read.
+        id: String,
+        /// The draft booking manifest. Checked whole, as `type check` would.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// One JSON object, for a program rather than a person.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -740,8 +768,12 @@ fn main() -> Result<()> {
         Command::Slots(SlotsAction::Push {
             id,
             policy,
+            manifest,
             dry_run,
-        }) => slots_push_command(&id, &policy, dry_run)?,
+        }) => slots_push_command(&id, policy.as_deref(), manifest.as_deref(), dry_run)?,
+        Command::Slots(SlotsAction::Preview { id, manifest, json }) => {
+            slots_preview_command(&id, &manifest, json)?
+        }
         Command::Dataset(action) => dataset_command(action)?,
         Command::Polls(action) => polls_command(action)?,
         Command::Profile(action) => record_command(Record::Profile, action)?,
@@ -1227,7 +1259,10 @@ fn type_command(action: TypeAction) -> Result<()> {
             // Only after the box accepted it. The local copy is what a later
             // drain validates against, so it must be the manifest actually
             // being served — not one that failed on the way there.
-            let local = mecha_factory_publish::requests::remember_type(&text, &parsed.id)?;
+            let (local, displaced) = mecha_factory_publish::requests::record_push(&text, &parsed)?;
+            if let Some(note) = displaced {
+                eprintln!("note: {note}");
+            }
 
             println!(
                 "{} — {} field(s) — is live at",
@@ -1740,11 +1775,15 @@ fn dataset_command(action: DatasetAction) -> Result<()> {
 /// Compute an instrument's slots from stdin's busy intervals and replace its
 /// cache on the box. Everything here fails closed: partial knowledge of the
 /// calendar must never become "free" on a public page.
-fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<()> {
+fn slots_push_command(
+    id: &str,
+    policy_file: Option<&std::path::Path>,
+    manifest: Option<&std::path::Path>,
+    dry_run: bool,
+) -> Result<()> {
     use mecha_factory_publish::availability::{self, Interval};
 
-    let policy_text = std::fs::read_to_string(policy_path)
-        .with_context(|| format!("reading {}", policy_path.display()))?;
+    let (policy_path, policy_text) = slots_policy_source(id, policy_file, manifest)?;
     let policy = availability::Policy::from_toml(&policy_text)
         .with_context(|| format!("{}", policy_path.display()))?;
 
@@ -1777,36 +1816,22 @@ fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<
     // `--days 60` structurally unable to satisfy a 60-day horizon (found by
     // running the documented pipeline, not by reading it) — and the anchor
     // buys the property the timer unit promises anyway: the same input
-    // produces the same slots. Staleness of the anchor is bounded first.
-    anyhow::ensure!(
-        chrono::Utc::now() - generated_at <= chrono::Duration::hours(1),
-        "this freebusy answer is from {generated_at}, over an hour old — refusing to \
-         push stale availability; re-run the pipeline"
-    );
-
-    // The busy data has to cover everything the policy would offer. Data
-    // that stops short of the horizon says nothing about the far weeks, and
-    // "nothing known" rendered as "nothing busy" is exactly the lie this
-    // refuses to tell.
-    let horizon_end = generated_at + chrono::Duration::days(i64::from(policy.horizon_days));
-    anyhow::ensure!(
-        time_max >= horizon_end,
-        "the freebusy window ends {time_max}, short of the {}-day horizon ({horizon_end}) — \
-         run `mecha-mail freebusy --days {}` or more",
-        policy.horizon_days,
-        policy.horizon_days
-    );
-    anyhow::ensure!(
-        time_min <= generated_at,
-        "the freebusy window starts at {time_min}, after its own generated_at — \
-         the busy data must cover the present"
-    );
+    // produces the same slots. Its staleness and its coverage are bounded
+    // first, by the check every reader of busy time shares.
+    mecha_factory_publish::lifecycle::check_busy(
+        generated_at,
+        None,
+        Some((time_min, time_max, policy.horizon_days)),
+        policy.timezone,
+        chrono::Utc::now(),
+    )?;
 
     // Open meeting polls hold their candidates (SCHEDULING-DESIGN.md §5.5):
     // the page must not sell a slot a poll is still asking about. Bookings
     // from the local ledger arrive with a later build step.
     let holds = mecha_factory_publish::lifecycle::open_holds()?;
-    let slots = availability::availability(&policy, &doc.busy, &holds, &[], generated_at);
+    let slots =
+        mecha_factory_publish::lifecycle::page_slots(&policy, &doc.busy, &holds, generated_at);
 
     if dry_run {
         println!(
@@ -1859,6 +1884,141 @@ fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<
         }
     );
     Ok(())
+}
+
+/// `slots preview`: the draft's slots over the pipeline's cached busy time.
+fn slots_preview_command(id: &str, manifest: &std::path::Path, json: bool) -> Result<()> {
+    let (path, policy_text) = slots_policy_source(id, None, Some(manifest))?;
+    let policy = mecha_factory_publish::availability::Policy::from_toml(&policy_text)
+        .with_context(|| format!("{}", path.display()))?;
+    let cached = mecha_factory_publish::lifecycle::cached_freebusy(id)?;
+    let holds = mecha_factory_publish::lifecycle::open_holds()?;
+    let answer = slots_preview(id, &policy, cached, &holds, chrono::Utc::now())?;
+    if json {
+        println!("{answer}");
+        return Ok(());
+    }
+    let slots: Vec<mecha_factory_publish::availability::Slot> =
+        serde_json::from_value(answer["slots"].clone())?;
+    println!(
+        "{} slot(s) for `{id}` over {} days, from busy time {} min old",
+        slots.len(),
+        policy.horizon_days,
+        answer["busy_age_seconds"].as_i64().unwrap_or(0) / 60,
+    );
+    for slot in &slots {
+        let local = slot.start.with_timezone(&policy.timezone);
+        println!(
+            "  {}  {:>3} min",
+            local.format("%a %Y-%m-%d %H:%M %Z"),
+            slot.duration_minutes
+        );
+    }
+    Ok(())
+}
+
+/// The preview's answer from its inputs — the cache, the holds and the
+/// clock passed in, so the refusals and the shape are testable without a
+/// home directory.
+fn slots_preview(
+    id: &str,
+    policy: &mecha_factory_publish::availability::Policy,
+    cached: Option<mecha_factory_publish::lifecycle::CachedFreebusy>,
+    holds: &[mecha_factory_publish::availability::Interval],
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<serde_json::Value> {
+    use mecha_factory_publish::availability::Interval;
+    let Some(cached) = cached else {
+        bail!(
+            "the slots pipeline has never pushed `{id}` on this machine, so there is no busy \
+             time to preview against — check mecha-slots.timer"
+        );
+    };
+    #[derive(serde::Deserialize)]
+    struct FreebusyDoc {
+        generated_at: chrono::DateTime<chrono::Utc>,
+        time_min: chrono::DateTime<chrono::Utc>,
+        time_max: chrono::DateTime<chrono::Utc>,
+        busy: Vec<Interval>,
+    }
+    let doc: FreebusyDoc = serde_json::from_value(cached.freebusy)
+        .context("the cached freebusy is not `mecha-mail freebusy --json` output")?;
+    // Anchored to the cache's own stamp, as the push is — so the same
+    // freshness and coverage the push demands, by the same check: a cache
+    // from a timer stopped days ago would otherwise preview slots measured
+    // from then, some already past.
+    mecha_factory_publish::lifecycle::check_busy(
+        doc.generated_at,
+        Some(cached.cached_at),
+        Some((doc.time_min, doc.time_max, policy.horizon_days)),
+        policy.timezone,
+        now,
+    )?;
+    let slots =
+        mecha_factory_publish::lifecycle::page_slots(policy, &doc.busy, holds, doc.generated_at);
+    Ok(serde_json::json!({
+        "instrument": id,
+        "timezone": policy.timezone.name(),
+        "horizon_days": policy.horizon_days,
+        "busy_generated_at": doc.generated_at,
+        "busy_age_seconds": (now - doc.generated_at).num_seconds(),
+        "last_pushed_at": cached.cached_at,
+        "held_slots": holds.len(),
+        "slots": slots,
+    }))
+}
+
+/// Where the slot pipeline's policy comes from, as the standalone text a
+/// later poll re-parses from the freebusy cache: the booking manifest's own
+/// `[availability]`, or a policy file beside it.
+///
+/// The manifest is checked whole — a manifest that would not `type push`
+/// does not get to compute what strangers are offered either — and its id
+/// must be the instrument's, or `slots push book --manifest office.toml`
+/// would quietly sell one page's hours on another.
+fn slots_policy_source(
+    id: &str,
+    policy_file: Option<&std::path::Path>,
+    manifest: Option<&std::path::Path>,
+) -> Result<(PathBuf, String)> {
+    // The id names the freebusy cache file and the box's URL on both
+    // branches, so it is checked once here — the --policy branch returns
+    // before any manifest could vouch for it.
+    mecha_manifest::valid_id(id, "instrument id")?;
+    let path = match (policy_file, manifest) {
+        (Some(p), None) => {
+            let text =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            return Ok((p.to_path_buf(), text));
+        }
+        (None, Some(m)) => m,
+        _ => bail!("pass exactly one of --policy and --manifest"),
+    };
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest = mecha_manifest::RequestType::from_toml(&text)
+        .with_context(|| format!("{}", path.display()))?;
+    // The bar `type push` sets, both halves: a booking page nobody could
+    // submit has no business offering strangers its hours either.
+    manifest.servable().with_context(|| {
+        format!(
+            "`{}` cannot be served as a form, so it offers no slots",
+            manifest.id
+        )
+    })?;
+    anyhow::ensure!(
+        manifest.id == id,
+        "{} is the manifest for `{}`, not `{id}`",
+        path.display(),
+        manifest.id
+    );
+    let Some(policy) = manifest.availability_toml() else {
+        bail!(
+            "{} is not a booking manifest — it has no [availability] to compute slots from",
+            path.display()
+        );
+    };
+    Ok((path.to_path_buf(), policy?))
 }
 
 /// One tick of every open meeting poll. Each record is advanced on its own,
@@ -2560,6 +2720,15 @@ mod surface {
             ),
         ),
         (
+            "slots preview",
+            NotATool(
+                "the owner's editor reads it to show a draft of their hours before saving \
+                 them; it answers from the owner's whole busy calendar, and the hours are \
+                 the owner's to write — no model authors availability, so a model has no \
+                 draft to preview.",
+            ),
+        ),
+        (
             "check",
             NotATool(
                 "the same gate `publish` runs, and bundle_publish already runs it — a \
@@ -2628,6 +2797,132 @@ mod tests {
     use super::Reach;
     use clap::CommandFactory;
     use std::collections::BTreeSet;
+
+    /// The preview's answer: the shape the web editor reads, and the three
+    /// refusals — never pushed, stale, short of the horizon.
+    #[test]
+    fn the_preview_answers_in_its_shape_and_refuses_what_the_push_would() {
+        use chrono::TimeZone;
+        use mecha_factory_publish::lifecycle::CachedFreebusy;
+        let policy = mecha_factory_publish::availability::Policy::from_toml(
+            "timezone = \"America/New_York\"\ndurations = [30]\nmin_notice_hours = 0\n\
+             horizon_days = 14\n[[windows]]\nday = \"tue\"\nstart = \"13:00\"\nend = \"14:00\"\n",
+        )
+        .unwrap();
+        let now = chrono::Utc.with_ymd_and_hms(2026, 11, 2, 18, 0, 0).unwrap();
+        let cache = |generated: chrono::DateTime<chrono::Utc>, days: i64| CachedFreebusy {
+            instrument: "book".into(),
+            policy_path: "book.toml".into(),
+            policy: String::new(),
+            cached_at: generated,
+            freebusy: serde_json::json!({
+                "generated_at": generated,
+                "time_min": generated,
+                "time_max": generated + chrono::Duration::days(days),
+                "busy": [],
+            }),
+        };
+        let fresh = now - chrono::Duration::minutes(5);
+        let answer =
+            super::slots_preview("book", &policy, Some(cache(fresh, 15)), &[], now).unwrap();
+        for key in [
+            "timezone",
+            "horizon_days",
+            "busy_age_seconds",
+            "last_pushed_at",
+            "held_slots",
+        ] {
+            assert!(answer.get(key).is_some(), "{key} missing: {answer}");
+        }
+        assert_eq!(answer["busy_age_seconds"], 300);
+        // Two Tuesdays in fourteen days, two half-hour starts each.
+        assert_eq!(answer["slots"].as_array().unwrap().len(), 4, "{answer}");
+
+        let refuse = |cached: Option<CachedFreebusy>, says: &str| {
+            let err = super::slots_preview("book", &policy, cached, &[], now).unwrap_err();
+            assert!(
+                err.to_string().contains(says),
+                "`{err}` should say `{says}`"
+            );
+        };
+        refuse(None, "never pushed");
+        refuse(
+            Some(cache(now - chrono::Duration::days(3), 15)),
+            "mecha-slots.timer",
+        );
+        // The cache is refreshed only by the timer, so its coverage refusal
+        // names the timer's --days rather than a command that cannot help.
+        refuse(Some(cache(fresh, 7)), "mecha-slots.service");
+    }
+
+    /// `slots push` takes its policy from exactly one place, and a manifest
+    /// for one instrument never computes another's slots.
+    #[test]
+    fn slots_push_takes_one_source_and_refuses_another_instruments_manifest() {
+        use clap::Parser;
+        let parse = |args: &[&str]| super::Cli::try_parse_from(args);
+        assert!(parse(&[
+            "factory-publish",
+            "slots",
+            "push",
+            "book",
+            "--policy",
+            "p.toml"
+        ])
+        .is_ok());
+        assert!(parse(&[
+            "factory-publish",
+            "slots",
+            "push",
+            "book",
+            "--manifest",
+            "m.toml"
+        ])
+        .is_ok());
+        assert!(
+            parse(&["factory-publish", "slots", "push", "book"]).is_err(),
+            "neither source"
+        );
+        assert!(
+            parse(&[
+                "factory-publish",
+                "slots",
+                "push",
+                "book",
+                "--policy",
+                "p.toml",
+                "--manifest",
+                "m.toml"
+            ])
+            .is_err(),
+            "both sources"
+        );
+
+        let dir = std::env::temp_dir().join(format!("slots-source-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let book = dir.join("book.toml");
+        std::fs::write(&book, include_str!("../../mecha-manifest/types/book.toml")).unwrap();
+        // The id is the instrument's: `office` reading book's hours would
+        // sell one page's week on another — and the id is what names the
+        // freebusy cache file, so it must be one `valid_id` has passed.
+        // And on the older --policy branch too, before it names a file.
+        let err = super::slots_policy_source("../../x", Some(&book), None).unwrap_err();
+        assert!(err.to_string().contains("instrument id"), "{err}");
+        let err = super::slots_policy_source("office", None, Some(&book)).unwrap_err();
+        assert!(err.to_string().contains("not `office`"), "{err}");
+        let (_, text) = super::slots_policy_source("book", None, Some(&book)).unwrap();
+        assert!(mecha_factory_publish::availability::Policy::from_toml(&text).is_ok());
+        // A form has no hours to compute from.
+        let form = dir.join("letter.toml");
+        std::fs::write(
+            &form,
+            include_str!("../../mecha-manifest/types/letter.toml"),
+        )
+        .unwrap();
+        let err = super::slots_policy_source("letter", None, Some(&form)).unwrap_err();
+        assert!(err.to_string().contains("not a booking manifest"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// The remediation command a publish-key-only machine prints has to be a
     /// command this binary accepts.

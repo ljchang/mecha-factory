@@ -699,14 +699,37 @@ deployment, all home-side except the first:
    at home. The narrowest credential the box knows: it can replace an
    instrument's slot cache and run its polls, nothing else — sized for the
    systemd timer it lives beside.
-2. **The booking type.** `factory-publish type push
-   mecha-manifest/types/book.toml` (edit the windows first — they are your
-   week). The page is then live at `https://<gate>/s/<handle>/book`,
-   honestly empty until the first slot push.
-3. **The availability policy at home.** The `[availability]` section of the
-   same book.toml, as `~/.mecha/instruments/book-policy.toml` — the slot
-   pipeline reads the file, not the box.
-4. **The two user timers.** `mecha-slots.{service,timer}` (the 15-minute
+2. **The booking type.** Edit a working copy of
+   `mecha-manifest/types/book.toml` (the windows are your week) and
+   `factory-publish type push` it. The page is then live at
+   `https://<gate>/s/<handle>/book`, honestly empty until the first slot
+   push, and the push records what the box accepted at
+   `~/.mecha/factory/types/book.toml`. That file is the record of what is
+   being **served**, and the drain validates strangers' submissions against
+   it, so its fields are never edited in place: a field change is an edit to
+   your working copy and another `type push`.
+3. **The hours live in that served copy.** One part of it is edited in
+   place: `[availability]`, other than `timezone`. The box never computes
+   from those keys and the drain never validates against them, so the slot
+   pipeline reads them there (`slots push book --manifest
+   ~/.mecha/factory/types/book.toml`) and the web Factory view writes them
+   there. An hours edit reaches the page with the next slot push alone, and
+   **it must leave a file that parses**: the drain reads this file through
+   the same strict parser before validating anything, so a typo'd key or a
+   window that ends before it starts would make every drained booking for
+   the page invalid, not just stop the slot push. Run `factory-publish type
+   check` on it after a hand edit. Nothing on this side enforces that;
+   mecha's web Factory view (ljchang/mecha#816) runs the same check on its
+   draft before it writes. The
+   box does read `timezone`, to label the week grid and the confirmation's
+   times, so a timezone change is a `type push`. A later `type push` replaces
+   the whole file, hours included, and prints a note when the hours it
+   replaced differ from the ones it pushed (or when the home copy would not
+   read or parse). The note cannot tell which side is newer: if you set
+   hours at home since your last push, carry them into your working copy
+   before pushing it. (`--policy <file>` still reads a standalone copy
+   of the section, the older two-file shape.)
+4. **The two user timers.** `mecha-slots.{service,timer}` (the two-minute
    slot refresh + booking sweep) and the existing frontdoor timer. Both:
    `cp scripts/mecha-slots.* ~/.config/systemd/user/ && systemctl --user
    daemon-reload && systemctl --user enable --now mecha-slots.timer`.
@@ -714,8 +737,9 @@ deployment, all home-side except the first:
 Then book a slot yourself, end to end, before sending the link to anyone:
 the confirmation invite should arrive from your own mailbox, the manage
 link in its description should cancel, and the withdrawal should follow.
-Polls: `mecha-mail freebusy --days 60 --json | factory-publish polls create
-book <id> --policy … --title … --duration 60 --participant "Name=email"`,
+Polls: `factory-publish polls create book <id> --title … --duration 60
+--participant "Name=email"` (the hours and busy time come from what the slot
+timer last pushed; `--policy` plus piped freebusy is the older override),
 send each person their URL, watch `polls status`, and book the winner when
 it names one.
 

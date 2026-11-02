@@ -272,12 +272,147 @@ pub fn local_type(id: &str) -> Result<Option<RequestType>> {
     Ok(Some(RequestType::from_toml(&text)?))
 }
 
+/// Whether recording `pushed` over `kept` (the home copy, or nothing) would
+/// replace hours that differ — a sentence for the owner, or `None`.
+///
+/// The home copy's `[availability]` is the one part of it edited in place:
+/// the box never computes from it and the drain validates no submission
+/// against it, so the slot timer and the web Factory view read and write the
+/// hours there. **But the drain does parse it**: `local_type` reads the file
+/// through `RequestType::from_toml`, which checks `[availability]` strictly,
+/// so an in-place edit that does not parse makes every drained record of
+/// that type invalid. An editor of this file must only ever write one
+/// `from_toml` accepts. Nothing in this repo enforces that: mecha's web
+/// Factory view (ljchang/mecha#816) runs `type check` on its draft before it
+/// replaces the file, and a hand edit needs the owner to run it. A push from a working copy taken before such an edit would put the
+/// old hours back silently; this is what says so, the way a profile push
+/// says what it displaced.
+pub fn hours_displaced(
+    kept: Option<std::io::Result<String>>,
+    pushed: &RequestType,
+) -> Option<String> {
+    // Three cases, never collapsed: no home copy is silence; a home copy
+    // that cannot be read or parsed is said, since it may hold hours set at
+    // home (an in-place edit that does not parse is the failure this file is
+    // exposed to) and the push is about to replace it unread.
+    let text = match kept? {
+        Ok(text) => text,
+        Err(e) => {
+            return Some(format!(
+                "home's `{}.toml` could not be read ({e}), so any hours it held are \
+                 replaced by this push's",
+                pushed.id
+            ))
+        }
+    };
+    let kept = match RequestType::from_toml(&text) {
+        Ok(kept) => kept,
+        Err(e) => {
+            return Some(format!(
+                "home's `{}.toml` did not parse ({e}), so any hours it held are replaced \
+                 by this push's",
+                pushed.id
+            ))
+        }
+    };
+    // A serialisation failure is not "nothing to say" either: the hours
+    // could not be compared, so they may be going unread.
+    let before = match kept.availability_toml()? {
+        Ok(text) => text,
+        Err(e) => {
+            return Some(format!(
+                "home's hours for `{}` could not be read back ({e}), so whatever they \
+                 were, this push's replace them",
+                pushed.id
+            ))
+        }
+    };
+    // The replaced hours travel in the note itself, so they can be put back
+    // without pointing anyone — on the MCP path, a model — at another file:
+    // the only other copy is the slot pipeline's cache, which is the owner's
+    // whole busy calendar, and it may not exist on a machine that only
+    // pushes types.
+    // Rendered as the manifest's own `[availability]` section, so it pastes
+    // back into a manifest as it stands; the standalone policy vocabulary
+    // (`[[windows]]`) would be refused there.
+    let section = toml::from_str::<toml::Table>(&before)
+        .ok()
+        .and_then(|t| {
+            let mut wrapped = toml::Table::new();
+            wrapped.insert("availability".into(), toml::Value::Table(t));
+            toml::to_string_pretty(&wrapped).ok()
+        })
+        .unwrap_or_else(|| before.clone());
+    let survives = format!(" The replaced hours, as they were:\n{}", section.trim_end());
+    // A booking pushed over as a form: the hours are replaced by none, which
+    // is the displacement this exists to name, not a case to skip.
+    let Some(after) = pushed.availability_toml() else {
+        return Some(format!(
+            "home's `{}` was a booking page with hours; this push makes it a form, so \
+             there are no hours left to compute slots from.{survives}",
+            pushed.id
+        ));
+    };
+    let after = match after {
+        Ok(text) => text,
+        Err(e) => {
+            return Some(format!(
+                "the pushed hours for `{}` could not be compared with home's ({e}); \
+                 home's are replaced by them.{survives}",
+                pushed.id
+            ))
+        }
+    };
+    if before == after {
+        return None;
+    }
+    // Only the difference is known, not its direction: the home copy is
+    // both the record of the last push and the in-place edit target, so a
+    // deliberate change in the working copy and hours set at home since the
+    // push look the same from here.
+    Some(format!(
+        "the hours home had for `{}` differed from the ones this push replaced them \
+         with; anything computing slots from the served copy now uses the pushed \
+         hours. If the old ones were set at home since the last push (the web Factory \
+         view, or an edit in place), they were not in this push.{survives}",
+        pushed.id
+    ))
+}
+
+/// Record a pushed manifest and say what it displaced — the one call both
+/// push paths make today (the CLI's `type push` and the MCP `type_push`
+/// tool), each of which prints the note it returns. Nothing forces a new
+/// caller to print it: a third push path must, and should be added beside
+/// these two. The tool is the path that needs it most: an agent pushing a
+/// working copy taken before an hours edit is the push no person is
+/// reading. Missing is the only silent case; a home copy that would not read
+/// is passed on for the note to say so.
+pub fn record_push(manifest: &str, pushed: &RequestType) -> Result<(PathBuf, Option<String>)> {
+    let path = types_dir()?.join(format!("{}.toml", pushed.id));
+    let kept = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        read => Some(read),
+    };
+    let note = hours_displaced(kept, pushed);
+    let local = remember_type(manifest, &pushed.id)?;
+    Ok((local, note))
+}
+
 /// Record a pushed manifest, so a later drain can validate against it.
+///
+/// Temp-and-rename, as `remember_freebusy` is: this file has three readers
+/// now (the drain, the slot pipeline, and mecha's hours editor), and a
+/// truncated write would make every drained submission of the type invalid.
 pub fn remember_type(manifest: &str, id: &str) -> Result<PathBuf> {
     let dir = types_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{id}.toml"));
-    std::fs::write(&path, manifest)?;
+    let tmp = dir.join(format!(".{id}.toml.{}.tmp", std::process::id()));
+    let written = std::fs::write(&tmp, manifest).and_then(|()| std::fs::rename(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written?;
     Ok(path)
 }
 
@@ -763,5 +898,64 @@ field = "requester_email"
             "machinery is typed data, never swept prose: {:?}",
             record.free_text
         );
+    }
+
+    #[test]
+    fn a_push_says_when_it_replaces_hours_home_had() {
+        let base = include_str!("../../mecha-manifest/types/book.toml");
+        let pushed = RequestType::from_toml(base).unwrap();
+        // Same hours: nothing to say. No home copy, or a form: nothing to say.
+        let kept = |t: &str| Some(Ok(t.to_string()));
+        assert!(hours_displaced(kept(base), &pushed).is_none());
+        assert!(hours_displaced(None, &pushed).is_none());
+        let letter = include_str!("../../mecha-manifest/types/letter.toml");
+        assert!(hours_displaced(kept(letter), &RequestType::from_toml(letter).unwrap()).is_none());
+        // Hours that differ: named, without claiming which side is newer.
+        let edited = base.replacen("start = \"13:00\"", "start = \"14:00\"", 1);
+        assert_ne!(edited, base);
+        let said = hours_displaced(kept(&edited), &pushed).expect("a changed window is named");
+        // The replaced hours are in the note itself, to be put back from.
+        assert!(
+            said.contains("differed")
+                && said.contains("[[availability.windows]]")
+                && said.contains("start = \"14:00\""),
+            "{said}"
+        );
+        // A home copy that would not parse or read is said, never silent.
+        let said = hours_displaced(kept("id = ["), &pushed).expect("unparseable is named");
+        assert!(said.contains("did not parse"), "{said}");
+        // A booking pushed over as a form: the hours go, and that is said.
+        let said = hours_displaced(kept(base), &RequestType::from_toml(letter).unwrap())
+            .expect("booking to form is named");
+        assert!(said.contains("makes it a form"), "{said}");
+        let unreadable = Some(Err(std::io::Error::other("permission denied")));
+        let said = hours_displaced(unreadable, &pushed).expect("unreadable is named");
+        assert!(said.contains("could not be read"), "{said}");
+    }
+
+    #[test]
+    fn recording_a_push_notes_hours_set_at_home() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let base = include_str!("../../mecha-manifest/types/book.toml");
+        let pushed = RequestType::from_toml(base).unwrap();
+        // First push: nothing kept, nothing to say.
+        let (local, note) = record_push(base, &pushed).unwrap();
+        assert!(note.is_none(), "{note:?}");
+        // Hours edited in place at home, then the same working copy pushed
+        // again (what an agent with the type_push tool would do): named.
+        let edited = base.replacen("start = \"13:00\"", "start = \"14:00\"", 1);
+        std::fs::write(&local, &edited).unwrap();
+        let (_, note) = record_push(base, &pushed).unwrap();
+        assert!(note
+            .expect("the displaced hours are named")
+            .contains("differed"));
+        assert_eq!(
+            std::fs::read_to_string(&local).unwrap(),
+            base,
+            "recorded as pushed"
+        );
+        std::env::remove_var("MECHA_HOME");
     }
 }

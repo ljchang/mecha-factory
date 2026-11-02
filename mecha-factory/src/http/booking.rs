@@ -18,7 +18,7 @@ use crate::config::Origin;
 use crate::db::UserRow;
 
 /// A cache whose stamp is older than this states its age on the page. The
-/// timer refreshes every fifteen minutes, so a day-old cache means the
+/// timer refreshes every two minutes, so a day-old cache means the
 /// pipeline has been down for a day — the page keeps working (stale but
 /// honest, youcanbookme's own degradation), and says so.
 const STALE_AFTER_HOURS: i64 = 24;
