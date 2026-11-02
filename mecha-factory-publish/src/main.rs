@@ -426,8 +426,8 @@ enum SlotsAction {
     ///   mecha-mail freebusy --days 60 --json | factory-publish slots push book --manifest book.toml
     ///
     /// stdin is `mecha-mail freebusy --json` output. A scheduled command
-    /// with no model anywhere — a systemd timer runs it every fifteen
-    /// minutes, and everything it refuses (a stale answer, busy data that
+    /// with no model anywhere — a systemd timer runs it every two minutes
+    /// (`mecha-slots.timer`), and everything it refuses (a stale answer, busy data that
     /// stops short of the horizon) it refuses loudly, because the failure
     /// mode of pushing anyway is offering strangers time the user does not
     /// have.

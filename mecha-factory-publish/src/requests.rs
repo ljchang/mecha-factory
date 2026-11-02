@@ -316,7 +316,16 @@ pub fn hours_displaced(
         }
     };
     let before = kept.availability_toml()?.ok()?;
-    let after = pushed.availability_toml()?.ok()?;
+    // A booking pushed over as a form: the hours are replaced by none, which
+    // is the displacement this exists to name, not a case to skip.
+    let Some(after) = pushed.availability_toml() else {
+        return Some(format!(
+            "home's `{}` was a booking page with hours; this push makes it a form, so \
+             those hours are gone and the slot pipeline has nothing to compute from",
+            pushed.id
+        ));
+    };
+    let after = after.ok()?;
     if before == after {
         return None;
     }
@@ -334,11 +343,20 @@ pub fn hours_displaced(
 }
 
 /// Record a pushed manifest, so a later drain can validate against it.
+///
+/// Temp-and-rename, as `remember_freebusy` is: this file has three readers
+/// now (the drain, the slot pipeline, and mecha's hours editor), and a
+/// truncated write would make every drained submission of the type invalid.
 pub fn remember_type(manifest: &str, id: &str) -> Result<PathBuf> {
     let dir = types_dir()?;
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(format!("{id}.toml"));
-    std::fs::write(&path, manifest)?;
+    let tmp = dir.join(format!(".{id}.toml.{}.tmp", std::process::id()));
+    let written = std::fs::write(&tmp, manifest).and_then(|()| std::fs::rename(&tmp, &path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written?;
     Ok(path)
 }
 
@@ -847,6 +865,10 @@ field = "requester_email"
         // A home copy that would not parse or read is said, never silent.
         let said = hours_displaced(kept("id = ["), &pushed).expect("unparseable is named");
         assert!(said.contains("did not parse"), "{said}");
+        // A booking pushed over as a form: the hours go, and that is said.
+        let said = hours_displaced(kept(base), &RequestType::from_toml(letter).unwrap())
+            .expect("booking to form is named");
+        assert!(said.contains("makes it a form"), "{said}");
         let unreadable = Some(Err(std::io::Error::other("permission denied")));
         let said = hours_displaced(unreadable, &pushed).expect("unreadable is named");
         assert!(said.contains("could not be read"), "{said}");
