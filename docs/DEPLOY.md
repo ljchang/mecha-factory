@@ -718,8 +718,9 @@ deployment, all home-side except the first:
    the same strict parser before validating anything, so a typo'd key or a
    window that ends before it starts would make every drained booking for
    the page invalid, not just stop the slot push. Run `factory-publish type
-   check` on it after a hand edit (the web Factory view does so before it
-   writes). The
+   check` on it after a hand edit. Nothing on this side enforces that;
+   mecha's web Factory view (ljchang/mecha#816) runs the same check on its
+   draft before it writes. The
    box does read `timezone`, to label the week grid and the confirmation's
    times, so a timezone change is a `type push`. A later `type push` replaces
    the whole file, hours included, and prints a note when the hours it

@@ -282,8 +282,9 @@ pub fn local_type(id: &str) -> Result<Option<RequestType>> {
 /// through `RequestType::from_toml`, which checks `[availability]` strictly,
 /// so an in-place edit that does not parse makes every drained record of
 /// that type invalid. An editor of this file must only ever write one
-/// `from_toml` accepts — the web Factory view runs `type check` on its draft
-/// before it replaces the file. A push from a working copy taken before such an edit would put the
+/// `from_toml` accepts. Nothing in this repo enforces that: mecha's web
+/// Factory view (ljchang/mecha#816) runs `type check` on its draft before it
+/// replaces the file, and a hand edit needs the owner to run it. A push from a working copy taken before such an edit would put the
 /// old hours back silently; this is what says so, the way a profile push
 /// says what it displaced.
 pub fn hours_displaced(
