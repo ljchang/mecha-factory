@@ -332,7 +332,18 @@ pub fn hours_displaced(
     // the only other copy is the slot pipeline's cache, which is the owner's
     // whole busy calendar, and it may not exist on a machine that only
     // pushes types.
-    let survives = format!(" The replaced hours, as they were:\n{}", before.trim_end());
+    // Rendered as the manifest's own `[availability]` section, so it pastes
+    // back into a manifest as it stands; the standalone policy vocabulary
+    // (`[[windows]]`) would be refused there.
+    let section = toml::from_str::<toml::Table>(&before)
+        .ok()
+        .and_then(|t| {
+            let mut wrapped = toml::Table::new();
+            wrapped.insert("availability".into(), toml::Value::Table(t));
+            toml::to_string_pretty(&wrapped).ok()
+        })
+        .unwrap_or_else(|| before.clone());
+    let survives = format!(" The replaced hours, as they were:\n{}", section.trim_end());
     // A booking pushed over as a form: the hours are replaced by none, which
     // is the displacement this exists to name, not a case to skip.
     let Some(after) = pushed.availability_toml() else {
@@ -905,7 +916,9 @@ field = "requester_email"
         let said = hours_displaced(kept(&edited), &pushed).expect("a changed window is named");
         // The replaced hours are in the note itself, to be put back from.
         assert!(
-            said.contains("differed") && said.contains("start = \"14:00\""),
+            said.contains("differed")
+                && said.contains("[[availability.windows]]")
+                && said.contains("start = \"14:00\""),
             "{said}"
         );
         // A home copy that would not parse or read is said, never silent.
