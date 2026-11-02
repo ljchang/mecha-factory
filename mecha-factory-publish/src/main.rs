@@ -454,7 +454,7 @@ enum SlotsAction {
     ///
     /// The editor's preview: a person changing their hours sees the page
     /// their change would serve before it serves it. The busy time is the
-    /// pipeline's own cache (fifteen minutes old at most while the timer
+    /// pipeline's own cache (two minutes old at most while the timer
     /// runs); over an hour old it is refused, naming the timer, as the push
     /// refuses it.
     Preview {
@@ -2710,7 +2710,7 @@ mod surface {
             "slots push",
             NotATool(
                 "a scheduled command with no model anywhere: a systemd timer runs it every \
-                 fifteen minutes against live freebusy. An agent calling it would race the \
+                 two minutes against live freebusy. An agent calling it would race the \
                  timer to publish availability, and everything it refuses it refuses \
                  loudly because the failure mode is offering strangers time the user does \
                  not have.",

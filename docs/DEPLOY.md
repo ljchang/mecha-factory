@@ -713,14 +713,20 @@ deployment, all home-side except the first:
    from those keys and the drain never validates against them, so the slot
    pipeline reads them there (`slots push book --manifest
    ~/.mecha/factory/types/book.toml`) and the web Factory view writes them
-   there. An hours edit reaches the page with the next slot push alone. The
+   there. An hours edit reaches the page with the next slot push alone, and
+   **it must leave a file that parses**: the drain reads this file through
+   the same strict parser before validating anything, so a typo'd key or a
+   window that ends before it starts would make every drained booking for
+   the page invalid, not just stop the slot push. Run `factory-publish type
+   check` on it after a hand edit (the web Factory view does so before it
+   writes). The
    box does read `timezone`, to label the week grid and the confirmation's
    times, so a timezone change is a `type push`. A later `type push` replaces
    the whole file, hours included, and prints a note when the hours it
    replaced differ from the ones it pushed: carry any hours set at home into
    your working copy first. (`--policy <file>` still reads a standalone copy
    of the section, the older two-file shape.)
-4. **The two user timers.** `mecha-slots.{service,timer}` (the 15-minute
+4. **The two user timers.** `mecha-slots.{service,timer}` (the two-minute
    slot refresh + booking sweep) and the existing frontdoor timer. Both:
    `cp scripts/mecha-slots.* ~/.config/systemd/user/ && systemctl --user
    daemon-reload && systemctl --user enable --now mecha-slots.timer`.

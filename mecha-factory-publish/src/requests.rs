@@ -276,9 +276,14 @@ pub fn local_type(id: &str) -> Result<Option<RequestType>> {
 /// replace hours that differ — a sentence for the owner, or `None`.
 ///
 /// The home copy's `[availability]` is the one part of it edited in place:
-/// the box never computes from it and the drain never validates against it,
-/// so the slot timer and the web Factory view read and write the hours
-/// there. A push from a working copy taken before such an edit would put the
+/// the box never computes from it and the drain validates no submission
+/// against it, so the slot timer and the web Factory view read and write the
+/// hours there. **But the drain does parse it**: `local_type` reads the file
+/// through `RequestType::from_toml`, which checks `[availability]` strictly,
+/// so an in-place edit that does not parse makes every drained record of
+/// that type invalid. An editor of this file must only ever write one
+/// `from_toml` accepts — the web Factory view runs `type check` on its draft
+/// before it replaces the file. A push from a working copy taken before such an edit would put the
 /// old hours back silently; this is what says so, the way a profile push
 /// says what it displaced.
 pub fn hours_displaced(kept: Option<&str>, pushed: &RequestType) -> Option<String> {

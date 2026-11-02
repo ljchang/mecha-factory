@@ -39,7 +39,7 @@
 //! `poll_meeting_create` is outbox-routed and executes at *release*, a file
 //! that was an hour old by the time anyone approved the poll. The
 //! `mecha-slots` timer already pipes fresh busy time through `slots push`
-//! every fifteen minutes; `slots push` now writes what it saw, policy included,
+//! every two minutes; `slots push` now writes what it saw, policy included,
 //! and a poll created without an explicit `freebusy` reads that. The
 //! freshness refusal is unchanged; it is now a statement about the timer.
 
@@ -899,8 +899,10 @@ pub fn cached_freebusy(instrument: &str) -> Result<Option<CachedFreebusy>> {
 }
 
 /// How old the slot pipeline's busy time may be before nothing may compute
-/// from it. Fifteen minutes is the timer's cadence; an hour is four missed
-/// ticks.
+/// from it. The shipped timer runs every two minutes (`mecha-slots.timer`,
+/// down from fifteen on 2026-08-08 to narrow the double-booking window), so
+/// an hour is thirty missed ticks — a timer that has stopped, not one that
+/// is late.
 pub const BUSY_MAX_AGE: chrono::Duration = chrono::Duration::hours(1);
 
 /// Whether busy time is fit to compute slots from — the one check every
