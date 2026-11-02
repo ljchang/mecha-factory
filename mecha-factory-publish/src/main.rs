@@ -1981,6 +1981,10 @@ fn slots_policy_source(
     policy_file: Option<&std::path::Path>,
     manifest: Option<&std::path::Path>,
 ) -> Result<(PathBuf, String)> {
+    // The id names the freebusy cache file and the box's URL on both
+    // branches, so it is checked once here — the --policy branch returns
+    // before any manifest could vouch for it.
+    mecha_manifest::valid_id(id, "instrument id")?;
     let path = match (policy_file, manifest) {
         (Some(p), None) => {
             let text =
@@ -2899,6 +2903,9 @@ mod tests {
         // The id is the instrument's: `office` reading book's hours would
         // sell one page's week on another — and the id is what names the
         // freebusy cache file, so it must be one `valid_id` has passed.
+        // And on the older --policy branch too, before it names a file.
+        let err = super::slots_policy_source("../../x", Some(&book), None).unwrap_err();
+        assert!(err.to_string().contains("instrument id"), "{err}");
         let err = super::slots_policy_source("office", None, Some(&book)).unwrap_err();
         assert!(err.to_string().contains("not `office`"), "{err}");
         let (_, text) = super::slots_policy_source("book", None, Some(&book)).unwrap();
