@@ -528,6 +528,22 @@ enum TypeAction {
         #[arg(long)]
         handle: Option<String>,
     },
+    /// The page a manifest would serve, as one JSON object — `{id, kind,
+    /// html, style}` — for an editor to preview before publishing. Nothing
+    /// is uploaded; a booking page renders its own windows against an empty
+    /// calendar, as the gallery does.
+    Render { manifest: PathBuf },
+    /// The starter manifests a new form can begin as.
+    Starters,
+    /// Print a starter re-identified as `id`, comments kept — the first
+    /// draft of a new form. Writes nothing.
+    New {
+        /// A name from `type starters`.
+        starter: String,
+        /// The new form's id: lowercase, digits, `-`, `_`. It names the URL.
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1278,6 +1294,22 @@ fn type_command(action: TypeAction) -> Result<()> {
             );
         }
 
+        TypeAction::Render { manifest } => {
+            let text = std::fs::read_to_string(&manifest)
+                .with_context(|| format!("reading {}", manifest.display()))?;
+            println!("{}", render_type_json(&text, chrono::Utc::now())?);
+        }
+        TypeAction::Starters => {
+            for (name, text) in mecha_manifest::starters::STARTERS {
+                let title = mecha_manifest::RequestType::from_toml(text)
+                    .map(|t| t.title)
+                    .unwrap_or_default();
+                println!("{name}\t{title}");
+            }
+        }
+        TypeAction::New { starter, id } => {
+            print!("{}", mecha_manifest::starters::starter_as(&starter, &id)?);
+        }
         TypeAction::List => {
             let Some(remote) = remote::Remote::configured()? else {
                 println!("no factory is configured (~/.mecha/factory/config.toml)");
@@ -1884,6 +1916,37 @@ fn slots_push_command(
         }
     );
     Ok(())
+}
+
+/// `type render`: the page a manifest serves, for an editor's preview.
+/// A booking renders its own windows against an empty calendar (the
+/// gallery's convention), so the preview needs no box and no credential.
+fn render_type_json(text: &str, now: chrono::DateTime<chrono::Utc>) -> Result<serde_json::Value> {
+    let parsed = mecha_manifest::RequestType::from_toml(text)?;
+    if parsed.kind == mecha_manifest::RequestKind::Booking {
+        let policy = parsed
+            .availability_policy()
+            .context("a booking manifest has [availability]")??;
+        let slots = mecha_manifest::availability::availability(&policy, &[], &[], &[], now);
+        let page = parsed.booking_page(
+            &slots,
+            &mecha_manifest::BookingOptions {
+                action: format!("/s/preview/{}", parsed.id),
+                now,
+                ..mecha_manifest::BookingOptions::default()
+            },
+        )?;
+        return Ok(serde_json::json!({
+            "id": parsed.id, "kind": "booking", "html": page.html, "style": page.style,
+        }));
+    }
+    let page = parsed.form(&mecha_manifest::FormOptions {
+        action: format!("/r/{}", parsed.id),
+        ..mecha_manifest::FormOptions::default()
+    });
+    Ok(serde_json::json!({
+        "id": parsed.id, "kind": "request", "html": page.html, "style": page.style,
+    }))
 }
 
 /// `slots preview`: the draft's slots over the pipeline's cached busy time.
@@ -2645,6 +2708,28 @@ mod surface {
         ("type push", Tools(&["type_push"])),
         ("type list", Tools(&["type_list"])),
         ("type check", Tools(&["type_check"])),
+        (
+            "type render",
+            NotATool(
+                "the owner's form editor reads it to preview a draft before publishing; \
+                 `type_check` already tells a model what a manifest is, and the page's \
+                 HTML adds nothing an agent acts on.",
+            ),
+        ),
+        (
+            "type starters",
+            NotATool(
+                "a list for the owner's 'new form' picker; a model starting a form \
+                 would be authoring a public surface, which is the owner's to do.",
+            ),
+        ),
+        (
+            "type new",
+            NotATool(
+                "the first draft of a new public form, for the owner's editor; a model \
+                 does not author the forms strangers fill in.",
+            ),
+        ),
         // The personal public surface. An agent reaches all of it: writing
         // somebody's own pages from their own files is the errand worth
         // delegating, and the release scope is what bounds it. One
@@ -2853,6 +2938,21 @@ mod tests {
         // The cache is refreshed only by the timer, so its coverage refusal
         // names the timer's --days rather than a command that cannot help.
         refuse(Some(cache(fresh, 7)), "mecha-slots.service");
+    }
+
+    /// `type render` answers for both kinds, from the starters themselves.
+    #[test]
+    fn render_answers_for_a_form_and_a_booking_page() {
+        for (name, text) in mecha_manifest::starters::STARTERS {
+            let out = super::render_type_json(text, chrono::Utc::now())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(out["id"], *name);
+            assert!(
+                out["html"].as_str().unwrap().contains("<form") || out["kind"] == "booking",
+                "{name}"
+            );
+            assert!(!out["style"].as_str().unwrap().is_empty(), "{name}");
+        }
     }
 
     /// `slots push` takes its policy from exactly one place, and a manifest
