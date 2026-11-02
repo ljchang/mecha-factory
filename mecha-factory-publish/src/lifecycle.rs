@@ -898,6 +898,20 @@ pub fn cached_freebusy(instrument: &str) -> Result<Option<CachedFreebusy>> {
     ))
 }
 
+/// What the booking page serves for these inputs — the one spelling of it,
+/// which the push publishes and the editor's preview shows. Bookings from
+/// the local ledger arrive with a later build step; when they do, they join
+/// here, and the preview cannot keep showing times the push has stopped
+/// offering.
+pub fn page_slots(
+    policy: &crate::availability::Policy,
+    busy: &[Interval],
+    holds: &[Interval],
+    anchor: DateTime<Utc>,
+) -> Vec<crate::availability::Slot> {
+    crate::availability::availability(policy, busy, holds, &[], anchor)
+}
+
 /// How old the slot pipeline's busy time may be before nothing may compute
 /// from it. The shipped timer runs every two minutes (`mecha-slots.timer`,
 /// down from fifteen on 2026-08-08 to narrow the double-booking window), so

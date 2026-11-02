@@ -1833,7 +1833,8 @@ fn slots_push_command(
     // the page must not sell a slot a poll is still asking about. Bookings
     // from the local ledger arrive with a later build step.
     let holds = mecha_factory_publish::lifecycle::open_holds()?;
-    let slots = availability::availability(&policy, &doc.busy, &holds, &[], generated_at);
+    let slots =
+        mecha_factory_publish::lifecycle::page_slots(&policy, &doc.busy, &holds, generated_at);
 
     if dry_run {
         println!(
@@ -1929,7 +1930,7 @@ fn slots_preview(
     holds: &[mecha_factory_publish::availability::Interval],
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<serde_json::Value> {
-    use mecha_factory_publish::availability::{self, Interval};
+    use mecha_factory_publish::availability::Interval;
     let Some(cached) = cached else {
         bail!(
             "the slots pipeline has never pushed `{id}` on this machine, so there is no busy \
@@ -1956,7 +1957,8 @@ fn slots_preview(
         policy.timezone,
         now,
     )?;
-    let slots = availability::availability(policy, &doc.busy, holds, &[], doc.generated_at);
+    let slots =
+        mecha_factory_publish::lifecycle::page_slots(policy, &doc.busy, holds, doc.generated_at);
     Ok(serde_json::json!({
         "instrument": id,
         "timezone": policy.timezone.name(),
