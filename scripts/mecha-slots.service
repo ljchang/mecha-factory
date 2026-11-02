@@ -7,8 +7,8 @@
 #
 # The policy is the booking manifest's own `[availability]` section
 # (SCHEDULING-DESIGN.md §3.1) — one file for the page and the slots, so the
-# two cannot disagree; the manifest's id must match the instrument pushed. Both halves fail
-# closed and loudly: an unreadable mailbox, a stale freebusy answer, or busy
+# two cannot disagree; the manifest's id must match the instrument pushed.
+# Both halves fail closed and loudly: an unreadable mailbox, a stale freebusy answer, or busy
 # data short of the horizon each stop the push rather than narrowing it,
 # because every failure that "degrades gracefully" here degrades into
 # offering strangers time the user does not have. The page keeps serving the

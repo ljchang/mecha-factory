@@ -2802,6 +2802,72 @@ mod tests {
     use clap::CommandFactory;
     use std::collections::BTreeSet;
 
+    /// `slots push` takes its policy from exactly one place, and a manifest
+    /// for one instrument never computes another's slots.
+    #[test]
+    fn slots_push_takes_one_source_and_refuses_another_instruments_manifest() {
+        use clap::Parser;
+        let parse = |args: &[&str]| super::Cli::try_parse_from(args);
+        assert!(parse(&[
+            "factory-publish",
+            "slots",
+            "push",
+            "book",
+            "--policy",
+            "p.toml"
+        ])
+        .is_ok());
+        assert!(parse(&[
+            "factory-publish",
+            "slots",
+            "push",
+            "book",
+            "--manifest",
+            "m.toml"
+        ])
+        .is_ok());
+        assert!(
+            parse(&["factory-publish", "slots", "push", "book"]).is_err(),
+            "neither source"
+        );
+        assert!(
+            parse(&[
+                "factory-publish",
+                "slots",
+                "push",
+                "book",
+                "--policy",
+                "p.toml",
+                "--manifest",
+                "m.toml"
+            ])
+            .is_err(),
+            "both sources"
+        );
+
+        let dir = std::env::temp_dir().join(format!("slots-source-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let book = dir.join("book.toml");
+        std::fs::write(&book, include_str!("../../mecha-manifest/types/book.toml")).unwrap();
+        // The id is the instrument's: `office` reading book's hours would
+        // sell one page's week on another — and the id is what names the
+        // freebusy cache file, so it must be one `valid_id` has passed.
+        let err = super::slots_policy_source("office", None, Some(&book)).unwrap_err();
+        assert!(err.to_string().contains("not `office`"), "{err}");
+        let (_, text) = super::slots_policy_source("book", None, Some(&book)).unwrap();
+        assert!(mecha_factory_publish::availability::Policy::from_toml(&text).is_ok());
+        // A form has no hours to compute from.
+        let form = dir.join("letter.toml");
+        std::fs::write(
+            &form,
+            include_str!("../../mecha-manifest/types/letter.toml"),
+        )
+        .unwrap();
+        let err = super::slots_policy_source("letter", None, Some(&form)).unwrap_err();
+        assert!(err.to_string().contains("not a booking manifest"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The remediation command a publish-key-only machine prints has to be a
     /// command this binary accepts.
     ///

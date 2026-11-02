@@ -1563,19 +1563,50 @@ accept=["docx"]
     #[test]
     fn a_bookings_availability_reads_back_as_the_standalone_policy() {
         // The slot pipeline reads the manifest now, and caches this text for
-        // a later poll to parse as a policy file — so it must be one, and
-        // say the same thing the manifest does.
-        let booking = RequestType::from_toml(BOOKING_BASE).unwrap();
+        // a later poll to re-parse as a policy file (`create_meeting`) — so
+        // it must be one, and say everything the manifest does. Every key is
+        // set: a serialisation that dropped `[poll]` would hand every seeded
+        // poll `PollPolicy::default()`, and one that dropped a closed day
+        // would sell it.
+        let full = BOOKING_BASE.replace(
+            "[availability]\n        timezone = \"America/New_York\"\n        durations = [30, 60]\n",
+            r#"[availability]
+        timezone = "America/New_York"
+        durations = [30, 60]
+        buffer_minutes = 10
+        min_notice_hours = 12
+        horizon_days = 45
+        per_day_cap = 2
+        increment_minutes = 15
+
+        [availability.poll]
+        auto_book = "feasible"
+        deadline_days = 5
+        deadline_hour = 9
+        nudge_hours_before = 12
+        nudge_min_lead_hours = 4
+
+        [[availability.overrides]]
+        date = "2026-12-24"
+
+        [[availability.overrides]]
+        date = "2026-12-30"
+        windows = [["10:00", "12:00"]]
+"#,
+        );
+        assert_ne!(full, BOOKING_BASE, "the fixture edit did not apply");
+        let booking = RequestType::from_toml(&full).unwrap();
         let text = booking.availability_toml().unwrap().unwrap();
         let standalone = crate::availability::Policy::from_toml(&text).unwrap();
         let embedded = booking.availability_policy().unwrap().unwrap();
-        assert_eq!(standalone.durations, embedded.durations);
-        assert_eq!(standalone.timezone, embedded.timezone);
-        assert_eq!(standalone.horizon_days, embedded.horizon_days);
-        assert_eq!(
-            format!("{:?}", standalone.windows),
-            format!("{:?}", embedded.windows)
-        );
+        assert_eq!(format!("{standalone:?}"), format!("{embedded:?}"));
+        // And the keys were really set, so the equality is not two defaults.
+        assert_eq!(embedded.per_day_cap, Some(2));
+        assert_eq!(embedded.increment_minutes, 15);
+        assert_eq!(embedded.overrides.len(), 2);
+        assert!(embedded.overrides[0].windows.is_empty());
+        assert_eq!(embedded.poll.deadline_days, 5);
+
         // A plain request has no availability to read.
         let without_kind = BOOKING_BASE.replace("kind = \"booking\"\n", "");
         let plain =
