@@ -423,7 +423,7 @@ enum SlotsAction {
     ///
     /// The write half of the slot-refresh pipeline:
     ///
-    ///   mecha-mail freebusy --days 60 --json | factory-publish slots push book --policy …
+    ///   mecha-mail freebusy --days 60 --json | factory-publish slots push book --manifest book.toml
     ///
     /// stdin is `mecha-mail freebusy --json` output. A scheduled command
     /// with no model anywhere — a systemd timer runs it every fifteen
@@ -431,12 +431,20 @@ enum SlotsAction {
     /// stops short of the horizon) it refuses loudly, because the failure
     /// mode of pushing anyway is offering strangers time the user does not
     /// have.
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["policy", "manifest"])))]
     Push {
         /// The instrument whose cache to replace.
         id: String,
-        /// The availability policy TOML (the `[availability]` vocabulary).
+        /// A standalone availability policy TOML (the `[availability]`
+        /// vocabulary). The older shape: a second copy of what the manifest
+        /// says, kept in agreement by hand.
         #[arg(long)]
-        policy: PathBuf,
+        policy: Option<PathBuf>,
+        /// The booking manifest itself — its `[availability]` section is the
+        /// policy. One file for the page and the slots, so the two cannot
+        /// disagree; its `id` must be the instrument being pushed.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
         /// Compute and print the slots, pushing nothing.
         #[arg(long)]
         dry_run: bool,
@@ -740,8 +748,9 @@ fn main() -> Result<()> {
         Command::Slots(SlotsAction::Push {
             id,
             policy,
+            manifest,
             dry_run,
-        }) => slots_push_command(&id, &policy, dry_run)?,
+        }) => slots_push_command(&id, policy.as_deref(), manifest.as_deref(), dry_run)?,
         Command::Dataset(action) => dataset_command(action)?,
         Command::Polls(action) => polls_command(action)?,
         Command::Profile(action) => record_command(Record::Profile, action)?,
@@ -1740,11 +1749,15 @@ fn dataset_command(action: DatasetAction) -> Result<()> {
 /// Compute an instrument's slots from stdin's busy intervals and replace its
 /// cache on the box. Everything here fails closed: partial knowledge of the
 /// calendar must never become "free" on a public page.
-fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<()> {
+fn slots_push_command(
+    id: &str,
+    policy_file: Option<&std::path::Path>,
+    manifest: Option<&std::path::Path>,
+    dry_run: bool,
+) -> Result<()> {
     use mecha_factory_publish::availability::{self, Interval};
 
-    let policy_text = std::fs::read_to_string(policy_path)
-        .with_context(|| format!("reading {}", policy_path.display()))?;
+    let (policy_path, policy_text) = slots_policy_source(id, policy_file, manifest)?;
     let policy = availability::Policy::from_toml(&policy_text)
         .with_context(|| format!("{}", policy_path.display()))?;
 
@@ -1859,6 +1872,47 @@ fn slots_push_command(id: &str, policy_path: &PathBuf, dry_run: bool) -> Result<
         }
     );
     Ok(())
+}
+
+/// Where the slot pipeline's policy comes from, as the standalone text a
+/// later poll re-parses from the freebusy cache: the booking manifest's own
+/// `[availability]`, or a policy file beside it.
+///
+/// The manifest is checked whole — a manifest that would not `type push`
+/// does not get to compute what strangers are offered either — and its id
+/// must be the instrument's, or `slots push book --manifest office.toml`
+/// would quietly sell one page's hours on another.
+fn slots_policy_source(
+    id: &str,
+    policy_file: Option<&std::path::Path>,
+    manifest: Option<&std::path::Path>,
+) -> Result<(PathBuf, String)> {
+    let path = match (policy_file, manifest) {
+        (Some(p), None) => {
+            let text =
+                std::fs::read_to_string(p).with_context(|| format!("reading {}", p.display()))?;
+            return Ok((p.to_path_buf(), text));
+        }
+        (None, Some(m)) => m,
+        _ => bail!("pass exactly one of --policy and --manifest"),
+    };
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let manifest = mecha_manifest::RequestType::from_toml(&text)
+        .with_context(|| format!("{}", path.display()))?;
+    anyhow::ensure!(
+        manifest.id == id,
+        "{} is the manifest for `{}`, not `{id}`",
+        path.display(),
+        manifest.id
+    );
+    let Some(policy) = manifest.availability_toml() else {
+        bail!(
+            "{} is not a booking manifest — it has no [availability] to compute slots from",
+            path.display()
+        );
+    };
+    Ok((path.to_path_buf(), policy?))
 }
 
 /// One tick of every open meeting poll. Each record is advanced on its own,

@@ -703,6 +703,21 @@ impl RequestType {
             .map(crate::availability::Policy::from_raw)
     }
 
+    /// A booking manifest's `[availability]` as a standalone policy document —
+    /// the vocabulary `Policy::from_toml` reads and the slot pipeline caches
+    /// beside the busy time it saw. `None` for a plain request.
+    ///
+    /// What lets the manifest be the one file a person edits: before it, the
+    /// pipeline read a hand-kept copy of this section that nothing kept in
+    /// agreement with the page.
+    pub fn availability_toml(&self) -> Option<Result<String>> {
+        self.availability.as_ref().map(|raw| {
+            toml::to_string_pretty(raw).map_err(|e| {
+                ManifestError::invalid(format!("serialising `{}` [availability]: {e}", self.id))
+            })
+        })
+    }
+
     /// The booking policy, with its defaults filled in.
     pub fn booking_policy(&self) -> BookingPolicy {
         self.policy.clone().unwrap_or_default()
@@ -1543,6 +1558,29 @@ accept=["docx"]
         let round = RequestType::from_toml(&booking.to_toml().unwrap()).unwrap();
         assert_eq!(round.kind, RequestKind::Booking);
         assert!(round.availability.is_some());
+    }
+
+    #[test]
+    fn a_bookings_availability_reads_back_as_the_standalone_policy() {
+        // The slot pipeline reads the manifest now, and caches this text for
+        // a later poll to parse as a policy file — so it must be one, and
+        // say the same thing the manifest does.
+        let booking = RequestType::from_toml(BOOKING_BASE).unwrap();
+        let text = booking.availability_toml().unwrap().unwrap();
+        let standalone = crate::availability::Policy::from_toml(&text).unwrap();
+        let embedded = booking.availability_policy().unwrap().unwrap();
+        assert_eq!(standalone.durations, embedded.durations);
+        assert_eq!(standalone.timezone, embedded.timezone);
+        assert_eq!(standalone.horizon_days, embedded.horizon_days);
+        assert_eq!(
+            format!("{:?}", standalone.windows),
+            format!("{:?}", embedded.windows)
+        );
+        // A plain request has no availability to read.
+        let without_kind = BOOKING_BASE.replace("kind = \"booking\"\n", "");
+        let plain =
+            RequestType::from_toml(without_kind.split("[availability]").next().unwrap()).unwrap();
+        assert!(plain.availability_toml().is_none());
     }
 
     #[test]

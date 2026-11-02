@@ -23,7 +23,7 @@ set -u
 PATH="$HOME/.cargo/bin:$PATH"
 
 ACCOUNT="${MECHA_BOOKINGS_ACCOUNT:-dartmouth}"
-POLICY="${MECHA_BOOK_POLICY:-$HOME/.mecha/instruments/book-policy.toml}"
+MANIFEST="${MECHA_BOOK_MANIFEST:-$HOME/.mecha/factory/types/book.toml}"
 
 while :; do
   # If the box answers an empty drain instantly — a binary that predates
@@ -46,7 +46,7 @@ while :; do
       # than waiting out the timer. Failure here degrades to exactly the
       # timer's own staleness, so it only warns.
       mecha-mail freebusy --days 60 --json |
-        factory-publish slots push book --policy "$POLICY" ||
+        factory-publish slots push book --manifest "$MANIFEST" ||
         echo "slot refresh after drain failed; the timer will catch it" >&2
     fi
   else

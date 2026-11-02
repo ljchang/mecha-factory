@@ -703,9 +703,12 @@ deployment, all home-side except the first:
    mecha-manifest/types/book.toml` (edit the windows first — they are your
    week). The page is then live at `https://<gate>/s/<handle>/book`,
    honestly empty until the first slot push.
-3. **The availability policy at home.** The `[availability]` section of the
-   same book.toml, as `~/.mecha/instruments/book-policy.toml` — the slot
-   pipeline reads the file, not the box.
+3. **The manifest at home.** Keep that book.toml at
+   `~/.mecha/factory/types/book.toml`: the slot pipeline reads its
+   `[availability]` section with `slots push book --manifest …`, and the box
+   ignores that section entirely. One file, so the hours the page offers and
+   the hours the pipeline computes cannot disagree. (`--policy <file>` still
+   reads a standalone copy of the section — the older two-file shape.)
 4. **The two user timers.** `mecha-slots.{service,timer}` (the 15-minute
    slot refresh + booking sweep) and the existing frontdoor timer. Both:
    `cp scripts/mecha-slots.* ~/.config/systemd/user/ && systemctl --user
