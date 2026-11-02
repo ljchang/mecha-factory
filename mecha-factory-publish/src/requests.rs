@@ -363,11 +363,13 @@ pub fn hours_displaced(
 }
 
 /// Record a pushed manifest and say what it displaced — the one call both
-/// push paths make (the CLI's `type push` and the MCP `type_push` tool), so
-/// the note cannot be dropped by one of them. The tool is the path that
-/// needs it most: an agent pushing a working copy taken before an hours edit
-/// is the push no person is reading. Missing is the only silent case; a home
-/// copy that would not read is passed on for the note to say so.
+/// push paths make today (the CLI's `type push` and the MCP `type_push`
+/// tool), each of which prints the note it returns. Nothing forces a new
+/// caller to print it: a third push path must, and should be added beside
+/// these two. The tool is the path that needs it most: an agent pushing a
+/// working copy taken before an hours edit is the push no person is
+/// reading. Missing is the only silent case; a home copy that would not read
+/// is passed on for the note to say so.
 pub fn record_push(manifest: &str, pushed: &RequestType) -> Result<(PathBuf, Option<String>)> {
     let path = types_dir()?.join(format!("{}.toml", pushed.id));
     let kept = match std::fs::read_to_string(&path) {

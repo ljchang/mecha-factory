@@ -452,8 +452,10 @@ enum SlotsAction {
     /// What a draft manifest would offer, from the busy time the last push
     /// saw — no provider call, nothing pushed, nothing written.
     ///
-    /// The editor's preview: a person changing their hours sees the page
-    /// their change would serve before it serves it. The busy time is the
+    /// The editor's preview: a person changing their hours sees the slots
+    /// their change would push before it pushes them. The page then narrows
+    /// them by the bookings the box already holds, so a confirmed meeting's
+    /// time shows here and not there. The busy time is the
     /// pipeline's own cache (two minutes old at most while the timer
     /// runs); over an hour old it is refused, naming the timer, as the push
     /// refuses it.
@@ -1961,7 +1963,7 @@ fn slots_preview(
         "busy_generated_at": doc.generated_at,
         "busy_age_seconds": (now - doc.generated_at).num_seconds(),
         "last_pushed_at": cached.cached_at,
-        "held_by_polls": holds.len(),
+        "held_slots": holds.len(),
         "slots": slots,
     }))
 }
@@ -2824,7 +2826,7 @@ mod tests {
             "horizon_days",
             "busy_age_seconds",
             "last_pushed_at",
-            "held_by_polls",
+            "held_slots",
         ] {
             assert!(answer.get(key).is_some(), "{key} missing: {answer}");
         }
