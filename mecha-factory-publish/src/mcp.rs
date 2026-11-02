@@ -1279,8 +1279,11 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
             let body = remote.type_push(&text, &parsed.id)?;
             // Only after the box accepted it: the local copy is what a later
             // drain validates against.
-            let local = crate::requests::remember_type(&text, &parsed.id)?;
-            Ok(format!(
+            // And say what it displaced, as the CLI does, through the same
+            // call: an agent pushing an older working copy is the push most
+            // likely to undo hours the owner set at home.
+            let (local, displaced) = crate::requests::record_push(&text, &parsed)?;
+            let mut reply = format!(
                 "{} — {} field(s) — is live, and strangers can submit to it now.\nKept \
                  locally at {} so a drain can validate against it.",
                 body["id"].as_str().unwrap_or(&parsed.id),
@@ -1288,7 +1291,11 @@ fn dispatch(name: &str, args: &Value, store_root: Option<PathBuf>, root: &Path) 
                     .as_i64()
                     .unwrap_or(parsed.fields.len() as i64),
                 local.display()
-            ))
+            );
+            if let Some(note) = displaced {
+                reply.push_str(&format!("\nNote: {note}"));
+            }
+            Ok(reply)
         }
         "surface_push" | "surface_pull" => {
             let what = string("what")?;

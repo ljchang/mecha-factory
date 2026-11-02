@@ -315,7 +315,18 @@ pub fn hours_displaced(
             ))
         }
     };
-    let before = kept.availability_toml()?.ok()?;
+    // A serialisation failure is not "nothing to say" either: the hours
+    // could not be compared, so they may be going unread.
+    let before = match kept.availability_toml()? {
+        Ok(text) => text,
+        Err(e) => {
+            return Some(format!(
+                "home's hours for `{}` could not be read back ({e}), so whatever they \
+                 were, this push's replace them",
+                pushed.id
+            ))
+        }
+    };
     // A booking pushed over as a form: the hours are replaced by none, which
     // is the displacement this exists to name, not a case to skip.
     let Some(after) = pushed.availability_toml() else {
@@ -325,7 +336,16 @@ pub fn hours_displaced(
             pushed.id
         ));
     };
-    let after = after.ok()?;
+    let after = match after {
+        Ok(text) => text,
+        Err(e) => {
+            return Some(format!(
+                "the pushed hours for `{}` could not be compared with home's ({e}); \
+                 home's are replaced by them",
+                pushed.id
+            ))
+        }
+    };
     if before == after {
         return None;
     }
@@ -340,6 +360,23 @@ pub fn hours_displaced(
          pushed hours.",
         pushed.id
     ))
+}
+
+/// Record a pushed manifest and say what it displaced — the one call both
+/// push paths make (the CLI's `type push` and the MCP `type_push` tool), so
+/// the note cannot be dropped by one of them. The tool is the path that
+/// needs it most: an agent pushing a working copy taken before an hours edit
+/// is the push no person is reading. Missing is the only silent case; a home
+/// copy that would not read is passed on for the note to say so.
+pub fn record_push(manifest: &str, pushed: &RequestType) -> Result<(PathBuf, Option<String>)> {
+    let path = types_dir()?.join(format!("{}.toml", pushed.id));
+    let kept = match std::fs::read_to_string(&path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        read => Some(read),
+    };
+    let note = hours_displaced(kept, pushed);
+    let local = remember_type(manifest, &pushed.id)?;
+    Ok((local, note))
 }
 
 /// Record a pushed manifest, so a later drain can validate against it.
@@ -872,5 +909,31 @@ field = "requester_email"
         let unreadable = Some(Err(std::io::Error::other("permission denied")));
         let said = hours_displaced(unreadable, &pushed).expect("unreadable is named");
         assert!(said.contains("could not be read"), "{said}");
+    }
+
+    #[test]
+    fn recording_a_push_notes_hours_set_at_home_on_either_path() {
+        let _env = crate::env_lock();
+        let home = tempfile::tempdir().unwrap();
+        std::env::set_var("MECHA_HOME", home.path());
+        let base = include_str!("../../mecha-manifest/types/book.toml");
+        let pushed = RequestType::from_toml(base).unwrap();
+        // First push: nothing kept, nothing to say.
+        let (local, note) = record_push(base, &pushed).unwrap();
+        assert!(note.is_none(), "{note:?}");
+        // Hours edited in place at home, then the same working copy pushed
+        // again (what an agent with the type_push tool would do): named.
+        let edited = base.replacen("start = \"13:00\"", "start = \"14:00\"", 1);
+        std::fs::write(&local, &edited).unwrap();
+        let (_, note) = record_push(base, &pushed).unwrap();
+        assert!(note
+            .expect("the displaced hours are named")
+            .contains("differed"));
+        assert_eq!(
+            std::fs::read_to_string(&local).unwrap(),
+            base,
+            "recorded as pushed"
+        );
+        std::env::remove_var("MECHA_HOME");
     }
 }

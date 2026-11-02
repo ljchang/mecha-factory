@@ -24,6 +24,13 @@ PATH="$HOME/.cargo/bin:$PATH"
 
 ACCOUNT="${MECHA_BOOKINGS_ACCOUNT:-dartmouth}"
 MANIFEST="${MECHA_BOOK_MANIFEST:-$HOME/.mecha/factory/types/book.toml}"
+# The old variable named a standalone policy file this script no longer
+# reads. Set and ignored would be a silent fallback to the default path, so
+# it refuses to start instead.
+if [ -n "${MECHA_BOOK_POLICY:-}" ]; then
+  echo "MECHA_BOOK_POLICY is retired: the slots come from the manifest now — set MECHA_BOOK_MANIFEST (default ~/.mecha/factory/types/book.toml)" >&2
+  exit 2
+fi
 
 while :; do
   # If the box answers an empty drain instantly — a binary that predates
