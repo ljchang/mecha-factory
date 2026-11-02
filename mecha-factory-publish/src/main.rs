@@ -449,6 +449,23 @@ enum SlotsAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// What a draft manifest would offer, from the busy time the last push
+    /// saw — no provider call, nothing pushed, nothing written.
+    ///
+    /// The editor's preview: a person changing their hours sees the page
+    /// their change would serve before it serves it. The busy time is the
+    /// pipeline's own cache (fifteen minutes old at most while the timer
+    /// runs), and its age is in the answer rather than hidden behind it.
+    Preview {
+        /// The instrument whose cached busy time to read.
+        id: String,
+        /// The draft booking manifest. Checked whole, as `type check` would.
+        #[arg(long)]
+        manifest: PathBuf,
+        /// One JSON object, for a program rather than a person.
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -751,6 +768,9 @@ fn main() -> Result<()> {
             manifest,
             dry_run,
         }) => slots_push_command(&id, policy.as_deref(), manifest.as_deref(), dry_run)?,
+        Command::Slots(SlotsAction::Preview { id, manifest, json }) => {
+            slots_preview_command(&id, &manifest, json)?
+        }
         Command::Dataset(action) => dataset_command(action)?,
         Command::Polls(action) => polls_command(action)?,
         Command::Profile(action) => record_command(Record::Profile, action)?,
@@ -1874,6 +1894,72 @@ fn slots_push_command(
     Ok(())
 }
 
+/// `slots preview`: the draft's slots over the pipeline's cached busy time.
+fn slots_preview_command(id: &str, manifest: &std::path::Path, json: bool) -> Result<()> {
+    use mecha_factory_publish::availability::{self, Interval};
+
+    let (path, policy_text) = slots_policy_source(id, None, Some(manifest))?;
+    let policy = availability::Policy::from_toml(&policy_text)
+        .with_context(|| format!("{}", path.display()))?;
+    let Some(cached) = mecha_factory_publish::lifecycle::cached_freebusy(id)? else {
+        bail!(
+            "the slots pipeline has never pushed `{id}` on this machine, so there is no busy \
+             time to preview against — check mecha-slots.timer"
+        );
+    };
+    #[derive(serde::Deserialize)]
+    struct FreebusyDoc {
+        generated_at: chrono::DateTime<chrono::Utc>,
+        time_max: chrono::DateTime<chrono::Utc>,
+        busy: Vec<Interval>,
+    }
+    let doc: FreebusyDoc = serde_json::from_value(cached.freebusy)
+        .context("the cached freebusy is not `mecha-mail freebusy --json` output")?;
+    // The same refusal the push makes, for the same reason: past the end of
+    // the busy data, "nothing known" would preview as "nothing busy".
+    let horizon_end = doc.generated_at + chrono::Duration::days(i64::from(policy.horizon_days));
+    anyhow::ensure!(
+        doc.time_max >= horizon_end,
+        "the cached busy time ends {}, short of a {}-day horizon — the pipeline fetches \
+         fewer days than this draft would offer",
+        doc.time_max,
+        policy.horizon_days
+    );
+    let holds = mecha_factory_publish::lifecycle::open_holds()?;
+    let slots = availability::availability(&policy, &doc.busy, &holds, &[], doc.generated_at);
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "instrument": id,
+                "timezone": policy.timezone.name(),
+                "horizon_days": policy.horizon_days,
+                "busy_generated_at": doc.generated_at,
+                "last_pushed_at": cached.cached_at,
+                "held_by_polls": holds.len(),
+                "slots": slots,
+            })
+        );
+        return Ok(());
+    }
+    println!(
+        "{} slot(s) for `{id}` over {} days, from busy time generated {} (last push {})",
+        slots.len(),
+        policy.horizon_days,
+        doc.generated_at,
+        cached.cached_at
+    );
+    for slot in &slots {
+        let local = slot.start.with_timezone(&policy.timezone);
+        println!(
+            "  {}  {:>3} min",
+            local.format("%a %Y-%m-%d %H:%M %Z"),
+            slot.duration_minutes
+        );
+    }
+    Ok(())
+}
+
 /// Where the slot pipeline's policy comes from, as the standalone text a
 /// later poll re-parses from the freebusy cache: the booking manifest's own
 /// `[availability]`, or a policy file beside it.
@@ -2611,6 +2697,15 @@ mod surface {
                  timer to publish availability, and everything it refuses it refuses \
                  loudly because the failure mode is offering strangers time the user does \
                  not have.",
+            ),
+        ),
+        (
+            "slots preview",
+            NotATool(
+                "the owner's editor reads it to show a draft of their hours before saving \
+                 them; it answers from the owner's whole busy calendar, and the hours are \
+                 the owner's to write — no model authors availability, so a model has no \
+                 draft to preview.",
             ),
         ),
         (
