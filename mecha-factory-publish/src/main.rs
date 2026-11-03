@@ -1301,9 +1301,11 @@ fn type_command(action: TypeAction) -> Result<()> {
         }
         TypeAction::Starters => {
             for (name, text) in mecha_manifest::starters::STARTERS {
+                // Compile-time data a test parses: a starter that stopped
+                // parsing is a bug to say, not a nameless row to list.
                 let title = mecha_manifest::RequestType::from_toml(text)
                     .map(|t| t.title)
-                    .unwrap_or_default();
+                    .with_context(|| format!("starter `{name}` does not parse"))?;
                 println!("{name}\t{title}");
             }
         }
@@ -1919,6 +1921,11 @@ fn slots_push_command(
 }
 
 /// `type render`: the page a manifest serves, for an editor's preview.
+///
+/// The markup, not the behaviour: the page's script is not returned, so a
+/// field shown only after an earlier answer (`show_when`, steps) appears in
+/// the markup unconditionally, as it does with JavaScript off. An editor
+/// showing this says so.
 /// A booking renders its own windows against an empty calendar (the
 /// gallery's convention), so the preview needs no box and no credential.
 fn render_type_json(text: &str, now: chrono::DateTime<chrono::Utc>) -> Result<serde_json::Value> {
@@ -2947,11 +2954,17 @@ mod tests {
             let out = super::render_type_json(text, chrono::Utc::now())
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(out["id"], *name);
-            assert!(
-                out["html"].as_str().unwrap().contains("<form") || out["kind"] == "booking",
-                "{name}"
-            );
+            // Both kinds render a form; only the booking branch renders the
+            // week's slots, computed from the starter's own windows.
+            assert!(out["html"].as_str().unwrap().contains("<form"), "{name}");
             assert!(!out["style"].as_str().unwrap().is_empty(), "{name}");
+            if *name == "book" {
+                assert_eq!(out["kind"], "booking");
+                assert!(
+                    out["html"].as_str().unwrap().contains("data-utc"),
+                    "a slot rendered: {name}"
+                );
+            }
         }
     }
 

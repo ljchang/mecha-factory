@@ -197,3 +197,22 @@ fn the_letter_starter_asks_for_a_cv_and_can_be_served() {
     assert!(letter.has_file_fields());
     assert!(letter.attachment_budget() > 0);
 }
+
+/// The embedded list is the directory: a starter added to `types/` and not
+/// to `STARTERS` would be one `type starters` and `type new` never offer.
+#[test]
+fn every_starter_file_is_offered_and_every_offered_starter_is_a_file() {
+    use std::collections::BTreeSet;
+    let files: BTreeSet<String> = std::fs::read_dir(types_dir())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("toml"))
+        .map(|p| p.file_stem().unwrap().to_string_lossy().into_owned())
+        .collect();
+    let offered: BTreeSet<String> = mecha_manifest::starters::STARTERS
+        .iter()
+        .map(|(n, _)| n.to_string())
+        .collect();
+    assert_eq!(offered, files);
+}
