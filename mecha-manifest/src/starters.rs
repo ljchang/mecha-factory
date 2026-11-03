@@ -54,7 +54,15 @@ pub fn starter_as(name: &str, id: &str) -> Result<String> {
     }
     let out = out.join("\n") + "\n";
     let parsed = RequestType::from_toml(&out)?;
-    debug_assert_eq!(parsed.id, id);
+    // Checked in the build that ships, not only in debug: replacing "the
+    // first `id = ` line" is a promise about the starter's layout, and a
+    // starter whose first such line sat inside a string would keep its id.
+    if parsed.id != id {
+        return Err(ManifestError::invalid(format!(
+            "starter `{name}` kept its id `{}` instead of taking `{id}`",
+            parsed.id
+        )));
+    }
     Ok(out)
 }
 

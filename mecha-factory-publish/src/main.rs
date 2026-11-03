@@ -1972,6 +1972,10 @@ fn render_type_json(
         return Ok(serde_json::json!({
             "id": parsed.id, "kind": "booking", "html": page.html, "style": page.style,
             "assets": ASSETS,
+            // The week shown is the manifest's own windows against an empty
+            // calendar — not what the live page offers, which is the pushed
+            // slots less busy time, holds and bookings (`slots preview`).
+            "slots": "the manifest's windows against an empty calendar, not the live page's",
         }));
     }
     let page = parsed.form(&mecha_manifest::FormOptions {
