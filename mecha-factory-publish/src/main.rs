@@ -528,6 +528,34 @@ enum TypeAction {
         #[arg(long)]
         handle: Option<String>,
     },
+    /// A manifest's page as markup, for an editor's preview — one JSON
+    /// object, `{id, kind, html, style, assets, servable, refusal}`, plus
+    /// `slots_source: "manifest_windows"` for a booking page (its week is the manifest's windows against
+    /// an empty calendar, not the live page's). `servable` is a boolean and
+    /// `refusal` why the box would not serve it (`type push` refuses the
+    /// same), or null. Nothing is uploaded. The form's action is `#`, which
+    /// posts to whatever page displays it, so show it with forms disabled (a
+    /// sandboxed frame). The markup's stylesheet and script references point at files
+    /// this does not write: inline `style` and drop them (`assets` says so).
+    Render {
+        manifest: PathBuf,
+        /// The palette to render in — match the box's `theme`. An unknown
+        /// name falls back to the default, as the box's config does.
+        #[arg(long, default_value = "nocturne")]
+        theme: String,
+    },
+    /// The starter manifests a new form can begin as: `name<TAB>title<TAB>`
+    /// `ready`, or what it needs before it can be published.
+    Starters,
+    /// Print a starter re-identified as `id`, comments kept — the first
+    /// draft of a new form. Writes nothing.
+    New {
+        /// A name from `type starters`.
+        starter: String,
+        /// The new form's id: lowercase, digits, `-`, `_`. It names the URL.
+        #[arg(long)]
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1278,6 +1306,37 @@ fn type_command(action: TypeAction) -> Result<()> {
             );
         }
 
+        TypeAction::Render { manifest, theme } => {
+            let text = std::fs::read_to_string(&manifest)
+                .with_context(|| format!("reading {}", manifest.display()))?;
+            println!(
+                "{}",
+                render_type_json(
+                    &text,
+                    &mecha_manifest::Theme::by_name(&theme),
+                    chrono::Utc::now()
+                )?
+            );
+        }
+        TypeAction::Starters => {
+            for (name, text) in mecha_manifest::starters::STARTERS {
+                // Compile-time data a test parses: a starter that stopped
+                // parsing is a bug to say, not a nameless row to list.
+                let parsed = mecha_manifest::RequestType::from_toml(text)
+                    .with_context(|| format!("starter `{name}` does not parse"))?;
+                // Whether the first draft can be published as printed: two
+                // ship without [verification], and a picker that offers all
+                // five as equal says more than it established.
+                let ready = match parsed.servable() {
+                    Ok(_) => "ready".to_string(),
+                    Err(e) => format!("needs work before publishing: {e}"),
+                };
+                println!("{name}\t{}\t{ready}", parsed.title);
+            }
+        }
+        TypeAction::New { starter, id } => {
+            print!("{}", mecha_manifest::starters::starter_as(&starter, &id)?);
+        }
         TypeAction::List => {
             let Some(remote) = remote::Remote::configured()? else {
                 println!("no factory is configured (~/.mecha/factory/config.toml)");
@@ -1884,6 +1943,78 @@ fn slots_push_command(
         }
     );
     Ok(())
+}
+
+/// `type render`: the page a manifest serves, for an editor's preview.
+///
+/// The markup, not the behaviour: the page's script is not returned, so a
+/// field shown only after an earlier answer (`show_when`, steps) appears in
+/// the markup unconditionally, as it does with JavaScript off. An editor
+/// showing this says so.
+/// A booking renders its own windows against an empty calendar (the
+/// gallery's convention), so the preview needs no box and no credential.
+fn render_type_json(
+    text: &str,
+    theme: &mecha_manifest::Theme,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<serde_json::Value> {
+    // The gallery's choice, and no live route: `/s/<handle>/<id>` is
+    // someone's page on the gate. `#` is not "nowhere" — a POST to it goes to
+    // the displaying document's own URL — so an editor that shows this must
+    // forbid forms itself (mecha's preview frame is `sandbox=""`).
+    const ACTION: &str = "#";
+    // The markup's asset references are relative and nothing is written
+    // beside it, so the contract is in the payload, not a convention.
+    const ASSETS: &str = "not provided: inline `style`, drop <link> and <script>";
+    let parsed = mecha_manifest::RequestType::from_toml(text)?;
+    // Parsing is not serving: a form with no verification renders, but the
+    // box answers 404 for it and `type push` refuses it. Said in the answer,
+    // as `type check` says NOT SERVABLE, rather than previewed as if live.
+    // A boolean and a separate reason, never `true | "why"`: a refusal
+    // string is truthy, and the one draft that must not look publishable
+    // would pass an editor's `if (preview.servable)`.
+    let (servable, refusal) = match parsed.servable() {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
+    };
+    if parsed.kind == mecha_manifest::RequestKind::Booking {
+        let policy = parsed
+            .availability_policy()
+            .context("a booking manifest has [availability]")??;
+        let slots = mecha_manifest::availability::availability(&policy, &[], &[], &[], now);
+        let page = parsed.booking_page(
+            &slots,
+            &mecha_manifest::BookingOptions {
+                action: ACTION.into(),
+                now,
+                theme: *theme,
+                ..mecha_manifest::BookingOptions::default()
+            },
+        )?;
+        return Ok(serde_json::json!({
+            "id": parsed.id, "kind": "booking", "html": page.html, "style": page.style,
+            "assets": ASSETS,
+            // The week shown is the manifest's own windows against an empty
+            // calendar — not what the live page offers, which is the pushed
+            // slots less busy time, holds and bookings (`slots preview`).
+            // A value a program can branch on, not a sentence: the week is
+            // the manifest's own windows, never the live page's slots.
+            "slots_source": "manifest_windows",
+            "servable": servable,
+            "refusal": refusal,
+        }));
+    }
+    let page = parsed.form(&mecha_manifest::FormOptions {
+        action: ACTION.into(),
+        theme: *theme,
+        ..mecha_manifest::FormOptions::default()
+    });
+    Ok(serde_json::json!({
+        "id": parsed.id, "kind": "request", "html": page.html, "style": page.style,
+        "assets": ASSETS,
+        "servable": servable,
+        "refusal": refusal,
+    }))
 }
 
 /// `slots preview`: the draft's slots over the pipeline's cached busy time.
@@ -2645,6 +2776,28 @@ mod surface {
         ("type push", Tools(&["type_push"])),
         ("type list", Tools(&["type_list"])),
         ("type check", Tools(&["type_check"])),
+        (
+            "type render",
+            NotATool(
+                "the owner's form editor reads it to preview a draft before publishing; \
+                 `type_check` already tells a model what a manifest is, and the page's \
+                 HTML adds nothing an agent acts on.",
+            ),
+        ),
+        (
+            "type starters",
+            NotATool(
+                "a list for the owner's 'new form' picker; a model starting a form \
+                 would be authoring a public surface, which is the owner's to do.",
+            ),
+        ),
+        (
+            "type new",
+            NotATool(
+                "the first draft of a new public form, for the owner's editor; a model \
+                 does not author the forms strangers fill in.",
+            ),
+        ),
         // The personal public surface. An agent reaches all of it: writing
         // somebody's own pages from their own files is the errand worth
         // delegating, and the release scope is what bounds it. One
@@ -2853,6 +3006,79 @@ mod tests {
         // The cache is refreshed only by the timer, so its coverage refusal
         // names the timer's --days rather than a command that cannot help.
         refuse(Some(cache(fresh, 7)), "mecha-slots.service");
+    }
+
+    /// `type render` answers for both kinds, from the starters themselves.
+    #[test]
+    fn render_answers_for_a_form_and_a_booking_page() {
+        for (name, text) in mecha_manifest::starters::STARTERS {
+            let out = super::render_type_json(
+                text,
+                &mecha_manifest::Theme::by_name("nocturne"),
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(out["id"], *name);
+            // Both kinds render a form; only the booking branch renders the
+            // week's slots, computed from the starter's own windows.
+            assert!(out["html"].as_str().unwrap().contains("<form"), "{name}");
+            assert!(
+                out["html"].as_str().unwrap().contains("action=\"#\""),
+                "a preview submits nowhere: {name}"
+            );
+            assert!(!out["style"].as_str().unwrap().is_empty(), "{name}");
+            // The answer is the factory's own verdict, whichever it is (the
+            // lab-application starter ships without [verification]).
+            let verdict = mecha_manifest::RequestType::from_toml(text)
+                .unwrap()
+                .servable()
+                .is_ok();
+            assert_eq!(out["servable"], verdict, "{name}");
+            assert_eq!(
+                out["refusal"].is_string(),
+                !verdict,
+                "{name}: {}",
+                out["refusal"]
+            );
+            if *name == "book" {
+                assert_eq!(out["kind"], "booking");
+                assert!(
+                    out["html"].as_str().unwrap().contains("data-utc"),
+                    "a slot rendered: {name}"
+                );
+            }
+        }
+    }
+
+    /// A form the box would refuse renders, and says why instead of passing
+    /// as live.
+    #[test]
+    fn render_says_when_the_box_would_not_serve_the_form() {
+        let meeting = mecha_manifest::starters::STARTERS
+            .iter()
+            .find(|(n, _)| *n == "meeting")
+            .unwrap()
+            .1;
+        let start = meeting
+            .find("[verification]")
+            .expect("the starter verifies");
+        let rest = &meeting[start + "[verification]".len()..];
+        let end = rest
+            .find("\n[")
+            .map_or(meeting.len(), |i| start + "[verification]".len() + i);
+        let unverified = format!("{}{}", &meeting[..start], &meeting[end..]);
+        let out = super::render_type_json(
+            &unverified,
+            &mecha_manifest::Theme::by_name("nocturne"),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert_eq!(out["servable"], false);
+        assert!(
+            out["refusal"].as_str().unwrap().contains("verification"),
+            "{}",
+            out["refusal"]
+        );
     }
 
     /// `slots push` takes its policy from exactly one place, and a manifest
