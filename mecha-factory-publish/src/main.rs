@@ -529,13 +529,13 @@ enum TypeAction {
         handle: Option<String>,
     },
     /// A manifest's page as markup, for an editor's preview — one JSON
-    /// object, `{id, kind, html, style, assets, servable}`, plus `slots` for
-    /// a booking page (its week is the manifest's windows against an empty
-    /// calendar, not the live page's). `servable` is `true`, or the reason
-    /// the box would refuse to serve it (`type push` refuses the same). Nothing is uploaded and
-    /// nothing is submittable (the form's action is `#`); a booking page
-    /// renders its own windows against an empty calendar, as the gallery
-    /// does. The markup's stylesheet and script references point at files
+    /// object, `{id, kind, html, style, assets, servable, refusal}`, plus
+    /// `slots_source: "manifest_windows"` for a booking page (its week is the manifest's windows against
+    /// an empty calendar, not the live page's). `servable` is a boolean and
+    /// `refusal` why the box would not serve it (`type push` refuses the
+    /// same), or null. Nothing is uploaded. The form's action is `#`, which
+    /// posts to whatever page displays it, so show it with forms disabled (a
+    /// sandboxed frame). The markup's stylesheet and script references point at files
     /// this does not write: inline `style` and drop them (`assets` says so).
     Render {
         manifest: PathBuf,
@@ -1958,8 +1958,10 @@ fn render_type_json(
     theme: &mecha_manifest::Theme,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<serde_json::Value> {
-    // Inert, as the gallery's is: a preview is never submitted, and any real
-    // path (`/s/<handle>/<id>`) is someone's live route on the gate.
+    // The gallery's choice, and no live route: `/s/<handle>/<id>` is
+    // someone's page on the gate. `#` is not "nowhere" — a POST to it goes to
+    // the displaying document's own URL — so an editor that shows this must
+    // forbid forms itself (mecha's preview frame is `sandbox=""`).
     const ACTION: &str = "#";
     // The markup's asset references are relative and nothing is written
     // beside it, so the contract is in the payload, not a convention.
@@ -1968,9 +1970,12 @@ fn render_type_json(
     // Parsing is not serving: a form with no verification renders, but the
     // box answers 404 for it and `type push` refuses it. Said in the answer,
     // as `type check` says NOT SERVABLE, rather than previewed as if live.
-    let servable = match parsed.servable() {
-        Ok(_) => serde_json::Value::Bool(true),
-        Err(e) => serde_json::Value::String(e.to_string()),
+    // A boolean and a separate reason, never `true | "why"`: a refusal
+    // string is truthy, and the one draft that must not look publishable
+    // would pass an editor's `if (preview.servable)`.
+    let (servable, refusal) = match parsed.servable() {
+        Ok(_) => (true, None),
+        Err(e) => (false, Some(e.to_string())),
     };
     if parsed.kind == mecha_manifest::RequestKind::Booking {
         let policy = parsed
@@ -1992,8 +1997,11 @@ fn render_type_json(
             // The week shown is the manifest's own windows against an empty
             // calendar — not what the live page offers, which is the pushed
             // slots less busy time, holds and bookings (`slots preview`).
-            "slots": "the manifest's windows against an empty calendar, not the live page's",
+            // A value a program can branch on, not a sentence: the week is
+            // the manifest's own windows, never the live page's slots.
+            "slots_source": "manifest_windows",
             "servable": servable,
+            "refusal": refusal,
         }));
     }
     let page = parsed.form(&mecha_manifest::FormOptions {
@@ -2005,6 +2013,7 @@ fn render_type_json(
         "id": parsed.id, "kind": "request", "html": page.html, "style": page.style,
         "assets": ASSETS,
         "servable": servable,
+        "refusal": refusal,
     }))
 }
 
@@ -3024,11 +3033,12 @@ mod tests {
                 .unwrap()
                 .servable()
                 .is_ok();
+            assert_eq!(out["servable"], verdict, "{name}");
             assert_eq!(
-                out["servable"] == true,
-                verdict,
+                out["refusal"].is_string(),
+                !verdict,
                 "{name}: {}",
-                out["servable"]
+                out["refusal"]
             );
             if *name == "book" {
                 assert_eq!(out["kind"], "booking");
@@ -3063,7 +3073,12 @@ mod tests {
             chrono::Utc::now(),
         )
         .unwrap();
-        assert!(out["servable"].is_string(), "{}", out["servable"]);
+        assert_eq!(out["servable"], false);
+        assert!(
+            out["refusal"].as_str().unwrap().contains("verification"),
+            "{}",
+            out["refusal"]
+        );
     }
 
     /// `slots push` takes its policy from exactly one place, and a manifest
