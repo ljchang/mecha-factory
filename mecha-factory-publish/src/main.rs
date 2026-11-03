@@ -529,7 +529,10 @@ enum TypeAction {
         handle: Option<String>,
     },
     /// A manifest's page as markup, for an editor's preview — one JSON
-    /// object, `{id, kind, html, style, assets}`. Nothing is uploaded and
+    /// object, `{id, kind, html, style, assets, servable}`, plus `slots` for
+    /// a booking page (its week is the manifest's windows against an empty
+    /// calendar, not the live page's). `servable` is `true`, or the reason
+    /// the box would refuse to serve it (`type push` refuses the same). Nothing is uploaded and
     /// nothing is submittable (the form's action is `#`); a booking page
     /// renders its own windows against an empty calendar, as the gallery
     /// does. The markup's stylesheet and script references point at files
@@ -1955,6 +1958,13 @@ fn render_type_json(
     // beside it, so the contract is in the payload, not a convention.
     const ASSETS: &str = "not provided: inline `style`, drop <link> and <script>";
     let parsed = mecha_manifest::RequestType::from_toml(text)?;
+    // Parsing is not serving: a form with no verification renders, but the
+    // box answers 404 for it and `type push` refuses it. Said in the answer,
+    // as `type check` says NOT SERVABLE, rather than previewed as if live.
+    let servable = match parsed.servable() {
+        Ok(_) => serde_json::Value::Bool(true),
+        Err(e) => serde_json::Value::String(e.to_string()),
+    };
     if parsed.kind == mecha_manifest::RequestKind::Booking {
         let policy = parsed
             .availability_policy()
@@ -1976,6 +1986,7 @@ fn render_type_json(
             // calendar — not what the live page offers, which is the pushed
             // slots less busy time, holds and bookings (`slots preview`).
             "slots": "the manifest's windows against an empty calendar, not the live page's",
+            "servable": servable,
         }));
     }
     let page = parsed.form(&mecha_manifest::FormOptions {
@@ -1986,6 +1997,7 @@ fn render_type_json(
     Ok(serde_json::json!({
         "id": parsed.id, "kind": "request", "html": page.html, "style": page.style,
         "assets": ASSETS,
+        "servable": servable,
     }))
 }
 
@@ -2999,6 +3011,18 @@ mod tests {
                 "a preview submits nowhere: {name}"
             );
             assert!(!out["style"].as_str().unwrap().is_empty(), "{name}");
+            // The answer is the factory's own verdict, whichever it is (the
+            // lab-application starter ships without [verification]).
+            let verdict = mecha_manifest::RequestType::from_toml(text)
+                .unwrap()
+                .servable()
+                .is_ok();
+            assert_eq!(
+                out["servable"] == true,
+                verdict,
+                "{name}: {}",
+                out["servable"]
+            );
             if *name == "book" {
                 assert_eq!(out["kind"], "booking");
                 assert!(
@@ -3007,6 +3031,32 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A form the box would refuse renders, and says why instead of passing
+    /// as live.
+    #[test]
+    fn render_says_when_the_box_would_not_serve_the_form() {
+        let meeting = mecha_manifest::starters::STARTERS
+            .iter()
+            .find(|(n, _)| *n == "meeting")
+            .unwrap()
+            .1;
+        let start = meeting
+            .find("[verification]")
+            .expect("the starter verifies");
+        let rest = &meeting[start + "[verification]".len()..];
+        let end = rest
+            .find("\n[")
+            .map_or(meeting.len(), |i| start + "[verification]".len() + i);
+        let unverified = format!("{}{}", &meeting[..start], &meeting[end..]);
+        let out = super::render_type_json(
+            &unverified,
+            &mecha_manifest::Theme::by_name("nocturne"),
+            chrono::Utc::now(),
+        )
+        .unwrap();
+        assert!(out["servable"].is_string(), "{}", out["servable"]);
     }
 
     /// `slots push` takes its policy from exactly one place, and a manifest
