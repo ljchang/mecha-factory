@@ -528,11 +528,19 @@ enum TypeAction {
         #[arg(long)]
         handle: Option<String>,
     },
-    /// The page a manifest would serve, as one JSON object — `{id, kind,
-    /// html, style}` — for an editor to preview before publishing. Nothing
-    /// is uploaded; a booking page renders its own windows against an empty
-    /// calendar, as the gallery does.
-    Render { manifest: PathBuf },
+    /// A manifest's page as markup, for an editor's preview — one JSON
+    /// object, `{id, kind, html, style, assets}`. Nothing is uploaded and
+    /// nothing is submittable (the form's action is `#`); a booking page
+    /// renders its own windows against an empty calendar, as the gallery
+    /// does. The markup's stylesheet and script references point at files
+    /// this does not write: inline `style` and drop them (`assets` says so).
+    Render {
+        manifest: PathBuf,
+        /// The palette to render in — match the box's `theme`. An unknown
+        /// name falls back to the default, as the box's config does.
+        #[arg(long, default_value = "nocturne")]
+        theme: String,
+    },
     /// The starter manifests a new form can begin as.
     Starters,
     /// Print a starter re-identified as `id`, comments kept — the first
@@ -1294,10 +1302,17 @@ fn type_command(action: TypeAction) -> Result<()> {
             );
         }
 
-        TypeAction::Render { manifest } => {
+        TypeAction::Render { manifest, theme } => {
             let text = std::fs::read_to_string(&manifest)
                 .with_context(|| format!("reading {}", manifest.display()))?;
-            println!("{}", render_type_json(&text, chrono::Utc::now())?);
+            println!(
+                "{}",
+                render_type_json(
+                    &text,
+                    &mecha_manifest::Theme::by_name(&theme),
+                    chrono::Utc::now()
+                )?
+            );
         }
         TypeAction::Starters => {
             for (name, text) in mecha_manifest::starters::STARTERS {
@@ -1928,7 +1943,17 @@ fn slots_push_command(
 /// showing this says so.
 /// A booking renders its own windows against an empty calendar (the
 /// gallery's convention), so the preview needs no box and no credential.
-fn render_type_json(text: &str, now: chrono::DateTime<chrono::Utc>) -> Result<serde_json::Value> {
+fn render_type_json(
+    text: &str,
+    theme: &mecha_manifest::Theme,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<serde_json::Value> {
+    // Inert, as the gallery's is: a preview is never submitted, and any real
+    // path (`/s/<handle>/<id>`) is someone's live route on the gate.
+    const ACTION: &str = "#";
+    // The markup's asset references are relative and nothing is written
+    // beside it, so the contract is in the payload, not a convention.
+    const ASSETS: &str = "not provided: inline `style`, drop <link> and <script>";
     let parsed = mecha_manifest::RequestType::from_toml(text)?;
     if parsed.kind == mecha_manifest::RequestKind::Booking {
         let policy = parsed
@@ -1938,21 +1963,25 @@ fn render_type_json(text: &str, now: chrono::DateTime<chrono::Utc>) -> Result<se
         let page = parsed.booking_page(
             &slots,
             &mecha_manifest::BookingOptions {
-                action: format!("/s/preview/{}", parsed.id),
+                action: ACTION.into(),
                 now,
+                theme: theme.clone(),
                 ..mecha_manifest::BookingOptions::default()
             },
         )?;
         return Ok(serde_json::json!({
             "id": parsed.id, "kind": "booking", "html": page.html, "style": page.style,
+            "assets": ASSETS,
         }));
     }
     let page = parsed.form(&mecha_manifest::FormOptions {
-        action: format!("/r/{}", parsed.id),
+        action: ACTION.into(),
+        theme: theme.clone(),
         ..mecha_manifest::FormOptions::default()
     });
     Ok(serde_json::json!({
         "id": parsed.id, "kind": "request", "html": page.html, "style": page.style,
+        "assets": ASSETS,
     }))
 }
 
@@ -2951,12 +2980,20 @@ mod tests {
     #[test]
     fn render_answers_for_a_form_and_a_booking_page() {
         for (name, text) in mecha_manifest::starters::STARTERS {
-            let out = super::render_type_json(text, chrono::Utc::now())
-                .unwrap_or_else(|e| panic!("{name}: {e}"));
+            let out = super::render_type_json(
+                text,
+                &mecha_manifest::Theme::by_name("nocturne"),
+                chrono::Utc::now(),
+            )
+            .unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(out["id"], *name);
             // Both kinds render a form; only the booking branch renders the
             // week's slots, computed from the starter's own windows.
             assert!(out["html"].as_str().unwrap().contains("<form"), "{name}");
+            assert!(
+                out["html"].as_str().unwrap().contains("action=\"#\""),
+                "a preview submits nowhere: {name}"
+            );
             assert!(!out["style"].as_str().unwrap().is_empty(), "{name}");
             if *name == "book" {
                 assert_eq!(out["kind"], "booking");
