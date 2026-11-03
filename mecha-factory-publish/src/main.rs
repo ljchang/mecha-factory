@@ -1965,7 +1965,7 @@ fn render_type_json(
             &mecha_manifest::BookingOptions {
                 action: ACTION.into(),
                 now,
-                theme: theme.clone(),
+                theme: *theme,
                 ..mecha_manifest::BookingOptions::default()
             },
         )?;
@@ -1976,7 +1976,7 @@ fn render_type_json(
     }
     let page = parsed.form(&mecha_manifest::FormOptions {
         action: ACTION.into(),
-        theme: theme.clone(),
+        theme: *theme,
         ..mecha_manifest::FormOptions::default()
     });
     Ok(serde_json::json!({
