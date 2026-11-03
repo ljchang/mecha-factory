@@ -544,7 +544,8 @@ enum TypeAction {
         #[arg(long, default_value = "nocturne")]
         theme: String,
     },
-    /// The starter manifests a new form can begin as.
+    /// The starter manifests a new form can begin as: `name<TAB>title<TAB>`
+    /// `ready`, or what it needs before it can be published.
     Starters,
     /// Print a starter re-identified as `id`, comments kept — the first
     /// draft of a new form. Writes nothing.
@@ -1321,10 +1322,16 @@ fn type_command(action: TypeAction) -> Result<()> {
             for (name, text) in mecha_manifest::starters::STARTERS {
                 // Compile-time data a test parses: a starter that stopped
                 // parsing is a bug to say, not a nameless row to list.
-                let title = mecha_manifest::RequestType::from_toml(text)
-                    .map(|t| t.title)
+                let parsed = mecha_manifest::RequestType::from_toml(text)
                     .with_context(|| format!("starter `{name}` does not parse"))?;
-                println!("{name}\t{title}");
+                // Whether the first draft can be published as printed: two
+                // ship without [verification], and a picker that offers all
+                // five as equal says more than it established.
+                let ready = match parsed.servable() {
+                    Ok(_) => "ready".to_string(),
+                    Err(e) => format!("needs work before publishing: {e}"),
+                };
+                println!("{name}\t{}\t{ready}", parsed.title);
             }
         }
         TypeAction::New { starter, id } => {
